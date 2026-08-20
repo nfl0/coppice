@@ -40,6 +40,7 @@ pub enum TransitionRejectReason {
     InvalidSequence,
     OversizedAddress,
     InvalidBondProof,
+    BondSpent,
     InvalidSignature,
 }
 impl CoppiceState {
@@ -54,6 +55,17 @@ impl CoppiceState {
     }
 }
 pub fn apply_operation(s: &mut CoppiceState, op: Operation, _: ChainPosition) -> Transition {
+    apply_operation_with_spent(s, None, op)
+}
+
+/// Applies an operation against the complete authenticated registry state.
+/// The spent-tag view is required for chain replay; the wrapper above remains
+/// useful for isolated transition tests.
+pub fn apply_operation_with_spent(
+    s: &mut CoppiceState,
+    spent: Option<&crate::spent::SpentTagTree>,
+    op: Operation,
+) -> Transition {
     match &op {
         Operation::Register {
             name,
@@ -72,8 +84,15 @@ pub fn apply_operation(s: &mut CoppiceState, op: Operation, _: ChainPosition) ->
             if crate::owner::parse_owner_key(*owner_pk).is_err() {
                 return Transition::Rejected(TransitionRejectReason::InvalidOwnerKey);
             }
-            if s.names.contains_key(name) {
-                return Transition::Rejected(TransitionRejectReason::DuplicateRegister);
+            if spent.is_some_and(|tree| tree.contains(bond_tag)) {
+                return Transition::Rejected(TransitionRejectReason::BondSpent);
+            }
+            if let Some(existing) = s.names.get(name) {
+                let available = existing.status == Status::Released
+                    || spent.is_some_and(|tree| tree.contains(&existing.bond_tag));
+                if !available {
+                    return Transition::Rejected(TransitionRejectReason::DuplicateRegister);
+                }
             }
             if !crate::bond::verify_registration_bond(
                 name,
@@ -108,7 +127,10 @@ pub fn apply_operation(s: &mut CoppiceState, op: Operation, _: ChainPosition) ->
             if old.status != Status::Active {
                 return Transition::Rejected(TransitionRejectReason::ReleasedName);
             }
-            if *sequence != old.sequence.saturating_add(1) {
+            if spent.is_some_and(|tree| tree.contains(&old.bond_tag)) {
+                return Transition::Rejected(TransitionRejectReason::BondSpent);
+            }
+            if old.sequence.checked_add(1) != Some(*sequence) {
                 return Transition::Rejected(TransitionRejectReason::InvalidSequence);
             }
             if address.len() > crate::constants::MAX_PAYLOAD_LEN {
@@ -132,7 +154,10 @@ pub fn apply_operation(s: &mut CoppiceState, op: Operation, _: ChainPosition) ->
             if old.status != Status::Active {
                 return Transition::Rejected(TransitionRejectReason::ReleasedName);
             }
-            if *sequence != old.sequence.saturating_add(1) {
+            if spent.is_some_and(|tree| tree.contains(&old.bond_tag)) {
+                return Transition::Rejected(TransitionRejectReason::BondSpent);
+            }
+            if old.sequence.checked_add(1) != Some(*sequence) {
                 return Transition::Rejected(TransitionRejectReason::InvalidSequence);
             }
             if !crate::owner::verify_operation(old.owner_pk, &op, &old) {
@@ -385,5 +410,71 @@ mod tests {
             Transition::Applied
         );
         assert_eq!(before, s.state_root());
+    }
+
+    #[test]
+    fn spent_bond_blocks_owner_actions_and_release_makes_name_available() {
+        let key = OwnerSigningKey::try_from([1; 32]).unwrap();
+        let owner_pk = owner_key_bytes(&(&key).into());
+        let bond = crate::bond::test_registration_bond("alice");
+        let mut state = CoppiceState::default();
+        state.names.insert(
+            "alice".into(),
+            NameRecord {
+                owner_pk,
+                bond_tag: bond.bond_tag,
+                sequence: 0,
+                address: b"UA_A".to_vec(),
+                status: Status::Active,
+            },
+        );
+        let previous = state.names["alice"].clone();
+        let mut update = Operation::Update {
+            name: "alice".into(),
+            sequence: 1,
+            address: b"UA_B".to_vec(),
+            signature: vec![],
+        };
+        let update_signature = sign_operation(&key, &update, &previous).unwrap();
+        if let Operation::Update { signature, .. } = &mut update {
+            *signature = update_signature;
+        }
+        let mut spent = crate::spent::SpentTagTree::default();
+        spent.insert_spent_tag(previous.bond_tag);
+        let root = state.state_root();
+        assert_eq!(
+            apply_operation_with_spent(&mut state, Some(&spent), update),
+            Transition::Rejected(TransitionRejectReason::BondSpent)
+        );
+        assert_eq!(root, state.state_root());
+
+        let spent_register = Operation::Register {
+            name: "alice".into(),
+            owner_pk,
+            bond_tag: bond.bond_tag,
+            bond_anchor: bond.anchor,
+            bond_proof: bond.proof.clone(),
+            address: b"UA_NEW".to_vec(),
+        };
+        assert_eq!(
+            apply_operation_with_spent(&mut state, Some(&spent), spent_register),
+            Transition::Rejected(TransitionRejectReason::BondSpent)
+        );
+
+        state.names.get_mut("alice").unwrap().status = Status::Released;
+        let register = Operation::Register {
+            name: "alice".into(),
+            owner_pk,
+            bond_tag: bond.bond_tag,
+            bond_anchor: bond.anchor,
+            bond_proof: bond.proof.clone(),
+            address: b"UA_NEW".to_vec(),
+        };
+        assert_eq!(
+            apply_operation_with_spent(&mut state, None, register),
+            Transition::Applied
+        );
+        assert_eq!(state.names["alice"].sequence, 0);
+        assert_eq!(state.names["alice"].address, b"UA_NEW");
     }
 }

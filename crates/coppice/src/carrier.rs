@@ -31,6 +31,7 @@ use zcash_protocol::{consensus::BlockHeight, memo::MemoBytes, value::Zatoshis};
 
 #[derive(Debug)]
 pub enum Error {
+    NotFound,
     Envelope,
     Build,
     Pczt,
@@ -384,16 +385,21 @@ pub fn build_coppice_payload(payload: &[u8], tag_bits: u8) -> Result<BuiltCoppic
     })
 }
 pub fn decode_bulletin(tx: &Transaction) -> Result<Operation, Error> {
-    let b = tx.ironwood_bundle().ok_or(Error::Envelope)?;
+    let b = tx.ironwood_bundle().ok_or(Error::NotFound)?;
     let mut frames = Vec::new();
+    let mut saw_coppice = false;
     for action in b.actions() {
         let domain = IronwoodDomain::for_action(action);
         if let Some((_, _, memo)) = try_note_decryption(&domain, &bulletin_ivk().prepare(), action)
         {
-            if let Ok(frame) = envelope::frame_from_memo(&memo) {
-                frames.push(frame);
+            if memo.starts_with(crate::DOMAIN) {
+                saw_coppice = true;
+                frames.push(envelope::frame_from_memo(&memo).map_err(|_| Error::Envelope)?);
             }
         }
+    }
+    if !saw_coppice {
+        return Err(Error::NotFound);
     }
     let p = envelope::reconstruct(frames).map_err(|_| Error::Envelope)?;
     envelope::decode_operation(&p).map_err(|_| Error::Envelope)

@@ -15,6 +15,7 @@ const LOCAL_STATE_VERSION: u8 = 1;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IncrementalError {
     NonSequentialHeight,
+    NonCanonicalOrder,
     InvalidTransaction,
     InvalidLocalState,
 }
@@ -75,17 +76,19 @@ impl IncrementalWallet {
         if height != expected {
             return Err(IncrementalError::NonSequentialHeight);
         }
+        let mut next_state = self.state.clone();
         let outcomes = transactions
             .iter()
             .enumerate()
             .map(|(index, tx)| {
-                process_serialized_transaction(&mut self.state, height, index as u32, tx)
+                process_serialized_transaction(&mut next_state, height, index as u32, tx)
                     .map(|result| result.outcome)
                     .map_err(|SerializedReplayError::InvalidTransaction| {
                         IncrementalError::InvalidTransaction
                     })
             })
             .collect::<Result<Vec<_>, _>>()?;
+        self.state = next_state;
         self.last_height = Some(height);
         Ok(outcomes)
     }
@@ -101,15 +104,22 @@ impl IncrementalWallet {
         if height != expected {
             return Err(IncrementalError::NonSequentialHeight);
         }
+        if transactions
+            .windows(2)
+            .any(|pair| pair[0].tx_index >= pair[1].tx_index)
+        {
+            return Err(IncrementalError::NonCanonicalOrder);
+        }
+        let mut next_state = self.state.clone();
         let mut outcomes = Vec::with_capacity(transactions.len());
         for tx in transactions {
             for nullifier in &tx.nullifiers {
-                self.state
+                next_state
                     .spent
                     .insert_nullifier(*nullifier)
                     .map_err(|_| IncrementalError::InvalidTransaction)?;
             }
-            if !crate::is_coppice_candidate(&tx.txid, self.state.tag_bits) {
+            if !crate::is_coppice_candidate(&tx.txid, next_state.tag_bits) {
                 outcomes.push(ReplayOutcome::NotCandidate);
                 continue;
             }
@@ -124,10 +134,11 @@ impl IncrementalWallet {
             if parsed.txid() != tx.txid {
                 return Err(IncrementalError::InvalidTransaction);
             }
-            let result = process_serialized_transaction(&mut self.state, height, tx.tx_index, raw)
+            let result = process_serialized_transaction(&mut next_state, height, tx.tx_index, raw)
                 .map_err(|_| IncrementalError::InvalidTransaction)?;
             outcomes.push(result.outcome);
         }
+        self.state = next_state;
         self.last_height = Some(height);
         Ok(outcomes)
     }
@@ -310,5 +321,42 @@ mod tests {
         );
         full.state.spent.insert_spent_tag(bob_bond.bond_tag);
         assert_eq!(full.resolve("bob"), LocalResolution::InactiveBondSpent);
+    }
+
+    #[test]
+    fn compact_block_failures_are_atomic_and_order_is_canonical() {
+        let mut wallet = IncrementalWallet::new(10, [0; 32], 12);
+        let initial = wallet.state.spent.root();
+        let invalid = CompactReplayTx {
+            tx_index: 0,
+            txid: zcash_primitives::transaction::TxId::from_bytes([0x80; 32]),
+            nullifiers: vec![[7; 32], [0xff; 32]],
+            candidate_transaction: None,
+        };
+        assert_eq!(
+            wallet.process_compact_block(10, &[invalid]),
+            Err(IncrementalError::InvalidTransaction)
+        );
+        assert_eq!(wallet.state.spent.root(), initial);
+        assert_eq!(wallet.last_height(), None);
+
+        let unordered = [
+            CompactReplayTx {
+                tx_index: 2,
+                txid: zcash_primitives::transaction::TxId::from_bytes([0x80; 32]),
+                nullifiers: vec![],
+                candidate_transaction: None,
+            },
+            CompactReplayTx {
+                tx_index: 1,
+                txid: zcash_primitives::transaction::TxId::from_bytes([0x81; 32]),
+                nullifiers: vec![],
+                candidate_transaction: None,
+            },
+        ];
+        assert_eq!(
+            wallet.process_compact_block(10, &unordered),
+            Err(IncrementalError::NonCanonicalOrder)
+        );
     }
 }

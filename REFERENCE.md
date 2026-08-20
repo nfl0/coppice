@@ -95,16 +95,19 @@ Interpret the canonical 32-byte `TxId` encoding from byte zero. The candidate ta
 
 ## Transitions
 
-REGISTER succeeds only for an absent canonical name whose embedded BondProof verifies against the
+REGISTER succeeds only for an available canonical name whose embedded BondProof verifies against the
 embedded `bond_anchor` and `bond_tag`, the supplied owner key, the registration name context, the
 fixed POC network, and minimum value 500000 zatoshis. The proof bytes are part of the canonical
 REGISTER payload; only the verified tag is retained in the NameRecord. Invalid proofs and tag,
 owner, name/context, network, minimum-value, or anchor mismatches deterministically reject the
-operation without changing state. A valid REGISTER creates sequence 0, Active, with the supplied
+operation without changing state. A name is available when absent, Released, or its current
+`bond_tag` is present in SpentTagTree. The new registration's own tag must not already be spent.
+A valid REGISTER replaces any available record and creates sequence 0, Active, with the supplied
 owner, verified bond tag, and address. Resolution reads the tag from this authenticated record and
-returns bond-inactive whenever it is present in SpentTagTree. UPDATE succeeds only for an existing Active name, sequence exactly
-current plus one, and a valid owner signature over the exact current record and new address.
-RELEASE has the same existence, Active, sequence and signature requirements and sets Released.
+returns bond-inactive whenever it is present in SpentTagTree. UPDATE succeeds only for an existing
+Active name with an unspent current bond, sequence exactly current plus one without overflow, and a
+valid owner signature over the exact current record and new address. RELEASE has the same
+existence, Active, unspent-bond, sequence and signature requirements and sets Released.
 All invalid operations leave every state byte unchanged and return a typed audit rejection.
 
 ## NameTree
@@ -143,8 +146,10 @@ CoppiceStateRoot = H(
 ```
 
 `fixture_block_id` is explicitly not a Zcash block hash. A production revision must define binding
-to canonical chain identity. Parser failures and rejected operations are deterministic no-ops;
-Ironwood spent effects already applied earlier in the transaction are not rolled back.
+to canonical chain identity. A candidate with no bulletin frame produces `CandidateNoOperation`;
+a Coppice-prefixed but invalid frame set produces the typed `MalformedCarrier` rejection. Parser
+failures and rejected operations are deterministic no-ops; Ironwood spent effects already applied
+earlier in the transaction are not rolled back.
 
 ## Private BondCircuit POC
 

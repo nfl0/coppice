@@ -126,9 +126,15 @@ pub fn encode_operation(op: &Operation) -> Result<Vec<u8>, Error> {
             o.extend_from_slice(signature)
         }
     }
+    if o.len() > MAX_PAYLOAD {
+        return Err(Error::Length);
+    }
     Ok(o)
 }
 pub fn decode_operation(mut p: &[u8]) -> Result<Operation, Error> {
+    if p.len() > MAX_PAYLOAD {
+        return Err(Error::Length);
+    }
     let ty = *take(&mut p, 1)?.first().ok_or(Error::Malformed)?;
     let name = String::from_utf8(take_len(&mut p)?).map_err(|_| Error::Name)?;
     if !valid_name(&name) {

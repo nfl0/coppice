@@ -88,7 +88,7 @@ pub fn prove(records: &BTreeMap<String, NameRecord>, name: &str) -> NameProof {
     NameProof { siblings }
 }
 pub fn verify(root: [u8; 32], name: &str, record: Option<&NameRecord>, p: &NameProof) -> bool {
-    if p.siblings.len() != 256 {
+    if !crate::envelope::valid_name(name) || p.siblings.len() != 256 {
         return false;
     }
     let mut cur = record.map(leaf_hash).unwrap_or_else(|| empty()[0]);

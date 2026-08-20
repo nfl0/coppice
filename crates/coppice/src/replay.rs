@@ -3,7 +3,7 @@ use crate::{
     envelope::Operation,
     ironwood::{self, IronwoodEffects},
     spent::SpentTagTree,
-    state::{ChainPosition, CoppiceState, Transition, TransitionRejectReason, apply_operation},
+    state::{CoppiceState, Transition, TransitionRejectReason, apply_operation_with_spent},
 };
 use sha2::{Digest, Sha256};
 use zcash_primitives::transaction::Transaction;
@@ -19,6 +19,7 @@ pub enum ReplayOutcome {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ReplayRejectReason {
     InvalidOperation(TransitionRejectReason),
+    MalformedCarrier,
     MalformedNullifier,
 }
 #[derive(Clone, Debug)]
@@ -34,7 +35,7 @@ pub struct ReplayResult {
 pub enum SerializedReplayError {
     InvalidTransaction,
 }
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct ReplayState {
     pub names: CoppiceState,
     pub spent: SpentTagTree,
@@ -66,8 +67,8 @@ impl ReplayState {
 /// Effects are inserted before the same transaction's Coppice operation is interpreted.
 pub fn process_transaction(
     s: &mut ReplayState,
-    height: u32,
-    tx_index: u32,
+    _height: u32,
+    _tx_index: u32,
     tx: &Transaction,
 ) -> ReplayResult {
     let effects = ironwood::extract_ironwood_effects(tx);
@@ -99,14 +100,7 @@ pub fn process_transaction(
     }
     match crate::carrier::decode_bulletin(tx) {
         Ok(op) => {
-            let t = apply_operation(
-                &mut s.names,
-                op.clone(),
-                ChainPosition {
-                    block_height: height,
-                    tx_index,
-                },
-            );
+            let t = apply_operation_with_spent(&mut s.names, Some(&s.spent), op.clone());
             let outcome = match &t {
                 Transition::Applied => ReplayOutcome::Applied(op.clone()),
                 Transition::Rejected(r) => {
@@ -121,12 +115,19 @@ pub fn process_transaction(
                 outcome,
             }
         }
-        Err(_) => ReplayResult {
+        Err(crate::carrier::Error::NotFound) => ReplayResult {
             effects,
             spent_root_before_operation,
             operation: None,
             transition: None,
             outcome: ReplayOutcome::CandidateNoOperation,
+        },
+        Err(_) => ReplayResult {
+            effects,
+            spent_root_before_operation,
+            operation: None,
+            transition: None,
+            outcome: ReplayOutcome::Rejected(ReplayRejectReason::MalformedCarrier),
         },
     }
 }
@@ -137,8 +138,12 @@ pub fn process_serialized_transaction(
     tx_index: u32,
     bytes: &[u8],
 ) -> Result<ReplayResult, SerializedReplayError> {
-    let tx = Transaction::read(bytes, BranchId::Nu6_3)
+    let mut cursor = std::io::Cursor::new(bytes);
+    let tx = Transaction::read(&mut cursor, BranchId::Nu6_3)
         .map_err(|_| SerializedReplayError::InvalidTransaction)?;
+    if cursor.position() != bytes.len() as u64 {
+        return Err(SerializedReplayError::InvalidTransaction);
+    }
     Ok(process_transaction(s, height, tx_index, &tx))
 }
 
@@ -261,6 +266,12 @@ mod tests {
             carrier::build_coppice_transaction(&release, 6).unwrap(),
         ];
         let bytes = txs.iter().map(|x| serialized(&x.tx)).collect::<Vec<_>>();
+        let mut trailing = bytes[0].clone();
+        trailing.push(0);
+        assert!(matches!(
+            process_serialized_transaction(&mut ReplayState::new(6), 99, 0, &trailing),
+            Err(SerializedReplayError::InvalidTransaction)
+        ));
         let run = || {
             let mut s = ReplayState::new(6);
             let outcomes = bytes
@@ -292,7 +303,10 @@ mod tests {
             ))
         );
         assert!(matches!(oa[2], ReplayOutcome::Applied(_)));
-        assert!(matches!(oa[4], ReplayOutcome::CandidateNoOperation));
+        assert!(matches!(
+            oa[4],
+            ReplayOutcome::Rejected(ReplayRejectReason::MalformedCarrier)
+        ));
         assert_eq!(a.names.state_root(), b.names.state_root());
         assert_eq!(b.names.state_root(), c.names.state_root());
         assert_eq!(a.spent.root(), b.spent.root());
