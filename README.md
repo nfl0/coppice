@@ -46,7 +46,10 @@ compact sync data (txid + Ironwood effects)
            local resolution
 ```
 
-A fresh wallet can reconstruct Coppice state by replaying Zcash history from the protocol's activation height. An already-synced wallet may persist its own local derived state and resume from its last processed chain position.
+A fresh wallet loads the authenticated Ironwood tree frontier immediately before the protocol's
+activation height, then reconstructs Coppice state by replaying Zcash history from activation. An
+already-synced wallet may persist its own local derived state and resume from its last processed
+chain position.
 
 No snapshot system is part of the current protocol POC.
 

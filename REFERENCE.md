@@ -10,8 +10,10 @@ event is bond inactivity when the registered public bond tag appears in `SpentTa
 Ironwood nullifier is observed. Transfer, rebond, renewal, expiration, commit/reveal, governance,
 and recursive history proofs are not part of v0.
 
-A fresh wallet starts at the Coppice activation height and replays authenticated Zcash history in
-order. An already-synced wallet may persist its own derived NameTree and SpentTagTree state and
+A fresh wallet initializes from the authenticated Ironwood tree frontier immediately before the
+Coppice activation height, then replays authenticated Zcash history in order. It appends every
+compact Ironwood `cmx`, derives each subsequent root locally, and uses those roots for BondProof
+anchor validation. An already-synced wallet may persist its own derived NameTree, SpentTagTree, and Ironwood frontier and
 resume at the next height. V0 defines no portable bootstrap-state format or distribution protocol.
 
 Compact synchronization supplies each transaction ID and every Ironwood `nullifier` and `cmx`.

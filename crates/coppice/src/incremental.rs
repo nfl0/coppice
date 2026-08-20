@@ -7,16 +7,20 @@ use crate::{
     spent::SpentTagTree,
     state::{CoppiceState, Status},
 };
+use incrementalmerkletree::frontier::CommitmentTree;
+use orchard::tree::MerkleHashOrchard;
 use serde::{Deserialize, Serialize};
 use zcash_primitives::transaction::TxId;
 
-const LOCAL_STATE_VERSION: u8 = 1;
+const LOCAL_STATE_VERSION: u8 = 2;
+type IronwoodTree = CommitmentTree<MerkleHashOrchard, 32>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IncrementalError {
     NonSequentialHeight,
     NonCanonicalOrder,
     InvalidTransaction,
+    InvalidCommitment,
     InvalidLocalState,
 }
 
@@ -26,6 +30,7 @@ pub struct CompactReplayTx {
     pub tx_index: u32,
     pub txid: TxId,
     pub nullifiers: Vec<[u8; 32]>,
+    pub commitments: Vec<[u8; 32]>,
     pub candidate_transaction: Option<Vec<u8>>,
 }
 
@@ -48,6 +53,7 @@ struct LocalWalletState {
     spent: SpentTagTree,
     #[serde(default)]
     accepted_bond_anchors: std::collections::BTreeSet<[u8; 32]>,
+    ironwood_tree: Vec<u8>,
 }
 
 pub struct IncrementalWallet {
@@ -55,16 +61,49 @@ pub struct IncrementalWallet {
     activation_height: u32,
     last_height: Option<u32>,
     fixture_context: [u8; 32],
+    ironwood_tree: IronwoodTree,
 }
 
 impl IncrementalWallet {
     pub fn new(activation_height: u32, fixture_context: [u8; 32], tag_bits: u8) -> Self {
+        Self::new_with_ironwood_tree(
+            activation_height,
+            fixture_context,
+            tag_bits,
+            IronwoodTree::empty(),
+        )
+    }
+
+    /// Starts replay from a wallet-authenticated Ironwood frontier at the end
+    /// of the block immediately preceding `activation_height`.
+    pub fn new_with_ironwood_tree(
+        activation_height: u32,
+        fixture_context: [u8; 32],
+        tag_bits: u8,
+        ironwood_tree: IronwoodTree,
+    ) -> Self {
+        let mut state = ReplayState::new(tag_bits);
+        state.accept_bond_anchor(ironwood_tree.root().to_bytes());
         Self {
-            state: ReplayState::new(tag_bits),
+            state,
             activation_height,
             last_height: None,
             fixture_context,
+            ironwood_tree,
         }
+    }
+
+    fn append_commitments(
+        tree: &mut IronwoodTree,
+        commitments: &[[u8; 32]],
+    ) -> Result<(), IncrementalError> {
+        for cmx in commitments {
+            let node = Option::<MerkleHashOrchard>::from(MerkleHashOrchard::from_bytes(cmx))
+                .ok_or(IncrementalError::InvalidCommitment)?;
+            tree.append(node)
+                .map_err(|_| IncrementalError::InvalidCommitment)?;
+        }
+        Ok(())
     }
 
     pub fn process_block(
@@ -79,18 +118,25 @@ impl IncrementalWallet {
             return Err(IncrementalError::NonSequentialHeight);
         }
         let mut next_state = self.state.clone();
+        let mut next_tree = self.ironwood_tree.clone();
         let outcomes = transactions
             .iter()
             .enumerate()
             .map(|(index, tx)| {
                 process_serialized_transaction(&mut next_state, height, index as u32, tx)
-                    .map(|result| result.outcome)
+                    .and_then(|result| {
+                        Self::append_commitments(&mut next_tree, &result.effects.commitments)
+                            .map_err(|_| SerializedReplayError::InvalidTransaction)?;
+                        Ok(result.outcome)
+                    })
                     .map_err(|SerializedReplayError::InvalidTransaction| {
                         IncrementalError::InvalidTransaction
                     })
             })
             .collect::<Result<Vec<_>, _>>()?;
+        next_state.accept_bond_anchor(next_tree.root().to_bytes());
         self.state = next_state;
+        self.ironwood_tree = next_tree;
         self.last_height = Some(height);
         Ok(outcomes)
     }
@@ -113,6 +159,7 @@ impl IncrementalWallet {
             return Err(IncrementalError::NonCanonicalOrder);
         }
         let mut next_state = self.state.clone();
+        let mut next_tree = self.ironwood_tree.clone();
         let mut outcomes = Vec::with_capacity(transactions.len());
         for tx in transactions {
             for nullifier in &tx.nullifiers {
@@ -121,6 +168,7 @@ impl IncrementalWallet {
                     .insert_nullifier(*nullifier)
                     .map_err(|_| IncrementalError::InvalidTransaction)?;
             }
+            Self::append_commitments(&mut next_tree, &tx.commitments)?;
             if !crate::is_coppice_candidate(&tx.txid, next_state.tag_bits) {
                 outcomes.push(ReplayOutcome::NotCandidate);
                 continue;
@@ -140,7 +188,9 @@ impl IncrementalWallet {
                 .map_err(|_| IncrementalError::InvalidTransaction)?;
             outcomes.push(result.outcome);
         }
+        next_state.accept_bond_anchor(next_tree.root().to_bytes());
         self.state = next_state;
+        self.ironwood_tree = next_tree;
         self.last_height = Some(height);
         Ok(outcomes)
     }
@@ -162,6 +212,12 @@ impl IncrementalWallet {
     }
 
     pub fn save_local(&self) -> Result<Vec<u8>, IncrementalError> {
+        let mut ironwood_tree = Vec::new();
+        zcash_primitives::merkle_tree::write_commitment_tree(
+            &self.ironwood_tree,
+            &mut ironwood_tree,
+        )
+        .map_err(|_| IncrementalError::InvalidLocalState)?;
         serde_json::to_vec(&LocalWalletState {
             version: LOCAL_STATE_VERSION,
             activation_height: self.activation_height,
@@ -171,6 +227,7 @@ impl IncrementalWallet {
             names: self.state.names.clone(),
             spent: self.state.spent.clone(),
             accepted_bond_anchors: self.state.accepted_bond_anchors().clone(),
+            ironwood_tree,
         })
         .map_err(|_| IncrementalError::InvalidLocalState)
     }
@@ -179,6 +236,12 @@ impl IncrementalWallet {
         let saved: LocalWalletState =
             serde_json::from_slice(bytes).map_err(|_| IncrementalError::InvalidLocalState)?;
         if saved.version != LOCAL_STATE_VERSION {
+            return Err(IncrementalError::InvalidLocalState);
+        }
+        let mut cursor = std::io::Cursor::new(&saved.ironwood_tree);
+        let ironwood_tree = zcash_primitives::merkle_tree::read_commitment_tree(&mut cursor)
+            .map_err(|_| IncrementalError::InvalidLocalState)?;
+        if cursor.position() != saved.ironwood_tree.len() as u64 {
             return Err(IncrementalError::InvalidLocalState);
         }
         Ok(Self {
@@ -194,6 +257,7 @@ impl IncrementalWallet {
             activation_height: saved.activation_height,
             last_height: saved.last_height,
             fixture_context: saved.fixture_context,
+            ironwood_tree,
         })
     }
 
@@ -349,6 +413,7 @@ mod tests {
             tx_index: 0,
             txid: zcash_primitives::transaction::TxId::from_bytes([0x80; 32]),
             nullifiers: vec![[7; 32], [0xff; 32]],
+            commitments: vec![],
             candidate_transaction: None,
         };
         assert_eq!(
@@ -363,12 +428,14 @@ mod tests {
                 tx_index: 2,
                 txid: zcash_primitives::transaction::TxId::from_bytes([0x80; 32]),
                 nullifiers: vec![],
+                commitments: vec![],
                 candidate_transaction: None,
             },
             CompactReplayTx {
                 tx_index: 1,
                 txid: zcash_primitives::transaction::TxId::from_bytes([0x81; 32]),
                 nullifiers: vec![],
+                commitments: vec![],
                 candidate_transaction: None,
             },
         ];
