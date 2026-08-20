@@ -202,13 +202,13 @@ start() {
 
 stop() {
   require_layout
-  compose --profile '*' down
+  compose --profile indexer down >/dev/null 2>&1 || true
   rm -f "$Z3_DIR/.coppice-podman.yml"
 }
 
 reset() {
   require_layout
-  compose --profile '*' down -v --remove-orphans || true
+  compose --profile indexer down -v --remove-orphans >/dev/null 2>&1 || true
   rm -f "$Z3_DIR/.coppice-podman.yml"
   [[ "$STATE" == "$ROOT/.coppice-regtest" ]] || die "refusing to remove non-default state path"
   rm -rf "$STATE"
