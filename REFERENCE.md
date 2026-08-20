@@ -15,6 +15,9 @@ Coppice activation height, then replays authenticated Zcash history in order. It
 compact Ironwood `cmx`, derives each subsequent root locally, and uses those roots for BondProof
 anchor validation. An already-synced wallet may persist its own derived NameTree, SpentTagTree, and Ironwood frontier and
 resume at the next height. V0 defines no portable bootstrap-state format or distribution protocol.
+Local persistence retains the compact per-block replay inputs and real block identifiers needed to
+rewind derived state. On a predecessor mismatch, the wallet rewinds to a common ancestor and
+replays the replacement branch; a mismatching block is never partially applied.
 
 Compact synchronization supplies each transaction ID and every Ironwood `nullifier` and `cmx`.
 Only transactions whose IDs match the Coppice prefix require full transaction retrieval for memo

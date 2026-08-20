@@ -51,6 +51,10 @@ activation height, then reconstructs Coppice state by replaying Zcash history fr
 already-synced wallet may persist its own local derived state and resume from its last processed
 chain position.
 
+The wallet library retains a minimal local compact-effects journal. If a Zcash block predecessor
+changes, callers rewind to the common ancestor and replay the replacement branch; this is derived
+wallet state, not a portable snapshot or a new consensus mechanism.
+
 No snapshot system is part of the current protocol POC.
 
 ## Private ZEC bonds
