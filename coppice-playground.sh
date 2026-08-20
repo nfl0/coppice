@@ -49,12 +49,17 @@ funding_help() {
 
 run_action() {
   local verb=$1 name=$2
+  local output
   shift 2
   wallet_sync
-  if ! "$DEVTOOL" coppice --wallet-dir "$WALLET_DIR" "$verb" "$name" "$@" --identity "$IDENTITY"; then
-    funding_help
+  if ! output=$("$DEVTOOL" coppice --wallet-dir "$WALLET_DIR" "$verb" "$name" "$@" --identity "$IDENTITY" 2>&1); then
+    printf '%s\n' "$output" >&2
+    if [[ "$output" == *"Insufficient"* || "$output" == *"needs an unlocked Ironwood note"* ]]; then
+      funding_help
+    fi
     return 1
   fi
+  printf '%s\n' "$output"
 }
 
 interactive() {

@@ -243,6 +243,10 @@ cd coppice
 The first run creates a dedicated encrypted testnet wallet under `.coppice-testnet-v0`, prints its
 Unified Address, syncs, and replays Coppice from fixed activation height `4,288,414`. Fund that
 address with TAZ from <https://zcashfaucet.jinolabs.xyz/>; faucet access is never automated.
+REGISTER uses a real wallet-owned Ironwood note as its private bond and locks that note against
+accidental fee selection. The wallet therefore also needs a separate spendable note for the
+carrier transaction fee; a single-note test wallet may need one ordinary self-split transaction
+and a confirmation before registering.
 
 Automatic commands are deliberately small:
 
