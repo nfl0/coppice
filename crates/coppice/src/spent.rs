@@ -6,7 +6,7 @@ use halo2_gadgets::poseidon::primitives::{ConstantLength, Hash, P128Pow5T3};
 use pasta_curves::{group::ff::PrimeField, pallas};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpentTagTree {
@@ -21,15 +21,17 @@ fn hash(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
 }
 fn leaf(tag: [u8; 32]) -> [u8; 32] {
-    let mut b = LEAF_DOMAIN.to_vec();
-    b.extend_from_slice(&tag);
-    hash(&b)
+    let mut h = Sha256::new();
+    h.update(LEAF_DOMAIN);
+    h.update(tag);
+    h.finalize().into()
 }
 fn node(left: [u8; 32], right: [u8; 32]) -> [u8; 32] {
-    let mut b = NODE_DOMAIN.to_vec();
-    b.extend_from_slice(&left);
-    b.extend_from_slice(&right);
-    hash(&b)
+    let mut h = Sha256::new();
+    h.update(NODE_DOMAIN);
+    h.update(left);
+    h.update(right);
+    h.finalize().into()
 }
 fn empties() -> Vec<[u8; 32]> {
     let mut d = vec![hash(EMPTY_DOMAIN)];
@@ -41,36 +43,18 @@ fn empties() -> Vec<[u8; 32]> {
 fn bit(k: &[u8; 32], i: usize) -> bool {
     k[i / 8] & (1 << (7 - i % 8)) != 0
 }
-fn parent(mut k: [u8; 32], i: usize) -> [u8; 32] {
-    k[i / 8] &= !(1 << (7 - i % 8));
-    k
-}
-fn levels(tags: &BTreeSet<[u8; 32]>) -> Vec<BTreeMap<[u8; 32], [u8; 32]>> {
-    let d = empties();
-    let mut all = Vec::with_capacity(257);
-    let mut cur = tags
-        .iter()
-        .map(|t| (*t, leaf(*t)))
-        .collect::<BTreeMap<_, _>>();
-    all.push(cur.clone());
-    for i in (0..256).rev() {
-        let mut next = BTreeMap::new();
-        let mut done = BTreeSet::new();
-        for (k, v) in &cur {
-            let p = parent(*k, i);
-            if !done.insert(p) {
-                continue;
-            }
-            let mut s = *k;
-            s[i / 8] ^= 1 << (7 - i % 8);
-            let other = *cur.get(&s).unwrap_or(&d[255 - i]);
-            let (l, r) = if bit(k, i) { (other, *v) } else { (*v, other) };
-            next.insert(p, node(l, r));
-        }
-        cur = next;
-        all.push(cur.clone());
+fn subtree_root(tags: &[[u8; 32]], depth: usize, empty: &[[u8; 32]]) -> [u8; 32] {
+    if tags.is_empty() {
+        return empty[256 - depth];
     }
-    all
+    if depth == 256 {
+        return leaf(tags[0]);
+    }
+    let split = tags.partition_point(|tag| !bit(tag, depth));
+    node(
+        subtree_root(&tags[..split], depth + 1, empty),
+        subtree_root(&tags[split..], depth + 1, empty),
+    )
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BondTagError {
@@ -109,25 +93,27 @@ impl SpentTagTree {
         self.tags.insert(tag);
     }
     pub fn root(&self) -> [u8; 32] {
-        let d = empties();
-        levels(&self.tags)
-            .last()
-            .and_then(|m| m.get(&[0; 32]))
-            .copied()
-            .unwrap_or(d[256])
+        let empty = empties();
+        let tags = self.tags.iter().copied().collect::<Vec<_>>();
+        subtree_root(&tags, 0, &empty)
     }
     fn prove(&self, tag: [u8; 32]) -> SpentProof {
-        let d = empties();
-        let ls = levels(&self.tags);
-        let mut k = tag;
+        let empty = empties();
+        let tags = self.tags.iter().copied().collect::<Vec<_>>();
+        let mut branch = tags.as_slice();
         let mut siblings = Vec::with_capacity(256);
-        for (level, map) in ls.iter().take(256).enumerate() {
-            let i = 255 - level;
-            let mut s = k;
-            s[i / 8] ^= 1 << (7 - i % 8);
-            siblings.push(*map.get(&s).unwrap_or(&d[level]));
-            k = parent(k, i);
+        for depth in 0..256 {
+            let split = branch.partition_point(|candidate| !bit(candidate, depth));
+            let (zeros, ones) = branch.split_at(split);
+            if bit(&tag, depth) {
+                siblings.push(subtree_root(zeros, depth + 1, &empty));
+                branch = ones;
+            } else {
+                siblings.push(subtree_root(ones, depth + 1, &empty));
+                branch = zeros;
+            }
         }
+        siblings.reverse();
         SpentProof { siblings }
     }
     pub fn prove_spent(&self, tag: [u8; 32]) -> SpentProof {
