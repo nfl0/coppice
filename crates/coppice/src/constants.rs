@@ -5,6 +5,11 @@ pub const POC_NETWORK_ID: &[u8] = b"poc-local";
 pub const NETWORK_ID: &[u8] = POC_NETWORK_ID;
 pub const TESTNET_V0_ACTIVATION_HEIGHT: u32 = 4_288_414;
 pub const TESTNET_IRONWOOD_ACTIVATION_HEIGHT: u32 = 4_134_000;
+/// Local-only Z3 regtest deployment. This is independent from Testnet V0.
+pub const REGTEST_V0_ACTIVATION_HEIGHT: u32 = 10;
+pub const REGTEST_IRONWOOD_ACTIVATION_HEIGHT: u32 = 2;
+/// POC discovery width chosen for fast local transaction construction.
+pub const REGTEST_TAG_BITS: u8 = 8;
 pub const MINIMUM_BOND_VALUE: u64 = 500_000;
 pub const MAX_NAME_LEN: usize = 63;
 pub const MAX_FRAMES: u8 = 32;

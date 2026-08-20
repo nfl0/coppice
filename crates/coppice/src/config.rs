@@ -23,3 +23,14 @@ pub const TESTNET_V0: CoppiceConfig = CoppiceConfig {
     tag_bits: constants::DEFAULT_TEST_TAG_BITS,
     minimum_bond_value: constants::MINIMUM_BOND_VALUE,
 };
+
+/// Local Z3 regtest parameters. These are playground parameters, not a public
+/// network deployment or proposed production constants.
+pub const REGTEST_V0: CoppiceConfig = CoppiceConfig {
+    protocol_id: constants::PROTOCOL_ID,
+    network_id: constants::NETWORK_ID,
+    activation_height: constants::REGTEST_V0_ACTIVATION_HEIGHT,
+    ironwood_activation_height: constants::REGTEST_IRONWOOD_ACTIVATION_HEIGHT,
+    tag_bits: constants::REGTEST_TAG_BITS,
+    minimum_bond_value: constants::MINIMUM_BOND_VALUE,
+};

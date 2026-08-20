@@ -278,6 +278,36 @@ Automatic commands are deliberately small:
 Local state resumes on later runs. A fresh installation reconstructs it by replaying testnet from
 the activation height. This is POC tooling, not a production wallet.
 
+## Local Z3 regtest playground
+
+The minimal regtest playground runs the official external
+[Z3](https://github.com/ZcashFoundation/z3) Zebra, Zaino, and Zallet stack with Podman Compose. Z3
+is not vendored or patched. Keep sibling checkouts of `z3`, `zcash-devtool`, and this repository,
+then run:
+
+```bash
+cargo build --release --features regtest_support --manifest-path ../zcash-devtool/Cargo.toml
+./scripts/regtest-playground.sh start
+./scripts/regtest-playground.sh status
+./scripts/regtest-playground.sh mine 1
+./scripts/regtest-playground.sh play
+./scripts/regtest-playground.sh stop
+```
+
+`start` creates or reuses three local regtest wallets under `.coppice-regtest/`, starts Z3 through
+the installed `podman-compose`, and mines to fixed local Coppice activation height `10`. The Z3
+regtest network upgrades activate at heights 1 and 2, and the local Zaino endpoint is
+`127.0.0.1:28137`. The interactive flow switches among wallets and invokes the same Coppice
+REGISTER, UPDATE, RELEASE, and RESOLVE commands used by the public playground. `mine` confirms
+pending transactions immediately and syncs all three wallets. `reset` removes only the local Z3
+volumes and `.coppice-regtest/` wallet state.
+
+Z3 currently pins Zaino 0.6; the script overrides only that container image to the public Zaino
+0.8 no-TLS image because 0.6 predates the Ironwood compact-sync enum used by `zcash-devtool`.
+
+This is disposable developer infrastructure. Do not use its keys, activation height, reduced
+8-bit local discovery tag, or chain as public protocol parameters.
+
 ## License
 
 The Coppice crates are licensed under MIT OR Apache-2.0. Vendored dependencies retain their

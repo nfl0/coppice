@@ -5,3 +5,4 @@
 *.log
 .env
 .coppice-testnet-v0/
+.coppice-regtest/
