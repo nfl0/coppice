@@ -1,4 +1,4 @@
-# Coppice
+# Coppice 🪵
 
 **Coppice** is an experimental, adminless naming protocol for Zcash.
 
