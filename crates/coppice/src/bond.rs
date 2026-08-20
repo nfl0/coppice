@@ -22,6 +22,7 @@ use orchard::{
 use pasta_curves::{group::ff::PrimeField, pallas, vesta};
 use rand_chacha::ChaCha20Rng;
 use rand_core::{OsRng, SeedableRng};
+use sha2::{Digest, Sha256};
 use shardtree::{ShardTree, store::memory::MemoryShardStore};
 use std::time::{Duration, Instant};
 use zcash_note_encryption::try_note_decryption;
@@ -29,7 +30,7 @@ use zcash_protocol::memo::MemoBytes;
 
 pub const BOND_K: u32 = 12;
 pub const FIXTURE_VALUE: u64 = 1_000_000;
-pub const FIXTURE_MINIMUM: u64 = 500_000;
+pub const FIXTURE_MINIMUM: u64 = constants::MINIMUM_BOND_VALUE;
 
 /// Private wallet material needed to prove a registration bond. Wallets obtain
 /// the note and Merkle path from their ordinary Ironwood wallet state.
@@ -62,7 +63,7 @@ fn peak_memory_kib() -> Option<u64> {
 fn protocol_binding() -> pallas::Base {
     native_hash(
         constants::BOND_PROTOCOL_DOMAIN,
-        domain_field(constants::POC_NETWORK_ID).expect("short network domain"),
+        domain_field(constants::NETWORK_ID).expect("short network domain"),
     )
     .expect("short protocol domain")
 }
@@ -79,8 +80,15 @@ fn binding_32(domain: &[u8], bytes: [u8; 32]) -> pallas::Base {
     .hash([lo, hi]);
     native_hash(domain, pair).expect("fixed short domain")
 }
-pub fn context_binding(name: &str) -> pallas::Base {
-    binding_32(constants::BOND_CONTEXT_DOMAIN, crate::owner::name_id(name))
+pub fn context_binding(name: &str, address: &[u8]) -> pallas::Base {
+    let mut preimage = constants::BOND_REGISTRATION_DOMAIN.to_vec();
+    preimage.extend_from_slice(&crate::owner::name_id(name));
+    preimage.extend_from_slice(&(address.len() as u32).to_be_bytes());
+    preimage.extend_from_slice(address);
+    binding_32(
+        constants::BOND_CONTEXT_DOMAIN,
+        Sha256::digest(preimage).into(),
+    )
 }
 pub fn owner_binding(owner_pk: [u8; 32]) -> pallas::Base {
     binding_32(constants::BOND_OWNER_DOMAIN, owner_pk)
@@ -91,6 +99,7 @@ fn circuit_for_witness(
     minimum: u64,
     name: &str,
     owner_pk: [u8; 32],
+    address: &[u8],
 ) -> Option<(BondCircuit, Vec<pallas::Base>, [u8; 32])> {
     let RegistrationBondWitness {
         note,
@@ -115,7 +124,7 @@ fn circuit_for_witness(
         pallas::Scalar::from(3).to_repr(),
     ))?;
     let protocol = protocol_binding();
-    let context = context_binding(name);
+    let context = context_binding(name, address);
     let owner = owner_binding(owner_pk);
     let circuit = BondCircuit::from_action_context(
         spend,
@@ -159,6 +168,7 @@ fn fixture(
     ask_override: Option<SpendAuthorizingKey>,
     name: &str,
     owner_pk: [u8; 32],
+    address: &[u8],
 ) -> Option<(BondCircuit, Vec<pallas::Base>, [u8; 32])> {
     let sk = Option::<SpendingKey>::from(SpendingKey::from_bytes([7; 32]))?;
     let ask = SpendAuthorizingKey::from(&sk);
@@ -181,7 +191,10 @@ fn fixture(
             MemoBytes::empty().into_bytes(),
         )
         .ok()?;
-    let mut rng = ChaCha20Rng::from_seed([44; 32]);
+    let mut fixture_seed = Sha256::new();
+    fixture_seed.update(b"CoppiceBondFixtureV1");
+    fixture_seed.update(name.as_bytes());
+    let mut rng = ChaCha20Rng::from_seed(fixture_seed.finalize().into());
     let (bundle, meta) = builder.build::<i64>(&mut rng).ok()??;
     let action = bundle.actions().get(meta.output_action_index(0)?)?;
     let (note, _, _) =
@@ -211,6 +224,7 @@ fn fixture(
         minimum,
         name,
         owner_pk,
+        address,
     )
 }
 
@@ -242,9 +256,18 @@ fn verify(
 pub fn run_bond_poc_for_registration(
     name: &str,
     owner_pk: [u8; 32],
+    address: &[u8],
 ) -> Result<BondMeasurement, String> {
-    let (circuit, instance, _) =
-        fixture(FIXTURE_VALUE, FIXTURE_MINIMUM, false, None, name, owner_pk).ok_or("fixture")?;
+    let (circuit, instance, _) = fixture(
+        FIXTURE_VALUE,
+        FIXTURE_MINIMUM,
+        false,
+        None,
+        name,
+        owner_pk,
+        address,
+    )
+    .ok_or("fixture")?;
     let params = Params::<vesta::Affine>::new(BOND_K);
     let vk = keygen_vk(&params, &circuit).map_err(|e| format!("vk: {e:?}"))?;
     let pk = keygen_pk(&params, vk, &circuit).map_err(|e| format!("pk: {e:?}"))?;
@@ -273,9 +296,11 @@ pub fn prove_registration_bond(
     witness: RegistrationBondWitness,
     name: &str,
     owner_pk: [u8; 32],
+    address: &[u8],
 ) -> Result<BondMeasurement, String> {
     let (circuit, instance, _) =
-        circuit_for_witness(witness, FIXTURE_MINIMUM, name, owner_pk).ok_or("bond witness")?;
+        circuit_for_witness(witness, FIXTURE_MINIMUM, name, owner_pk, address)
+            .ok_or("bond witness")?;
     let params = Params::<vesta::Affine>::new(BOND_K);
     let vk = keygen_vk(&params, &circuit).map_err(|e| format!("vk: {e:?}"))?;
     let pk = keygen_pk(&params, vk, &circuit).map_err(|e| format!("pk: {e:?}"))?;
@@ -301,7 +326,11 @@ pub fn prove_registration_bond(
 
 pub fn run_bond_poc() -> Result<BondMeasurement, String> {
     let key = crate::owner::OwnerSigningKey::try_from([1; 32]).map_err(|_| "owner key")?;
-    run_bond_poc_for_registration("bonded", crate::owner::owner_key_bytes(&(&key).into()))
+    run_bond_poc_for_registration(
+        "bonded",
+        crate::owner::owner_key_bytes(&(&key).into()),
+        b"UA_BOND",
+    )
 }
 
 pub fn verify_registration_bond(
@@ -310,6 +339,7 @@ pub fn verify_registration_bond(
     bond_tag: [u8; 32],
     anchor: [u8; 32],
     proof: &[u8],
+    address: &[u8],
 ) -> bool {
     let Some(tag) = Option::<pallas::Base>::from(pallas::Base::from_repr(bond_tag)) else {
         return false;
@@ -317,9 +347,15 @@ pub fn verify_registration_bond(
     let Some(anchor) = Option::<pallas::Base>::from(pallas::Base::from_repr(anchor)) else {
         return false;
     };
-    let Some((key_circuit, _, _)) =
-        fixture(FIXTURE_VALUE, FIXTURE_MINIMUM, false, None, name, owner_pk)
-    else {
+    let Some((key_circuit, _, _)) = fixture(
+        FIXTURE_VALUE,
+        FIXTURE_MINIMUM,
+        false,
+        None,
+        name,
+        owner_pk,
+        address,
+    ) else {
         return false;
     };
     let params = Params::<vesta::Affine>::new(BOND_K);
@@ -330,7 +366,7 @@ pub fn verify_registration_bond(
         anchor,
         pallas::Base::from(FIXTURE_MINIMUM),
         protocol_binding(),
-        context_binding(name),
+        context_binding(name, address),
         owner_binding(owner_pk),
         tag,
         pallas::Base::zero(),
@@ -342,16 +378,28 @@ pub fn verify_registration_bond(
 }
 
 #[cfg(test)]
-pub(crate) fn test_registration_bond(name: &str) -> &'static BondMeasurement {
+pub(crate) fn test_registration_bond(name: &str, address: &[u8]) -> &'static BondMeasurement {
     use std::sync::OnceLock;
-    static ALICE: OnceLock<BondMeasurement> = OnceLock::new();
-    static BOB: OnceLock<BondMeasurement> = OnceLock::new();
+    static ALICE_A: OnceLock<BondMeasurement> = OnceLock::new();
+    static ALICE_NEW: OnceLock<BondMeasurement> = OnceLock::new();
+    static BOB_B: OnceLock<BondMeasurement> = OnceLock::new();
+    static BOB_C: OnceLock<BondMeasurement> = OnceLock::new();
     let owner = crate::owner::owner_key_bytes(
         &(&crate::owner::OwnerSigningKey::try_from([1; 32]).unwrap()).into(),
     );
-    match name {
-        "alice" => ALICE.get_or_init(|| run_bond_poc_for_registration(name, owner).unwrap()),
-        "bob" => BOB.get_or_init(|| run_bond_poc_for_registration(name, owner).unwrap()),
+    match (name, address) {
+        ("alice", b"UA_A") => {
+            ALICE_A.get_or_init(|| run_bond_poc_for_registration(name, owner, address).unwrap())
+        }
+        ("alice", b"UA_NEW") => {
+            ALICE_NEW.get_or_init(|| run_bond_poc_for_registration(name, owner, address).unwrap())
+        }
+        ("bob", b"UA_B") => {
+            BOB_B.get_or_init(|| run_bond_poc_for_registration(name, owner, address).unwrap())
+        }
+        ("bob", b"UA_C") => {
+            BOB_C.get_or_init(|| run_bond_poc_for_registration(name, owner, address).unwrap())
+        }
         _ => panic!("unsupported shared test bond"),
     }
 }
@@ -364,24 +412,65 @@ mod tests {
         let owner = crate::owner::owner_key_bytes(
             &(&crate::owner::OwnerSigningKey::try_from([1; 32]).unwrap()).into(),
         );
-        let (good, instance, _) =
-            fixture(FIXTURE_VALUE, FIXTURE_MINIMUM, false, None, "bonded", owner).unwrap();
+        let (good, instance, _) = fixture(
+            FIXTURE_VALUE,
+            FIXTURE_MINIMUM,
+            false,
+            None,
+            "bonded",
+            owner,
+            b"UA_BOND",
+        )
+        .unwrap();
         let params = Params::<vesta::Affine>::new(BOND_K);
         let vk = keygen_vk(&params, &good).unwrap();
         let pk = keygen_pk(&params, vk, &good).unwrap();
         let proof = prove(&params, &pk, good.clone(), &instance).unwrap();
         assert!(verify(&params, pk.get_vk(), &proof, &instance));
+        let measurement = run_bond_poc_for_registration("bonded", owner, b"UA_BOND").unwrap();
+        assert!(verify_registration_bond(
+            "bonded",
+            owner,
+            measurement.bond_tag,
+            measurement.anchor,
+            &measurement.proof,
+            b"UA_BOND",
+        ));
+        assert!(!verify_registration_bond(
+            "bonded",
+            owner,
+            measurement.bond_tag,
+            measurement.anchor,
+            &measurement.proof,
+            b"UA_CHANGED",
+        ));
         for i in [0usize, 1, 2, 3, 4, 5] {
             let mut bad = instance.clone();
             bad[i] += pallas::Base::one();
             assert!(!verify(&params, pk.get_vk(), &proof, &bad));
         }
-        let (low, low_instance, _) =
-            fixture(499_999, FIXTURE_MINIMUM, false, None, "bonded", owner).unwrap();
+        let (low, low_instance, _) = fixture(
+            499_999,
+            FIXTURE_MINIMUM,
+            false,
+            None,
+            "bonded",
+            owner,
+            b"UA_BOND",
+        )
+        .unwrap();
         let low_proof = prove(&params, &pk, low, &low_instance).unwrap();
         assert!(!verify(&params, pk.get_vk(), &low_proof, &low_instance));
-        let (wrong_path, mut wrong_instance, _) =
-            fixture(FIXTURE_VALUE, FIXTURE_MINIMUM, true, None, "bonded", owner).unwrap();
+        let (wrong_path, mut wrong_instance, _) = fixture(
+            FIXTURE_VALUE,
+            FIXTURE_MINIMUM,
+            true,
+            None,
+            "bonded",
+            owner,
+            b"UA_BOND",
+        )
+        .unwrap();
         let wrong_proof = prove(&params, &pk, wrong_path, &wrong_instance).unwrap();
         // A path authenticates to the root it computes. Verification must bind
         // that proof to the independently accepted root, not the attacker's.
@@ -396,6 +485,7 @@ mod tests {
                 Some(SpendAuthorizingKey::from(&wrong_sk)),
                 "bonded",
                 owner,
+                b"UA_BOND",
             )
             .is_none()
         );

@@ -59,6 +59,10 @@ wallet state, not a portable snapshot or a new consensus mechanism.
 
 No snapshot system is part of the current protocol POC.
 
+The public Testnet V0 parameters are exposed as `coppice::config::TESTNET_V0`; wallet integrations
+should not duplicate activation heights, tag widths, or bond thresholds. An integration skeleton
+is available with `cargo run -p coppice --example wallet_replay`.
+
 ## Private ZEC bonds
 
 A registration includes a Halo2 `BondProof` for a hidden Ironwood note.
@@ -70,7 +74,7 @@ The proof demonstrates, without revealing the note itself, that:
 - the prover possesses the required spending authority;
 - the note value is at least the required bond threshold;
 - its canonical nullifier maps to the public `bond_tag`;
-- the proof is bound to the Coppice registration context.
+- the proof is bound to the Coppice name, initial address, owner, network, and registration context.
 
 The note commitment, nullifier, exact value, tree position, receiver, and spending key remain private.
 
@@ -221,6 +225,11 @@ remote indexers = optional convenience, not authority
 A wallet that independently replays from the Coppice activation height does not need to trust a registry server for name state.
 
 Coppice is experimental cryptographic software. The POC and any vendored cryptographic-library changes require independent review before production use.
+
+Testnet V0 uses first-valid-chain-order registration races: there is no commit/reveal mechanism.
+This permits mempool front-running of desirable names and is an explicit experimental limitation,
+not an omitted validation rule. A production mainnet design must decide whether that tradeoff is
+acceptable before reusing these parameters.
 
 ## Development
 

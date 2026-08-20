@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use zcash_primitives::transaction::TxId;
 
 const LOCAL_STATE_VERSION: u8 = 4;
-type IronwoodTree = CommitmentTree<MerkleHashOrchard, 32>;
+pub type IronwoodTree = CommitmentTree<MerkleHashOrchard, 32>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IncrementalError {
@@ -94,6 +94,18 @@ pub struct IncrementalWallet {
 }
 
 impl IncrementalWallet {
+    /// Creates a wallet replay state for the frozen public Testnet V0
+    /// deployment from the authenticated pre-activation Ironwood frontier.
+    pub fn testnet_v0(fixture_context: [u8; 32], ironwood_tree: IronwoodTree) -> Self {
+        let config = crate::config::TESTNET_V0;
+        Self::new_with_ironwood_tree(
+            config.activation_height,
+            fixture_context,
+            config.tag_bits,
+            ironwood_tree,
+        )
+    }
+
     pub fn new(activation_height: u32, fixture_context: [u8; 32], tag_bits: u8) -> Self {
         Self::new_with_ironwood_tree(
             activation_height,
@@ -250,6 +262,12 @@ impl IncrementalWallet {
             if parsed.txid() != tx.txid {
                 return Err(IncrementalError::InvalidTransaction);
             }
+            let full_effects = crate::ironwood::extract_ironwood_effects(&parsed);
+            if full_effects.nullifiers != tx.nullifiers
+                || full_effects.commitments != tx.commitments
+            {
+                return Err(IncrementalError::InvalidTransaction);
+            }
             let result = process_serialized_transaction(&mut next_state, height, tx.tx_index, raw)
                 .map_err(|_| IncrementalError::InvalidTransaction)?;
             outcomes.push(result.outcome);
@@ -279,6 +297,10 @@ impl IncrementalWallet {
     pub fn next_height(&self) -> u32 {
         self.last_height
             .map_or(self.activation_height, |h| h.saturating_add(1))
+    }
+
+    pub fn activation_height(&self) -> u32 {
+        self.activation_height
     }
 
     pub fn last_height(&self) -> Option<u32> {
@@ -408,7 +430,27 @@ impl IncrementalWallet {
     pub fn load_local(bytes: &[u8]) -> Result<Self, IncrementalError> {
         let saved: LocalWalletState =
             serde_json::from_slice(bytes).map_err(|_| IncrementalError::InvalidLocalState)?;
-        if saved.version != LOCAL_STATE_VERSION {
+        if saved.version != LOCAL_STATE_VERSION
+            || saved.tag_bits == 0
+            || saved.tag_bits > 16
+            || saved.names.names.iter().any(|(name, record)| {
+                !crate::envelope::valid_name(name)
+                    || crate::owner::parse_owner_key(record.owner_pk).is_err()
+                    || record.address.len() > crate::constants::MAX_PAYLOAD_LEN
+            })
+            || saved.journal.iter().enumerate().any(|(index, block)| {
+                block.height != saved.activation_height.saturating_add(index as u32)
+                    || block
+                        .transactions
+                        .windows(2)
+                        .any(|pair| pair[0].tx_index >= pair[1].tx_index)
+                    || (index > 0
+                        && block.prev_block_id != [0; 32]
+                        && saved.journal[index - 1].block_id != [0; 32]
+                        && block.prev_block_id != saved.journal[index - 1].block_id)
+            })
+            || saved.last_height != saved.journal.last().map(|block| block.height)
+        {
             return Err(IncrementalError::InvalidLocalState);
         }
         let mut cursor = std::io::Cursor::new(&saved.ironwood_tree);
@@ -448,7 +490,11 @@ impl IncrementalWallet {
     pub fn state_commitment(&self) -> [u8; 32] {
         self.state.state_commitment(&ChainContext {
             height: self.last_height.unwrap_or(self.activation_height),
-            fixture_block_id: self.fixture_context,
+            fixture_block_id: self
+                .journal
+                .last()
+                .filter(|block| block.block_id != [0; 32])
+                .map_or(self.fixture_context, |block| block.block_id),
         })
     }
 
@@ -511,8 +557,8 @@ mod tests {
     fn local_restart_matches_uninterrupted_replay() {
         let signing_key = OwnerSigningKey::try_from([1; 32]).unwrap();
         let owner_pk = owner_key_bytes(&(&signing_key).into());
-        let alice_bond = crate::bond::test_registration_bond("alice");
-        let bob_bond = crate::bond::test_registration_bond("bob");
+        let alice_bond = crate::bond::test_registration_bond("alice", b"UA_A");
+        let bob_bond = crate::bond::test_registration_bond("bob", b"UA_B");
         let register_alice = Operation::Register {
             name: "alice".into(),
             owner_pk,
@@ -670,5 +716,18 @@ mod tests {
             .process_compact_block_with_chain(11, [3; 32], [1; 32], &[])
             .unwrap();
         assert_eq!(chain.block_id_at(11), Some([3; 32]));
+        assert_ne!(before, chain.state_commitment());
+    }
+
+    #[test]
+    fn corrupted_local_state_is_rejected() {
+        let wallet = IncrementalWallet::new(10, [0; 32], 12);
+        let encoded = wallet.save_local().unwrap();
+        let mut value: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        value["tag_bits"] = 0.into();
+        assert!(matches!(
+            IncrementalWallet::load_local(&serde_json::to_vec(&value).unwrap()),
+            Err(IncrementalError::InvalidLocalState)
+        ));
     }
 }

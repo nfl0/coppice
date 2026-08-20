@@ -50,7 +50,7 @@ fn carrier_demo(bits: u8) {
 
 fn replay_demo() {
     let (owner_pk, key) = owner();
-    let bond = bond::run_bond_poc_for_registration("alice", owner_pk).expect("bond proof");
+    let bond = bond::run_bond_poc_for_registration("alice", owner_pk, b"UA_A").expect("bond proof");
     let register = Operation::Register {
         name: "alice".into(),
         owner_pk,

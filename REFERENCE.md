@@ -1,4 +1,4 @@
-# Coppice Reference State Machine v0
+# Coppice Testnet V0 / v1 Candidate Reference State Machine
 
 All integers are unsigned big-endian. `H` is SHA-256. Concatenation is written `||`. Domain
 strings are the exact ASCII bytes shown, without a terminator.
@@ -27,7 +27,10 @@ decryption.
 
 ## Constants and names
 
-The protocol identifier is `COPPICE_POC_V1`; the POC network identifier is `poc-local`.
+The protocol identifier is `COPPICE_POC_V1`; the frozen Testnet V0 network-domain bytes are
+`poc-local`. This historical spelling is cryptographic domain data, not a description of the
+actual network, and must not be changed for Testnet V0. Testnet V0 activates at height `4288414`;
+Ironwood nullifier accumulation starts at testnet NU6.3 height `4134000`.
 Names contain 1 through 63 ASCII bytes from `[a-z0-9-]`, with neither first nor last byte `-`.
 `name_id = H("CoppiceName" || canonical_name_bytes)`. The 12-bit default candidate tag is a POC
 test parameter, not a production parameter. Payloads are at most 16384 bytes and frame count is
@@ -103,8 +106,9 @@ Interpret the canonical 32-byte `TxId` encoding from byte zero. The candidate ta
 ## Transitions
 
 REGISTER succeeds only for an available canonical name whose embedded BondProof verifies against the
-embedded `bond_anchor` and `bond_tag`, the supplied owner key, the registration name context, the
-fixed POC network, and minimum value 500000 zatoshis. In addition, `bond_anchor` must be an
+embedded `bond_anchor` and `bond_tag`, the supplied owner key, registration name, exact initial
+address bytes, fixed Testnet V0 network domain, and minimum value 500000 zatoshis. In addition,
+`bond_anchor` must be an
 Ironwood root that the replaying wallet independently derived from authenticated Zcash history;
 proof membership in an arbitrary caller-supplied root is never sufficient. The proof bytes are part of the canonical
 REGISTER payload; only the verified tag is retained in the NameRecord. Invalid proofs and tag,
@@ -118,6 +122,8 @@ Active name with an unspent current bond, sequence exactly current plus one with
 valid owner signature over the exact current record and new address. RELEASE has the same
 existence, Active, unspent-bond, sequence and signature requirements and sets Released.
 All invalid operations leave every state byte unchanged and return a typed audit rejection.
+One unspent `bond_tag` may back at most one Active name; a second REGISTER using it is rejected.
+Within a block, the first valid REGISTER in ascending transaction-index order wins a name race.
 
 ## NameTree
 
@@ -156,8 +162,9 @@ CoppiceStateRoot = H(
 )
 ```
 
-`fixture_block_id` is explicitly not a Zcash block hash. A production revision must define binding
-to canonical chain identity. A candidate with no bulletin frame produces `CandidateNoOperation`;
+`fixture_block_id` is explicitly not a Zcash block hash. The live incremental API instead uses the
+wallet-accepted Zcash block identifier for the processed tip; the fixture identifier exists only
+for deterministic tests without real headers. A candidate with no bulletin frame produces `CandidateNoOperation`;
 a Coppice-prefixed but invalid frame set produces the typed `MalformedCarrier` rejection. Parser
 failures and rejected operations are deterministic no-ops; Ironwood spent effects already applied
 earlier in the transaction are not rolled back.
@@ -182,7 +189,9 @@ The non-recursive Halo2 circuit has one instance column with ten Pallas base-fie
 The protocol/network binding is `Poseidon(field("CoppiceProtoV0"), field("poc-local"))`, where
 `field(s)` zero-pads at the high end to 16 bytes, interprets the bytes as a little-endian `u128`,
 and injects it into the Pallas base field. The registration context is
-`Poseidon(field("CoppiceCtxV0"), Poseidon(lo128(name_id), hi128(name_id)))`; the owner binding uses
+`Poseidon(field("CoppiceCtxV0"), Poseidon(lo128(registration_digest),
+hi128(registration_digest)))`, where `registration_digest =
+H("CoppiceRegisterV1" || name_id || address_length_u32 || address)`; the owner binding uses
 the same construction with domain `CoppiceOwnerV0` and the canonical 32-byte owner key. Both are
 reconstructed by replay from REGISTER rather than accepted as independent fields. Context and owner
 bindings are constrained into the proof and do not reveal the note's wallet key. The witness

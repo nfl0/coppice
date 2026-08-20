@@ -42,8 +42,8 @@ pub fn authorization_message(op: &Operation, previous: &NameRecord) -> Option<Ve
     let mut b = constants::OWNER_SIGNATURE_DOMAIN.to_vec();
     b.extend_from_slice(&(constants::PROTOCOL_ID.len() as u16).to_be_bytes());
     b.extend_from_slice(constants::PROTOCOL_ID);
-    b.extend_from_slice(&(constants::POC_NETWORK_ID.len() as u16).to_be_bytes());
-    b.extend_from_slice(constants::POC_NETWORK_ID);
+    b.extend_from_slice(&(constants::NETWORK_ID.len() as u16).to_be_bytes());
+    b.extend_from_slice(constants::NETWORK_ID);
     match op {
         Operation::Update {
             name,
@@ -76,6 +76,52 @@ pub fn sign_operation(
 ) -> Option<Vec<u8>> {
     let msg = authorization_message(op, previous)?;
     Some(<[u8; 64]>::from(&key.sign(OsRng, &msg)).to_vec())
+}
+
+/// Builds and signs the canonical next UPDATE for `name`.
+pub fn signed_update(
+    key: &OwnerSigningKey,
+    name: &str,
+    address: Vec<u8>,
+    previous: &NameRecord,
+) -> Option<Operation> {
+    let sequence = previous.sequence.checked_add(1)?;
+    let mut operation = Operation::Update {
+        name: name.to_owned(),
+        sequence,
+        address,
+        signature: vec![],
+    };
+    let signature = sign_operation(key, &operation, previous)?;
+    if let Operation::Update {
+        signature: output, ..
+    } = &mut operation
+    {
+        *output = signature;
+    }
+    Some(operation)
+}
+
+/// Builds and signs the canonical next RELEASE for `name`.
+pub fn signed_release(
+    key: &OwnerSigningKey,
+    name: &str,
+    previous: &NameRecord,
+) -> Option<Operation> {
+    let sequence = previous.sequence.checked_add(1)?;
+    let mut operation = Operation::Release {
+        name: name.to_owned(),
+        sequence,
+        signature: vec![],
+    };
+    let signature = sign_operation(key, &operation, previous)?;
+    if let Operation::Release {
+        signature: output, ..
+    } = &mut operation
+    {
+        *output = signature;
+    }
+    Some(operation)
 }
 pub fn verify_operation(key_bytes: [u8; 32], op: &Operation, previous: &NameRecord) -> bool {
     let Ok(key) = parse_owner_key(key_bytes) else {

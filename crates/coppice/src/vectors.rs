@@ -34,6 +34,7 @@ struct Vectors {
     spent_tag: String,
     bond_tag_domain_field: String,
     bond_protocol_binding: String,
+    bond_registration_context: String,
     name_membership_proof: String,
     name_nonmembership_proof: String,
     name_tree_root: String,
@@ -49,6 +50,7 @@ pub fn generate(real_nf: [u8; 32]) -> String {
     let key = SigningKey::try_from([1; 32]).expect("fixed valid key");
     let owner_pk = owner::owner_key_bytes(&(&key).into());
     let tag = spent_tag(&real_nf).expect("canonical real nullifier");
+    let bob_tag = spent_tag(&[9; 32]).expect("canonical fixture nullifier");
     let old = NameRecord {
         owner_pk,
         bond_tag: tag,
@@ -101,7 +103,7 @@ pub fn generate(real_nf: [u8; 32]) -> String {
     };
     let bob = NameRecord {
         owner_pk,
-        bond_tag: tag,
+        bond_tag: bob_tag,
         sequence: 0,
         address: b"UA_C".to_vec(),
         status: Status::Active,
@@ -149,10 +151,13 @@ pub fn generate(real_nf: [u8; 32]) -> String {
         bond_protocol_binding: hex::encode(
             native_hash(
                 constants::BOND_PROTOCOL_DOMAIN,
-                domain_field(constants::POC_NETWORK_ID).expect("network field"),
+                domain_field(constants::NETWORK_ID).expect("network field"),
             )
             .expect("protocol hash")
             .to_repr(),
+        ),
+        bond_registration_context: hex::encode(
+            crate::bond::context_binding("alice", b"UA_A").to_repr(),
         ),
         name_membership_proof: proof_hex(&mp.siblings),
         name_nonmembership_proof: proof_hex(&np.siblings),

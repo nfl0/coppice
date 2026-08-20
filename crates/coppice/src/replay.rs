@@ -68,7 +68,7 @@ impl ReplayState {
     }
     pub fn state_commitment(&self, c: &ChainContext) -> [u8; 32] {
         let mut b = crate::constants::STATE_ROOT_DOMAIN.to_vec();
-        b.extend_from_slice(crate::constants::POC_NETWORK_ID);
+        b.extend_from_slice(crate::constants::NETWORK_ID);
         b.extend_from_slice(&c.height.to_be_bytes());
         b.extend_from_slice(&c.fixture_block_id);
         b.extend_from_slice(&self.names.state_root());
@@ -84,8 +84,9 @@ pub fn process_transaction(
     tx: &Transaction,
 ) -> ReplayResult {
     let effects = ironwood::extract_ironwood_effects(tx);
+    let mut next_spent = s.spent.clone();
     for nf in &effects.nullifiers {
-        if s.spent.insert_nullifier(*nf).is_err() {
+        if next_spent.insert_nullifier(*nf).is_err() {
             return ReplayResult {
                 effects,
                 spent_root_before_operation: s.spent.root(),
@@ -95,6 +96,7 @@ pub fn process_transaction(
             };
         }
     }
+    s.spent = next_spent;
     let spent_root_before_operation = s.spent.root();
     let bits = if s.tag_bits == 0 {
         DEFAULT_TAG_BITS as u8
@@ -161,6 +163,9 @@ pub fn process_serialized_transaction(
     tx_index: u32,
     bytes: &[u8],
 ) -> Result<ReplayResult, SerializedReplayError> {
+    if bytes.len() > crate::constants::MAX_TRANSACTION_BYTES {
+        return Err(SerializedReplayError::InvalidTransaction);
+    }
     let mut cursor = std::io::Cursor::new(bytes);
     let tx = Transaction::read(&mut cursor, BranchId::Nu6_3)
         .map_err(|_| SerializedReplayError::InvalidTransaction)?;
@@ -218,8 +223,8 @@ mod tests {
         };
         let key = OwnerSigningKey::try_from([1; 32]).unwrap();
         let owner = owner_key_bytes(&(&key).into());
-        let alice_bond = crate::bond::test_registration_bond("alice");
-        let bob_bond = crate::bond::test_registration_bond("bob");
+        let alice_bond = crate::bond::test_registration_bond("alice", b"UA_A");
+        let bob_bond = crate::bond::test_registration_bond("bob", b"UA_C");
         let register = Operation::Register {
             name: "alice".into(),
             owner_pk: owner,

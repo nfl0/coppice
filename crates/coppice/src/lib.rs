@@ -1,6 +1,7 @@
 //! Coppice POC: strict envelope and deterministic replay. No consensus code is modified.
 pub mod bond;
 pub mod carrier;
+pub mod config;
 pub mod constants;
 pub mod envelope;
 pub mod incremental;
