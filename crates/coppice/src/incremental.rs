@@ -46,6 +46,8 @@ struct LocalWalletState {
     tag_bits: u8,
     names: CoppiceState,
     spent: SpentTagTree,
+    #[serde(default)]
+    accepted_bond_anchors: std::collections::BTreeSet<[u8; 32]>,
 }
 
 pub struct IncrementalWallet {
@@ -152,6 +154,13 @@ impl IncrementalWallet {
         self.last_height
     }
 
+    /// Adds an Ironwood tree root independently derived by the wallet's Zcash
+    /// chain scanner. This must be called before replaying a REGISTER that uses
+    /// the root.
+    pub fn accept_bond_anchor(&mut self, anchor: [u8; 32]) {
+        self.state.accept_bond_anchor(anchor);
+    }
+
     pub fn save_local(&self) -> Result<Vec<u8>, IncrementalError> {
         serde_json::to_vec(&LocalWalletState {
             version: LOCAL_STATE_VERSION,
@@ -161,6 +170,7 @@ impl IncrementalWallet {
             tag_bits: self.state.tag_bits,
             names: self.state.names.clone(),
             spent: self.state.spent.clone(),
+            accepted_bond_anchors: self.state.accepted_bond_anchors().clone(),
         })
         .map_err(|_| IncrementalError::InvalidLocalState)
     }
@@ -172,10 +182,14 @@ impl IncrementalWallet {
             return Err(IncrementalError::InvalidLocalState);
         }
         Ok(Self {
-            state: ReplayState {
-                names: saved.names,
-                spent: saved.spent,
-                tag_bits: saved.tag_bits,
+            state: {
+                let mut state = ReplayState::new(saved.tag_bits);
+                state.names = saved.names;
+                state.spent = saved.spent;
+                for anchor in saved.accepted_bond_anchors {
+                    state.accept_bond_anchor(anchor);
+                }
+                state
             },
             activation_height: saved.activation_height,
             last_height: saved.last_height,
@@ -294,11 +308,15 @@ mod tests {
         let context: [u8; 32] = Sha256::digest(b"CoppiceIncrementalFixtureV0").into();
 
         let mut full = IncrementalWallet::new(100, context, 5);
+        full.accept_bond_anchor(alice_bond.anchor);
+        full.accept_bond_anchor(bob_bond.anchor);
         for (offset, block) in blocks.iter().enumerate() {
             full.process_block(100 + offset as u32, block).unwrap();
         }
 
         let mut interrupted = IncrementalWallet::new(100, context, 5);
+        interrupted.accept_bond_anchor(alice_bond.anchor);
+        interrupted.accept_bond_anchor(bob_bond.anchor);
         interrupted.process_block(100, &blocks[0]).unwrap();
         interrupted.process_block(101, &blocks[1]).unwrap();
         let local_state = interrupted.save_local().unwrap();

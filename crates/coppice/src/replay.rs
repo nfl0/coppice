@@ -6,6 +6,7 @@ use crate::{
     state::{CoppiceState, Transition, TransitionRejectReason, apply_operation_with_spent},
 };
 use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 use zcash_primitives::transaction::Transaction;
 use zcash_protocol::consensus::BranchId;
 
@@ -21,6 +22,7 @@ pub enum ReplayRejectReason {
     InvalidOperation(TransitionRejectReason),
     MalformedCarrier,
     MalformedNullifier,
+    UnknownBondAnchor,
 }
 #[derive(Clone, Debug)]
 pub struct ReplayResult {
@@ -40,6 +42,7 @@ pub struct ReplayState {
     pub names: CoppiceState,
     pub spent: SpentTagTree,
     pub tag_bits: u8,
+    accepted_bond_anchors: BTreeSet<[u8; 32]>,
 }
 #[derive(Clone, Debug)]
 pub struct ChainContext {
@@ -52,7 +55,16 @@ impl ReplayState {
             names: CoppiceState::default(),
             spent: SpentTagTree::default(),
             tag_bits,
+            accepted_bond_anchors: BTreeSet::new(),
         }
+    }
+    /// Records an Ironwood root independently derived from authenticated chain
+    /// history. REGISTER proofs are accepted only against roots in this set.
+    pub fn accept_bond_anchor(&mut self, anchor: [u8; 32]) {
+        self.accepted_bond_anchors.insert(anchor);
+    }
+    pub fn accepted_bond_anchors(&self) -> &BTreeSet<[u8; 32]> {
+        &self.accepted_bond_anchors
     }
     pub fn state_commitment(&self, c: &ChainContext) -> [u8; 32] {
         let mut b = crate::constants::STATE_ROOT_DOMAIN.to_vec();
@@ -100,6 +112,17 @@ pub fn process_transaction(
     }
     match crate::carrier::decode_bulletin(tx) {
         Ok(op) => {
+            if let Operation::Register { bond_anchor, .. } = &op
+                && !s.accepted_bond_anchors.contains(bond_anchor)
+            {
+                return ReplayResult {
+                    effects,
+                    spent_root_before_operation,
+                    operation: Some(op),
+                    transition: None,
+                    outcome: ReplayOutcome::Rejected(ReplayRejectReason::UnknownBondAnchor),
+                };
+            }
             let t = apply_operation_with_spent(&mut s.names, Some(&s.spent), op.clone());
             let outcome = match &t {
                 Transition::Applied => ReplayOutcome::Applied(op.clone()),
@@ -266,6 +289,15 @@ mod tests {
             carrier::build_coppice_transaction(&release, 6).unwrap(),
         ];
         let bytes = txs.iter().map(|x| serialized(&x.tx)).collect::<Vec<_>>();
+        let mut strict = ReplayState::new(6);
+        let empty_root = strict.names.state_root();
+        assert_eq!(
+            process_serialized_transaction(&mut strict, 99, 0, &bytes[2])
+                .unwrap()
+                .outcome,
+            ReplayOutcome::Rejected(ReplayRejectReason::UnknownBondAnchor)
+        );
+        assert_eq!(strict.names.state_root(), empty_root);
         let mut trailing = bytes[0].clone();
         trailing.push(0);
         assert!(matches!(
@@ -274,6 +306,8 @@ mod tests {
         ));
         let run = || {
             let mut s = ReplayState::new(6);
+            s.accept_bond_anchor(alice_bond.anchor);
+            s.accept_bond_anchor(bob_bond.anchor);
             let outcomes = bytes
                 .iter()
                 .enumerate()

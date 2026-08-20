@@ -97,7 +97,9 @@ Interpret the canonical 32-byte `TxId` encoding from byte zero. The candidate ta
 
 REGISTER succeeds only for an available canonical name whose embedded BondProof verifies against the
 embedded `bond_anchor` and `bond_tag`, the supplied owner key, the registration name context, the
-fixed POC network, and minimum value 500000 zatoshis. The proof bytes are part of the canonical
+fixed POC network, and minimum value 500000 zatoshis. In addition, `bond_anchor` must be an
+Ironwood root that the replaying wallet independently derived from authenticated Zcash history;
+proof membership in an arbitrary caller-supplied root is never sufficient. The proof bytes are part of the canonical
 REGISTER payload; only the verified tag is retained in the NameRecord. Invalid proofs and tag,
 owner, name/context, network, minimum-value, or anchor mismatches deterministically reject the
 operation without changing state. A name is available when absent, Released, or its current
@@ -135,6 +137,8 @@ Blocks are processed by ascending height and transactions by ascending `tx_index
 transaction: parse canonical bytes; extract every Ironwood `cmx` and nullifier; insert every spent
 tag; test the txid candidate prefix; decrypt/reconstruct at most one operation; then apply it.
 Consequently, a nullifier in a transaction is visible before an operation in the same transaction.
+Wallet integration records authenticated Ironwood roots before replaying registrations that may
+refer to them. A REGISTER referring to an unknown root produces `UnknownBondAnchor` and is a no-op.
 
 For the synthetic fixture context:
 

@@ -31,6 +31,15 @@ pub const BOND_K: u32 = 12;
 pub const FIXTURE_VALUE: u64 = 1_000_000;
 pub const FIXTURE_MINIMUM: u64 = 500_000;
 
+/// Private wallet material needed to prove a registration bond. Wallets obtain
+/// the note and Merkle path from their ordinary Ironwood wallet state.
+pub struct RegistrationBondWitness {
+    pub note: Note,
+    pub full_viewing_key: FullViewingKey,
+    pub spend_authorizing_key: SpendAuthorizingKey,
+    pub merkle_path: MerklePath,
+}
+
 #[derive(Clone, Debug)]
 pub struct BondMeasurement {
     pub proof: Vec<u8>,
@@ -77,6 +86,72 @@ pub fn owner_binding(owner_pk: [u8; 32]) -> pallas::Base {
     binding_32(constants::BOND_OWNER_DOMAIN, owner_pk)
 }
 
+fn circuit_for_witness(
+    witness: RegistrationBondWitness,
+    minimum: u64,
+    name: &str,
+    owner_pk: [u8; 32],
+) -> Option<(BondCircuit, Vec<pallas::Base>, [u8; 32])> {
+    let RegistrationBondWitness {
+        note,
+        full_viewing_key,
+        spend_authorizing_key,
+        merkle_path,
+    } = witness;
+    let cmx = orchard::note::ExtractedNoteCommitment::from(note.commitment());
+    let anchor = merkle_path.root(cmx);
+    let nf = note.nullifier(&full_viewing_key);
+    let rho = Rho::from_nf_old(nf);
+    let rseed = Option::<RandomSeed>::from(RandomSeed::from_bytes([55; 32], &rho))?;
+    let output = Option::<Note>::from(Note::from_parts(
+        note.recipient(),
+        NoteValue::ZERO,
+        rho,
+        rseed,
+        NoteVersion::V3,
+    ))?;
+    let spend = SpendInfo::new(full_viewing_key, note, merkle_path)?;
+    let rcv = Option::<ValueCommitTrapdoor>::from(ValueCommitTrapdoor::from_bytes(
+        pallas::Scalar::from(3).to_repr(),
+    ))?;
+    let protocol = protocol_binding();
+    let context = context_binding(name);
+    let owner = owner_binding(owner_pk);
+    let circuit = BondCircuit::from_action_context(
+        spend,
+        output,
+        pallas::Scalar::from(5),
+        rcv,
+        spend_authorizing_key,
+        minimum,
+        protocol,
+        context,
+        owner,
+        crate::spent::bond_tag_domain_field(),
+        OrchardCircuitVersion::PostNu6_3,
+    )?;
+    let nf_bytes = nf.to_bytes();
+    let tag_bytes = spent_tag(&nf_bytes).ok()?;
+    let tag = Option::<pallas::Base>::from(pallas::Base::from_repr(tag_bytes))?;
+    let anchor_field = Option::<pallas::Base>::from(pallas::Base::from_repr(anchor.to_bytes()))?;
+    Some((
+        circuit,
+        vec![
+            anchor_field,
+            pallas::Base::from(minimum),
+            protocol,
+            context,
+            owner,
+            tag,
+            pallas::Base::zero(),
+            pallas::Base::one(),
+            pallas::Base::one(),
+            pallas::Base::zero(),
+        ],
+        nf_bytes,
+    ))
+}
+
 fn fixture(
     value: u64,
     minimum: u64,
@@ -118,7 +193,6 @@ fn fixture(
         .ok()?;
     tree.checkpoint(1).ok()?;
     let mut path: MerklePath = tree.witness_at_checkpoint_depth(0.into(), 0).ok()??.into();
-    let anchor = path.root(cmx);
     if corrupt_path {
         let mut auth = path.auth_path();
         auth[0] = Option::<MerkleHashOrchard>::from(MerkleHashOrchard::from_bytes(
@@ -126,54 +200,18 @@ fn fixture(
         ))?;
         path = MerklePath::from_parts(path.position(), auth);
     }
-    let nf = note.nullifier(&fvk);
-    let rho = Rho::from_nf_old(nf);
-    let rseed = Option::<RandomSeed>::from(RandomSeed::from_bytes([55; 32], &rho))?;
-    let output = Option::<Note>::from(Note::from_parts(
-        recipient,
-        NoteValue::from_raw(0),
-        rho,
-        rseed,
-        NoteVersion::V3,
-    ))?;
-    let spend = SpendInfo::new(fvk, note, path)?;
-    let rcv = Option::<ValueCommitTrapdoor>::from(ValueCommitTrapdoor::from_bytes(
-        pallas::Scalar::from(3).to_repr(),
-    ))?;
     let actual_ask = ask_override.unwrap_or(ask);
-    let protocol = protocol_binding();
-    let context = context_binding(name);
-    let owner = owner_binding(owner_pk);
-    let circuit = BondCircuit::from_action_context(
-        spend,
-        output,
-        pallas::Scalar::from(5),
-        rcv,
-        actual_ask,
+    circuit_for_witness(
+        RegistrationBondWitness {
+            note,
+            full_viewing_key: fvk,
+            spend_authorizing_key: actual_ask,
+            merkle_path: path,
+        },
         minimum,
-        protocol,
-        context,
-        owner,
-        crate::spent::bond_tag_domain_field(),
-        OrchardCircuitVersion::PostNu6_3,
-    )?;
-    let nf_bytes = nf.to_bytes();
-    let tag_bytes = spent_tag(&nf_bytes).ok()?;
-    let tag = Option::<pallas::Base>::from(pallas::Base::from_repr(tag_bytes))?;
-    let anchor_field = Option::<pallas::Base>::from(pallas::Base::from_repr(anchor.to_bytes()))?;
-    let instance = vec![
-        anchor_field,
-        pallas::Base::from(minimum),
-        protocol,
-        context,
-        owner,
-        tag,
-        pallas::Base::zero(),
-        pallas::Base::one(),
-        pallas::Base::one(),
-        pallas::Base::zero(),
-    ];
-    Some((circuit, instance, nf_bytes))
+        name,
+        owner_pk,
+    )
 }
 
 fn prove(
@@ -207,6 +245,37 @@ pub fn run_bond_poc_for_registration(
 ) -> Result<BondMeasurement, String> {
     let (circuit, instance, _) =
         fixture(FIXTURE_VALUE, FIXTURE_MINIMUM, false, None, name, owner_pk).ok_or("fixture")?;
+    let params = Params::<vesta::Affine>::new(BOND_K);
+    let vk = keygen_vk(&params, &circuit).map_err(|e| format!("vk: {e:?}"))?;
+    let pk = keygen_pk(&params, vk, &circuit).map_err(|e| format!("pk: {e:?}"))?;
+    let start = Instant::now();
+    let proof = prove(&params, &pk, circuit, &instance).map_err(|e| format!("prove: {e:?}"))?;
+    let proving_time = start.elapsed();
+    let start = Instant::now();
+    if !verify(&params, pk.get_vk(), &proof, &instance) {
+        return Err("verify".into());
+    }
+    let verification_time = start.elapsed();
+    Ok(BondMeasurement {
+        proof,
+        proving_time,
+        verification_time,
+        public_input_bytes: instance.len() * 32,
+        k: BOND_K,
+        bond_tag: instance[5].to_repr(),
+        anchor: instance[0].to_repr(),
+        peak_memory_kib: peak_memory_kib(),
+    })
+}
+
+/// Proves a registration bond from a real wallet-owned Ironwood note.
+pub fn prove_registration_bond(
+    witness: RegistrationBondWitness,
+    name: &str,
+    owner_pk: [u8; 32],
+) -> Result<BondMeasurement, String> {
+    let (circuit, instance, _) =
+        circuit_for_witness(witness, FIXTURE_MINIMUM, name, owner_pk).ok_or("bond witness")?;
     let params = Params::<vesta::Affine>::new(BOND_K);
     let vk = keygen_vk(&params, &circuit).map_err(|e| format!("vk: {e:?}"))?;
     let pk = keygen_pk(&params, vk, &circuit).map_err(|e| format!("pk: {e:?}"))?;

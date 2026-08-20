@@ -65,6 +65,10 @@ The proof demonstrates, without revealing the note itself, that:
 
 The note commitment, nullifier, exact value, tree position, receiver, and spending key remain private.
 
+Replay accepts that proof only when the embedded root was independently derived by the wallet's
+authenticated Zcash chain scanner. This prevents a proof against an attacker-chosen tree from
+creating an unbacked registration.
+
 The current bond tag is derived using a Pasta/Halo2-native Poseidon construction. When the bonded note is eventually spent, its ordinary Zcash nullifier becomes public. Coppice replay derives the same `bond_tag` and marks the corresponding name inactive.
 
 ## Transport
