@@ -380,9 +380,12 @@ mod tests {
             fixture(499_999, FIXTURE_MINIMUM, false, None, "bonded", owner).unwrap();
         let low_proof = prove(&params, &pk, low, &low_instance).unwrap();
         assert!(!verify(&params, pk.get_vk(), &low_proof, &low_instance));
-        let (wrong_path, wrong_instance, _) =
+        let (wrong_path, mut wrong_instance, _) =
             fixture(FIXTURE_VALUE, FIXTURE_MINIMUM, true, None, "bonded", owner).unwrap();
         let wrong_proof = prove(&params, &pk, wrong_path, &wrong_instance).unwrap();
+        // A path authenticates to the root it computes. Verification must bind
+        // that proof to the independently accepted root, not the attacker's.
+        wrong_instance[0] = instance[0];
         assert!(!verify(&params, pk.get_vk(), &wrong_proof, &wrong_instance));
         let wrong_sk = Option::<SpendingKey>::from(SpendingKey::from_bytes([8; 32])).unwrap();
         assert!(
