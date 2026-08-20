@@ -299,7 +299,9 @@ the installed `podman-compose`, and mines to fixed local Coppice activation heig
 regtest network upgrades activate at heights 1 and 2, and the local Zaino endpoint is
 `127.0.0.1:28137`. The interactive flow switches among wallets and invokes the same Coppice
 REGISTER, UPDATE, RELEASE, and RESOLVE commands used by the public playground. `mine` confirms
-pending transactions immediately and syncs all three wallets. `reset` removes only the local Z3
+pending transactions immediately and syncs all three wallets. On first start, mining is assigned
+to wallet 1 and enough blocks are generated to mature its first coinbase reward; use the normal
+`zcash-devtool` send/shield commands to distribute test funds. `reset` removes only the local Z3
 volumes and `.coppice-regtest/` wallet state.
 
 Z3 currently pins Zaino 0.6; the script overrides only that container image to the public Zaino

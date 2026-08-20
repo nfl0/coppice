@@ -200,11 +200,16 @@ start() {
   printf 'Coppice regtest ready (activation %s, Zaino %s).\n' "$ACTIVATION" "$SERVER"
 }
 
-stop() { require_layout; compose --profile '*' down; }
+stop() {
+  require_layout
+  compose --profile '*' down
+  rm -f "$Z3_DIR/.coppice-podman.yml"
+}
 
 reset() {
   require_layout
   compose --profile '*' down -v --remove-orphans || true
+  rm -f "$Z3_DIR/.coppice-podman.yml"
   [[ "$STATE" == "$ROOT/.coppice-regtest" ]] || die "refusing to remove non-default state path"
   rm -rf "$STATE"
   printf 'Coppice regtest state removed.\n'
