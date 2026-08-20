@@ -307,6 +307,17 @@ volumes and `.coppice-regtest/` wallet state.
 Z3 currently pins Zaino 0.6; the script overrides only that container image to the public Zaino
 0.8 no-TLS image because 0.6 predates the Ironwood compact-sync enum used by `zcash-devtool`.
 
+To print newly replayed local activity, run:
+
+```bash
+./scripts/watch-regtest.py
+```
+
+The watcher polls only Zebra's block height. For each new block it invokes the existing Rust
+`zcash-devtool coppice watch --once` path, which performs candidate detection, transaction fetch,
+memo decoding, and canonical replay through Zaino. It prints REGISTER, UPDATE, RELEASE, rejected
+candidates, and observed bond spends with height and txid. Use `--once` for a single catch-up pass.
+
 This is disposable developer infrastructure. Do not use its keys, activation height, reduced
 8-bit local discovery tag, or chain as public protocol parameters.
 
