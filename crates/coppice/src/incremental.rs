@@ -8,6 +8,7 @@ use crate::{
     state::{CoppiceState, Status},
 };
 use serde::{Deserialize, Serialize};
+use zcash_primitives::transaction::TxId;
 
 const LOCAL_STATE_VERSION: u8 = 1;
 
@@ -16,6 +17,15 @@ pub enum IncrementalError {
     NonSequentialHeight,
     InvalidTransaction,
     InvalidLocalState,
+}
+
+/// Compact chain data needed by Coppice. Full transaction bytes are required
+/// only when the transaction ID matches the configured Coppice prefix.
+pub struct CompactReplayTx {
+    pub tx_index: u32,
+    pub txid: TxId,
+    pub nullifiers: Vec<[u8; 32]>,
+    pub candidate_transaction: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -78,6 +88,57 @@ impl IncrementalWallet {
             .collect::<Result<Vec<_>, _>>()?;
         self.last_height = Some(height);
         Ok(outcomes)
+    }
+
+    pub fn process_compact_block(
+        &mut self,
+        height: u32,
+        transactions: &[CompactReplayTx],
+    ) -> Result<Vec<ReplayOutcome>, IncrementalError> {
+        let expected = self
+            .last_height
+            .map_or(self.activation_height, |h| h.saturating_add(1));
+        if height != expected {
+            return Err(IncrementalError::NonSequentialHeight);
+        }
+        let mut outcomes = Vec::with_capacity(transactions.len());
+        for tx in transactions {
+            for nullifier in &tx.nullifiers {
+                self.state
+                    .spent
+                    .insert_nullifier(*nullifier)
+                    .map_err(|_| IncrementalError::InvalidTransaction)?;
+            }
+            if !crate::is_coppice_candidate(&tx.txid, self.state.tag_bits) {
+                outcomes.push(ReplayOutcome::NotCandidate);
+                continue;
+            }
+            let Some(raw) = tx.candidate_transaction.as_deref() else {
+                return Err(IncrementalError::InvalidTransaction);
+            };
+            let parsed = zcash_primitives::transaction::Transaction::read(
+                raw,
+                zcash_protocol::consensus::BranchId::Nu6_3,
+            )
+            .map_err(|_| IncrementalError::InvalidTransaction)?;
+            if parsed.txid() != tx.txid {
+                return Err(IncrementalError::InvalidTransaction);
+            }
+            let result = process_serialized_transaction(&mut self.state, height, tx.tx_index, raw)
+                .map_err(|_| IncrementalError::InvalidTransaction)?;
+            outcomes.push(result.outcome);
+        }
+        self.last_height = Some(height);
+        Ok(outcomes)
+    }
+
+    pub fn next_height(&self) -> u32 {
+        self.last_height
+            .map_or(self.activation_height, |h| h.saturating_add(1))
+    }
+
+    pub fn last_height(&self) -> Option<u32> {
+        self.last_height
     }
 
     pub fn save_local(&self) -> Result<Vec<u8>, IncrementalError> {

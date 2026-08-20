@@ -220,6 +220,38 @@ cargo test --workspace
 
 If the vendored Orchard implementation is modified, its relevant upstream test suite should also remain passing.
 
+## Testnet V0 playground
+
+`coppice-playground.sh` is experimental terminal tooling for the public Zcash testnet registry. It
+uses the sibling `zcash-devtool` checkout for wallet sync, transaction construction, proving,
+signing, and broadcast, while all Coppice encoding and replay remains in the `coppice` crate.
+
+```bash
+git clone https://github.com/nfl0/coppice.git
+git clone https://github.com/nfl0/zcash-devtool.git
+cd coppice
+./coppice-playground.sh
+```
+
+The first run creates a dedicated encrypted testnet wallet under `.coppice-testnet-v0`, prints its
+Unified Address, syncs, and replays Coppice from fixed activation height `4,288,414`. Fund that
+address with TAZ from <https://zcashfaucet.jinolabs.xyz/>; faucet access is never automated.
+
+Automatic commands are deliberately small:
+
+```bash
+./coppice-playground.sh sync
+./coppice-playground.sh status
+./coppice-playground.sh register alice utest1...
+./coppice-playground.sh resolve alice
+./coppice-playground.sh update alice utest1...
+./coppice-playground.sh release alice
+./coppice-playground.sh watch
+```
+
+Local state resumes on later runs. A fresh installation reconstructs it by replaying testnet from
+the activation height. This is POC tooling, not a production wallet.
+
 ## License
 
 The Coppice crates are licensed under MIT OR Apache-2.0. Vendored dependencies retain their

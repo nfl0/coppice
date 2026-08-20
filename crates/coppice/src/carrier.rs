@@ -52,6 +52,12 @@ pub struct GroundPczt {
     pub attempts: u64,
     pub frame_count: usize,
 }
+pub struct GroundPcztBytes {
+    pub bytes: Vec<u8>,
+    pub txid: TxId,
+    pub attempts: u64,
+    pub frame_count: usize,
+}
 #[derive(Clone, Copy, Debug, Default)]
 pub struct GrindProfile {
     pub pczt_clone: std::time::Duration,
@@ -172,6 +178,23 @@ pub fn grind_existing_pczt(base: Pczt, op: &Operation, tag_bits: u8) -> Result<G
         }
     }
     Err(Error::Grind)
+}
+
+/// Serialization boundary for wallets whose librustzcash PCZT crate is older
+/// than the POC's effecting-data helper API. PCZT wire semantics are unchanged.
+pub fn grind_serialized_pczt(
+    encoded: &[u8],
+    op: &Operation,
+    tag_bits: u8,
+) -> Result<GroundPcztBytes, Error> {
+    let base = Pczt::parse(encoded).map_err(|_| Error::Pczt)?;
+    let ground = grind_existing_pczt(base, op, tag_bits)?;
+    Ok(GroundPcztBytes {
+        bytes: ground.pczt.serialize().map_err(|_| Error::Pczt)?,
+        txid: ground.txid,
+        attempts: ground.attempts,
+        frame_count: ground.frame_count,
+    })
 }
 
 /// Constructs a valid carrier around arbitrary logical bytes for adversarial scanner fixtures.

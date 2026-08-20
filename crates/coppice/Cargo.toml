@@ -17,7 +17,7 @@ hex.workspace = true
 incrementalmerkletree.workspace = true
 orchard.workspace = true
 pasta_curves.workspace = true
-pczt.workspace = true
+pczt = { path = "../../vendor/pczt", features = ["zcp-builder", "io-finalizer", "prover", "signer", "spend-finalizer", "tx-extractor"] }
 rand_chacha.workspace = true
 rand_core.workspace = true
 serde.workspace = true
