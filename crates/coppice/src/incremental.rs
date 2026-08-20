@@ -12,7 +12,7 @@ use orchard::tree::MerkleHashOrchard;
 use serde::{Deserialize, Serialize};
 use zcash_primitives::transaction::TxId;
 
-const LOCAL_STATE_VERSION: u8 = 3;
+const LOCAL_STATE_VERSION: u8 = 4;
 type IronwoodTree = CommitmentTree<MerkleHashOrchard, 32>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -24,6 +24,7 @@ pub enum IncrementalError {
     InvalidLocalState,
     InvalidRewind,
     NonCanonicalChain,
+    InitializationClosed,
 }
 
 /// Compact chain data needed by Coppice. Full transaction bytes are required
@@ -76,6 +77,7 @@ struct LocalWalletState {
     ironwood_tree: Vec<u8>,
     initial_ironwood_tree: Vec<u8>,
     initial_bond_anchors: std::collections::BTreeSet<[u8; 32]>,
+    initial_spent: SpentTagTree,
     journal: Vec<JournalBlock>,
 }
 
@@ -87,6 +89,7 @@ pub struct IncrementalWallet {
     ironwood_tree: IronwoodTree,
     initial_ironwood_tree: IronwoodTree,
     initial_bond_anchors: std::collections::BTreeSet<[u8; 32]>,
+    initial_spent: SpentTagTree,
     journal: Vec<JournalBlock>,
 }
 
@@ -118,6 +121,7 @@ impl IncrementalWallet {
             ironwood_tree: ironwood_tree.clone(),
             initial_ironwood_tree: ironwood_tree,
             initial_bond_anchors: std::collections::BTreeSet::new(),
+            initial_spent: SpentTagTree::default(),
             journal: vec![],
         }
     }
@@ -281,6 +285,27 @@ impl IncrementalWallet {
         self.last_height
     }
 
+    /// Seeds the public spent detector with Ironwood nullifiers observed before
+    /// Coppice activation. This closes the otherwise-invalid path where an old,
+    /// already-spent note is proven against a later commitment-tree root.
+    pub fn seed_prior_nullifiers(
+        &mut self,
+        nullifiers: impl IntoIterator<Item = [u8; 32]>,
+    ) -> Result<(), IncrementalError> {
+        if self.last_height.is_some() || !self.journal.is_empty() {
+            return Err(IncrementalError::InitializationClosed);
+        }
+        let mut spent = self.state.spent.clone();
+        for nullifier in nullifiers {
+            spent
+                .insert_nullifier(nullifier)
+                .map_err(|_| IncrementalError::InvalidTransaction)?;
+        }
+        self.state.spent = spent.clone();
+        self.initial_spent = spent;
+        Ok(())
+    }
+
     pub fn block_id_at(&self, height: u32) -> Option<[u8; 32]> {
         self.journal
             .iter()
@@ -314,6 +339,8 @@ impl IncrementalWallet {
         for anchor in &self.initial_bond_anchors {
             rebuilt.accept_bond_anchor(*anchor);
         }
+        rebuilt.state.spent = self.initial_spent.clone();
+        rebuilt.initial_spent = self.initial_spent.clone();
         for block in retained {
             let transactions = block
                 .transactions
@@ -372,6 +399,7 @@ impl IncrementalWallet {
             ironwood_tree,
             initial_ironwood_tree,
             initial_bond_anchors: self.initial_bond_anchors.clone(),
+            initial_spent: self.initial_spent.clone(),
             journal: self.journal.clone(),
         })
         .map_err(|_| IncrementalError::InvalidLocalState)
@@ -412,6 +440,7 @@ impl IncrementalWallet {
             ironwood_tree,
             initial_ironwood_tree,
             initial_bond_anchors: saved.initial_bond_anchors,
+            initial_spent: saved.initial_spent,
             journal: saved.journal,
         })
     }
@@ -527,6 +556,7 @@ mod tests {
         let context: [u8; 32] = Sha256::digest(b"CoppiceIncrementalFixtureV0").into();
 
         let mut full = IncrementalWallet::new(100, context, 5);
+        full.seed_prior_nullifiers([[7; 32]]).unwrap();
         full.accept_bond_anchor(alice_bond.anchor);
         full.accept_bond_anchor(bob_bond.anchor);
         for (offset, block) in blocks.iter().enumerate() {
@@ -534,6 +564,7 @@ mod tests {
         }
 
         let mut interrupted = IncrementalWallet::new(100, context, 5);
+        interrupted.seed_prior_nullifiers([[7; 32]]).unwrap();
         interrupted.accept_bond_anchor(alice_bond.anchor);
         interrupted.accept_bond_anchor(bob_bond.anchor);
         interrupted.process_block(100, &blocks[0]).unwrap();
@@ -561,6 +592,7 @@ mod tests {
         reorged.rewind_to(101).unwrap();
         reorged.process_block(102, &[]).unwrap();
         let mut clean = IncrementalWallet::new(100, context, 5);
+        clean.seed_prior_nullifiers([[7; 32]]).unwrap();
         clean.accept_bond_anchor(alice_bond.anchor);
         clean.accept_bond_anchor(bob_bond.anchor);
         clean.process_block(100, &blocks[0]).unwrap();
@@ -576,6 +608,10 @@ mod tests {
             reorged.resolve("alice"),
             LocalResolution::Active { .. }
         ));
+        assert_eq!(
+            full.seed_prior_nullifiers([[8; 32]]),
+            Err(IncrementalError::InitializationClosed)
+        );
 
         full.state.spent.insert_spent_tag(bob_bond.bond_tag);
         assert_eq!(full.resolve("bob"), LocalResolution::InactiveBondSpent);

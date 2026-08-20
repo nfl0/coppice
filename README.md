@@ -46,8 +46,10 @@ compact sync data (txid + Ironwood effects)
            local resolution
 ```
 
-A fresh wallet loads the authenticated Ironwood tree frontier immediately before the protocol's
-activation height, then reconstructs Coppice state by replaying Zcash history from activation. An
+A fresh wallet first accumulates Ironwood nullifiers from the network's Ironwood activation, then
+loads the authenticated Ironwood tree frontier immediately before Coppice activation and
+reconstructs naming operations from that height. This ensures a pre-Coppice note spent before
+Coppice activation cannot be reused as a registration bond. An
 already-synced wallet may persist its own local derived state and resume from its last processed
 chain position.
 
