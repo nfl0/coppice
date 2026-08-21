@@ -4,9 +4,9 @@
 
 # Coppice 🪵
 
-**Coppice** is an experimental, adminless naming protocol for Zcash.
+**Coppice**. A native privacy-preserving naming protocol for Zcash. Zcash.
 
-> Coppice is a cryptographically self-verifying Zcash namespace, built from private bond proofs, public nullifier liveness, and deterministic state derivation.
+Coppice is a cryptographically self-verifying Zcash namespace, built from private bond proofs, public nullifier liveness, and deterministic state derivation.
 
 Wallets independently derive name state from ordered Ironwood effects and txid-tagged bulletin
 carriers in Zcash history.
