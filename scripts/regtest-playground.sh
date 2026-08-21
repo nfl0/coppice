@@ -285,8 +285,16 @@ play() {
   done
 }
 
-case "${1:-play}" in
+automatic_test() (
+  # Always stop the disposable stack, including when the lifecycle test fails
+  # or the caller interrupts it.
+  trap '"$ROOT/scripts/regtest-playground.sh" stop >/dev/null 2>&1 || true' EXIT
+  "$ROOT/scripts/regtest-multiwallet-test.sh" --reset
+)
+
+case "${1:-test}" in
   _compose) shift; compose "$@" ;;
+  test) automatic_test ;;
   start) start ;;
   stop) stop ;;
   reset) reset ;;
@@ -294,5 +302,5 @@ case "${1:-play}" in
   status) status ;;
   sync) start; sync_wallets ;;
   play) play ;;
-  *) die "usage: $0 {start|stop|reset|mine [COUNT]|status|sync|play}" ;;
+  *) die "usage: $0 {test|start|stop|reset|mine [COUNT]|status|sync|play}" ;;
 esac

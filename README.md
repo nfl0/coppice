@@ -287,6 +287,17 @@ then run:
 
 ```bash
 cargo build --release --features regtest_support --manifest-path ../zcash-devtool/Cargo.toml
+./scripts/regtest-playground.sh
+```
+
+With no arguments, the playground resets the disposable regtest, starts Z3, runs the deterministic
+multi-wallet lifecycle with explicit script-controlled mining, writes a timestamped log under
+`logs/`, and stops Z3 even if the test fails. The same flow is available explicitly as
+`./scripts/regtest-playground.sh test`.
+
+For operator-controlled exploration instead, use:
+
+```bash
 ./scripts/regtest-playground.sh start
 ./scripts/regtest-playground.sh status
 ./scripts/regtest-playground.sh mine 1
@@ -294,8 +305,8 @@ cargo build --release --features regtest_support --manifest-path ../zcash-devtoo
 ./scripts/regtest-playground.sh stop
 ```
 
-For a disposable, deterministic two-wallet exercise (with a timestamped local log under
-`logs/`), use:
+The underlying lifecycle test can also be invoked directly, but unlike the no-argument wrapper it
+leaves the stack running for diagnosis:
 
 ```bash
 ./scripts/regtest-multiwallet-test.sh --reset
