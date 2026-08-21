@@ -648,9 +648,9 @@ mod tests {
         interrupted.accept_bond_anchor(alice_bond.anchor);
         interrupted.accept_bond_anchor(bob_bond.anchor);
         interrupted.process_block(100, &blocks[0]).unwrap();
-        interrupted.process_block(101, &blocks[1]).unwrap();
         let local_state = interrupted.save_local().unwrap();
         let mut resumed = IncrementalWallet::load_local(&local_state).unwrap();
+        resumed.process_block(101, &blocks[1]).unwrap();
         resumed.process_block(102, &blocks[2]).unwrap();
 
         assert_eq!(

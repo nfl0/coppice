@@ -20,8 +20,40 @@ pub struct NameRecord {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CoppiceState {
     pub names: BTreeMap<String, NameRecord>,
-    #[serde(default)]
+    #[serde(default, with = "commitment_map_serde")]
     pub commitments: BTreeMap<[u8; 32], ChainPosition>,
+}
+
+mod commitment_map_serde {
+    use super::ChainPosition;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
+    use std::collections::BTreeMap;
+
+    pub fn serialize<S>(
+        value: &BTreeMap<[u8; 32], ChainPosition>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        value.iter().collect::<Vec<_>>().serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(
+        deserializer: D,
+    ) -> Result<BTreeMap<[u8; 32], ChainPosition>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let entries = Vec::<([u8; 32], ChainPosition)>::deserialize(deserializer)?;
+        let mut value = BTreeMap::new();
+        for (commitment, position) in entries {
+            if value.insert(commitment, position).is_some() {
+                return Err(D::Error::custom("duplicate registration commitment"));
+            }
+        }
+        Ok(value)
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChainPosition {
@@ -771,6 +803,9 @@ mod tests {
             ),
             Transition::Applied
         );
+        let encoded = serde_json::to_vec(&state).unwrap();
+        let decoded: CoppiceState = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(decoded, state);
         let before = state.clone();
         assert_eq!(
             apply_operation(

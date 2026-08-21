@@ -52,6 +52,15 @@ with Path(sys.argv[1]).open(encoding="utf-8") as source:
 with Path(sys.argv[2]).open(encoding="utf-8") as source:
     overlay = yaml.load(source, Loader=Loader)
 result = merge(base, overlay)
+# This playground intentionally starts only the Zcash services it exercises.
+# Removing unrelated Z3 services also avoids podman-compose trying to recreate
+# optional rpc-router/monitoring containers that were never started.
+required_services = {"zebra", "cookie-permissions", "zaino", "zallet"}
+result["services"] = {
+    name: service
+    for name, service in result.get("services", {}).items()
+    if name in required_services
+}
 # Podman intentionally refuses unresolved Docker short names on installations
 # without a registries.conf search list. Z3's image names use Docker semantics.
 for service in result.get("services", {}).values():
