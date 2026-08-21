@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# POC-only, deterministic multi-wallet exercise. The script advances the chain
+# Test-only, deterministic multi-wallet exercise. The script advances the chain
 # only at the explicit confirmation boundaries below; there is no background
 # or interval miner.
 set -euo pipefail
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 PLAYGROUND="$ROOT/scripts/regtest-playground.sh"
-DEVTOOL=${ZCASH_DEVTOOL:-"$ROOT/../zcash-devtool/target/release/zcash-devtool"}
+CLI=${COPPICE_CLI:-"$ROOT/../coppice-cli/target/release/coppice-cli"}
 STATE=${COPPICE_REGTEST_DIR:-"$ROOT/.coppice-regtest"}
 SERVER=${COPPICE_REGTEST_SERVER:-127.0.0.1:28137}
 LOG_DIR=${COPPICE_REGTEST_LOG_DIR:-"$ROOT/logs"}
@@ -23,8 +23,8 @@ controlled_mine() {
 }
 wallet_dir() { printf '%s/wallet-%s' "$STATE" "$1"; }
 identity() { printf '%s/age-identity.txt' "$(wallet_dir "$1")"; }
-wallet() { local n=$1; shift; "$DEVTOOL" wallet --wallet-dir "$(wallet_dir "$n")" "$@"; }
-coppice() { local n=$1; shift; "$DEVTOOL" coppice --wallet-dir "$(wallet_dir "$n")" "$@"; }
+wallet() { local n=$1; shift; "$CLI" wallet --wallet-dir "$(wallet_dir "$n")" "$@"; }
+coppice() { local n=$1; shift; "$CLI" coppice --wallet-dir "$(wallet_dir "$n")" "$@"; }
 ua() { wallet "$1" list-addresses --receiver unified | sed -n 's/^     Default Address: //p'; }
 taddr() { wallet "$1" list-addresses --receiver transparent | sed -n 's/^Receiver(transparent): //p' | head -1; }
 
@@ -33,7 +33,7 @@ taddr() { wallet "$1" list-addresses --receiver transparent | sed -n 's/^Receive
   echo "This removes only the disposable local Z3 regtest volumes and .coppice-regtest state."
   exit 2
 }
-[[ -x "$DEVTOOL" ]] || { echo "missing zcash-devtool: $DEVTOOL"; exit 1; }
+[[ -x "$CLI" ]] || { echo "missing coppice-cli: $CLI"; exit 1; }
 
 say "resetting local regtest"
 "$PLAYGROUND" reset

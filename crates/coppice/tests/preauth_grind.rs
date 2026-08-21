@@ -1,4 +1,4 @@
-//! This test exercises the actual PCZT effecting-data -> proof -> authorization lifecycle.
+//! This regression exercises the actual PCZT effecting-data -> proof -> authorization lifecycle.
 use incrementalmerkletree::Retention;
 use orchard::{
     keys::{FullViewingKey, IncomingViewingKey, Scope, SpendAuthorizingKey, SpendingKey},

@@ -27,9 +27,9 @@ def zebra_height(endpoint: str) -> int:
     return int(payload["result"])
 
 
-def replay(devtool: Path, wallet: Path, zaino: str) -> None:
+def replay(cli: Path, wallet: Path, zaino: str) -> None:
     command = [
-        str(devtool),
+        str(cli),
         "coppice",
         "--wallet-dir",
         str(wallet),
@@ -55,9 +55,9 @@ def main() -> int:
     parser.add_argument("--zebra", default="http://127.0.0.1:29232")
     parser.add_argument("--zaino", default="127.0.0.1:28137")
     parser.add_argument(
-        "--devtool",
+        "--cli",
         type=Path,
-        default=ROOT.parent / "zcash-devtool" / "target" / "release" / "zcash-devtool",
+        default=ROOT.parent / "coppice-cli" / "target" / "release" / "coppice-cli",
     )
     parser.add_argument(
         "--state-dir", type=Path, default=ROOT / ".coppice-regtest"
@@ -66,14 +66,14 @@ def main() -> int:
     if args.interval <= 0:
         parser.error("--interval must be positive")
     wallet = args.state_dir / f"wallet-{args.wallet}"
-    if not args.devtool.is_file():
-        parser.error(f"zcash-devtool not found: {args.devtool}")
+    if not args.cli.is_file():
+        parser.error(f"coppice-cli not found: {args.cli}")
     if not (wallet / "keys.toml").is_file():
         parser.error(f"regtest wallet not found: {wallet}; run scripts/regtest-playground.sh start")
 
     # The Rust watcher owns protocol parsing, candidate detection, memo
     # decryption, and state persistence. Python only polls the local block tip.
-    replay(args.devtool, wallet, args.zaino)
+    replay(args.cli, wallet, args.zaino)
     last_seen = zebra_height(args.zebra)
     if args.once:
         return 0
@@ -82,7 +82,7 @@ def main() -> int:
         tip = zebra_height(args.zebra)
         if tip <= last_seen:
             continue
-        replay(args.devtool, wallet, args.zaino)
+        replay(args.cli, wallet, args.zaino)
         last_seen = tip
 
 

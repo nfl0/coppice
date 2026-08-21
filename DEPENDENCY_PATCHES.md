@@ -53,7 +53,7 @@ changes only `zcash_client_backend/src/data_api/wallet.rs`:
 - keeps `create_pczt_from_proposal` as the existing convenience API, delegating through the new
   function with the original `IoFinalizer::finalize_io` behavior.
 
-`zcash-devtool` uses the hook for this lifecycle:
+`coppice-cli` uses the hook for this lifecycle:
 
 ```text
 construct effecting data
@@ -66,11 +66,11 @@ construct effecting data
 
 This is an additive wallet API. It does not modify transaction serialization, sighash definitions,
 proof systems, consensus validation, or the behavior of existing callers. Because Cargo treats Git
-sources as distinct dependency sources, `zcash-devtool` pins the related librustzcash workspace
+sources as distinct dependency sources, `coppice-cli` pins the related librustzcash workspace
 crates to the same fork revision even though only `zcash_client_backend` contains a code change.
 
 The standalone `coppice` protocol crate does not itself patch librustzcash with this commit; the
-patch is needed by wallet transaction construction in `zcash-devtool` and by another wallet that
+patch is needed by wallet transaction construction in `coppice-cli` and by another wallet that
 wants to create ground Coppice carriers through the same high-level proposal API.
 
 ## Integration consequence

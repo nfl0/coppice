@@ -3,8 +3,8 @@ set -euo pipefail
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 Z3_DIR=${Z3_DIR:-"$ROOT/../z3"}
-DEVTOOL_DIR=${ZCASH_DEVTOOL_REPO:-"$ROOT/../zcash-devtool"}
-DEVTOOL=${ZCASH_DEVTOOL:-"$DEVTOOL_DIR/target/release/zcash-devtool"}
+CLI_DIR=${COPPICE_CLI_REPO:-"$ROOT/../coppice-cli"}
+CLI=${COPPICE_CLI:-"$CLI_DIR/target/release/coppice-cli"}
 STATE=${COPPICE_REGTEST_DIR:-"$ROOT/.coppice-regtest"}
 SERVER=${COPPICE_REGTEST_SERVER:-127.0.0.1:28137}
 ACTIVATION=10
@@ -29,7 +29,7 @@ require_layout() {
   need python3
   need curl
   [[ -f "$Z3_DIR/.env.regtest" ]] || die "clone external Z3 at $Z3_DIR (https://github.com/ZcashFoundation/z3)"
-  [[ -f "$DEVTOOL_DIR/Cargo.toml" ]] || die "zcash-devtool not found at $DEVTOOL_DIR"
+  [[ -f "$CLI_DIR/Cargo.toml" ]] || die "coppice-cli not found at $CLI_DIR"
 }
 
 compose() {
@@ -83,18 +83,18 @@ wait_for_zaino() {
   local target i info
   target=$(rpc getblockcount | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"])')
   for i in {1..90}; do
-    info=$("$DEVTOOL" wallet --wallet-dir "$(wallet_dir 1)" get-info --server "$SERVER" 2>/dev/null || true)
+    info=$("$CLI" wallet --wallet-dir "$(wallet_dir 1)" get-info --server "$SERVER" 2>/dev/null || true)
     [[ "$info" == *"\"chain_tip_height\":$target"* ]] && return
     sleep 1
   done
   die "Zaino did not index height $target"
 }
 
-build_devtool() {
-  if [[ ! -x "$DEVTOOL" ]] \
-    || ! "$DEVTOOL" wallet init --help 2>&1 | grep -q activation-heights \
-    || find "$DEVTOOL_DIR/src" "$DEVTOOL_DIR/Cargo.toml" -newer "$DEVTOOL" -print -quit | grep -q .; then
-    cargo build --release --features regtest_support --manifest-path "$DEVTOOL_DIR/Cargo.toml"
+build_cli() {
+  if [[ ! -x "$CLI" ]] \
+    || ! "$CLI" wallet init --help 2>&1 | grep -q activation-heights \
+    || find "$CLI_DIR/src" "$CLI_DIR/Cargo.toml" -newer "$CLI" -print -quit | grep -q .; then
+    cargo build --release --features regtest_support --manifest-path "$CLI_DIR/Cargo.toml"
   fi
 }
 
@@ -132,17 +132,17 @@ identity() { printf '%s/age-identity.txt' "$(wallet_dir "$1")"; }
 
 wallet() {
   local index=$1; shift
-  "$DEVTOOL" wallet --wallet-dir "$(wallet_dir "$index")" "$@"
+  "$CLI" wallet --wallet-dir "$(wallet_dir "$index")" "$@"
 }
 
 coppice() {
   local index=$1; shift
-  "$DEVTOOL" coppice --wallet-dir "$(wallet_dir "$index")" "$@"
+  "$CLI" coppice --wallet-dir "$(wallet_dir "$index")" "$@"
 }
 
 initialize_wallets() {
   local i dir
-  build_devtool
+  build_cli
   write_activation_heights
   for i in $(seq 1 "$WALLET_COUNT"); do
     dir=$(wallet_dir "$i")

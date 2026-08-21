@@ -1,14 +1,14 @@
 # Coppice 🪵
 
-**Coppice** is an experimental, adminless naming protocol for Zcash.
+**Coppice** is a native privacy-preserving naming protocol for Zcash.
 
 It maps human-readable names to Zcash Unified Addresses using ordinary Zcash transactions as the authoritative history. Coppice has no registry administrator, no separate blockchain, and no required Zcash consensus changes.
 
-> **Status:** proof of concept. The core protocol has been exercised with real Zcash testnet v6/Ironwood transactions, but Coppice is not production software and has not received an independent security audit.
+> **Status:** experimental reference implementation. The core protocol has been exercised with real Zcash testnet v6/Ironwood transactions, but Coppice is not production software and has not received an independent security audit.
 
 ## What Coppice demonstrates
 
-The current POC demonstrates a minimal naming lifecycle:
+The current implementation demonstrates a minimal naming lifecycle:
 
 - `COMMIT` / `REVEAL` — hide a prospective registration until a prior-block commitment is mined,
   then claim the available name with an owner, Unified Address, and private ZEC bond proof.
@@ -60,7 +60,7 @@ The wallet library retains a minimal local compact-effects journal. If a Zcash b
 changes, callers rewind to the common ancestor and replay the replacement branch; this is derived
 wallet state, not a portable snapshot or a new consensus mechanism.
 
-No snapshot system is part of the current protocol POC.
+No snapshot system is part of the current protocol.
 
 The public Testnet V0 parameters are exposed as `coppice::config::TESTNET_V0`; wallet integrations
 should not duplicate activation heights, tag widths, or bond thresholds. An integration skeleton
@@ -83,7 +83,7 @@ The note commitment, nullifier, exact value, tree position, receiver, and spendi
 
 The current experimental minimum bond is **1 ZEC (100,000,000 zatoshis)**. The BondCircuit proves
 the inclusive relation `note_value >= minimum`, so a note worth exactly 1 ZEC qualifies. This
-replaces the earlier Testnet V0 POC threshold of 500,000 zatoshis; proofs made against that earlier
+replaces the earlier experimental Testnet V0 threshold of 500,000 zatoshis; proofs made against that earlier
 minimum are intentionally not accepted by the current experimental semantics.
 
 Replay accepts that proof only when the embedded root was independently derived by the wallet's
@@ -98,7 +98,7 @@ Coppice operations are carried inside ordinary encrypted Zcash memos sent to a d
 
 Large operations are split across multiple memo frames. A txid-prefix tag allows wallets to identify candidate Coppice transactions without trial-decrypting every shielded output.
 
-The POC has demonstrated pre-authorization txid grinding:
+The implementation has demonstrated pre-authorization txid grinding:
 
 ```text
 construct fixed transaction effects
@@ -164,8 +164,7 @@ coppice/
 ├── README.md
 ├── REFERENCE.md
 ├── crates/
-│   ├── coppice/          # reusable protocol/library crate
-│   └── coppice-poc/      # POC, tests, and development harness
+│   └── coppice/          # protocol library, integration tests, and reference examples
 ├── test-vectors/
 └── vendor/
     └── orchard/          # only if the BondCircuit API refactor is required
@@ -173,25 +172,36 @@ coppice/
 
 Wallet-specific UI, Flutter/FFI bindings, and networking integrations should live outside the core protocol crate.
 
+The real PCZT pre-authorization grinding regression now lives directly in
+`crates/coppice/tests/preauth_grind.rs`. Reference demos and deterministic vector tooling are
+available without a separate harness crate:
+
+```bash
+cargo run -p coppice --example reference -- carrier-demo
+cargo run -p coppice --example reference -- replay-demo
+cargo run -p coppice --example reference -- bond-demo
+cargo run -p coppice --example reference -- print-test-vectors
+```
+
 ## Patched dependency APIs
 
-The current POC uses two explicitly documented non-consensus dependency changes: the vendored
+The current implementation uses two explicitly documented non-consensus dependency changes: the vendored
 Orchard BondCircuit/gadget refactor and a small librustzcash wallet-layer PCZT lifecycle hook used by
-`zcash-devtool`. See [`DEPENDENCY_PATCHES.md`](DEPENDENCY_PATCHES.md) for exact revisions, changed
+`coppice-cli`. See [`DEPENDENCY_PATCHES.md`](DEPENDENCY_PATCHES.md) for exact revisions, changed
 files, rationale, integration consequences, and consensus-compatibility boundaries.
 
 ### Orchard dependency
 
 The BondCircuit requires constrained Orchard/Ironwood circuit logic that upstream Orchard 0.15.3
 does not expose. `vendor/orchard` therefore retains the exact small non-consensus refactor used by
-the validated POC. Its three affected source files and rationale are documented in
+the validated implementation. Its three affected source files and rationale are documented in
 `vendor/orchard/COPPICE_PATCH.md`; Cargo selects it through `[patch.crates-io]`.
 
-The Coppice POC does **not** require a Zcash consensus change.
+The Coppice implementation does **not** require a Zcash consensus change.
 
 ## Current validation
 
-The POC has demonstrated the following on real Zcash testnet transactions:
+The implementation has demonstrated the following on real Zcash testnet transactions:
 
 - bonded registration;
 - owner-authorized update;
@@ -207,9 +217,9 @@ The local test suite also covers deterministic replay and rejection of invalid b
 
 Exact test vectors and protocol byte semantics belong in [`REFERENCE.md`](REFERENCE.md) and `test-vectors/`, not this overview.
 
-## Non-goals of the minimal POC
+## Deferred protocol features
 
-The current POC intentionally does not implement:
+The current reference implementation intentionally does not implement:
 
 - renewal;
 - auctions;
@@ -259,12 +269,12 @@ If the vendored Orchard implementation is modified, its relevant upstream test s
 ## Experimental name-manager playground
 
 `coppice-playground.sh` is experimental terminal tooling for the public Zcash testnet registry. It
-uses the sibling `zcash-devtool` checkout for wallet sync, transaction construction, proving,
+uses the sibling `coppice-cli` checkout for wallet sync, transaction construction, proving,
 signing, and broadcast, while all Coppice encoding and replay remains in the `coppice` crate.
 
 ```bash
 git clone https://github.com/nfl0/coppice.git
-git clone https://github.com/nfl0/zcash-devtool.git
+git clone https://github.com/nfl0/coppice-cli.git
 cd coppice
 ./coppice-playground.sh
 ```
@@ -297,17 +307,17 @@ Automatic commands are deliberately small:
 `names` displays the locally replayed registry with record status, owner, sequence, address, and
 bond tag. `pending` shows commit/reveal registrations staged by this wallet, and `owner-key` prints
 its canonical RedPallas owner key. Local state resumes on later runs. A fresh installation reconstructs it by replaying testnet from
-the activation height. This is POC tooling, not a production wallet.
+the activation height. This is experimental tooling, not a production wallet.
 
 ## Local Z3 regtest playground
 
 The minimal regtest playground runs the official external
 [Z3](https://github.com/ZcashFoundation/z3) Zebra, Zaino, and Zallet stack with Podman Compose. Z3
-is not vendored or patched. Keep sibling checkouts of `z3`, `zcash-devtool`, and this repository,
+is not vendored or patched. Keep sibling checkouts of `z3`, `coppice-cli`, and this repository,
 then run:
 
 ```bash
-cargo build --release --features regtest_support --manifest-path ../zcash-devtool/Cargo.toml
+cargo build --release --features regtest_support --manifest-path ../coppice-cli/Cargo.toml
 ./scripts/regtest-playground.sh
 ```
 
@@ -345,7 +355,7 @@ commit/reveal registration, UPDATE, RELEASE, and RESOLVE commands used by the pu
 pending transactions only when explicitly invoked, then syncs all three wallets. On a fresh chain,
 run `start`, `mine 2`, and `start` again; thereafter mine the activation and maturity blocks you
 want. The default mining address is wallet 1 once it exists; use `COPPICE_REGTEST_MINER_ADDRESS`
-when restarting the services to direct new coinbases elsewhere. Use the normal `zcash-devtool`
+when restarting the services to direct new coinbases elsewhere. Use the normal `coppice-cli`
 send/shield commands to distribute test funds. `reset` removes only the local Z3 volumes and
 `.coppice-regtest/` wallet state.
 
@@ -360,7 +370,7 @@ Coppice protocol failure: mine enough blocks and retry before treating the resul
 Ironwood bond.
 
 Z3 currently pins Zaino 0.6; the script overrides only that container image to the public Zaino
-0.8 no-TLS image because 0.6 predates the Ironwood compact-sync enum used by `zcash-devtool`.
+0.8 no-TLS image because 0.6 predates the Ironwood compact-sync enum used by `coppice-cli`.
 
 To print newly replayed local activity, run:
 
@@ -369,7 +379,7 @@ To print newly replayed local activity, run:
 ```
 
 The watcher polls only Zebra's block height. For each new block it invokes the existing Rust
-`zcash-devtool coppice watch --once` path, which performs candidate detection, transaction fetch,
+`coppice-cli coppice watch --once` path, which performs candidate detection, transaction fetch,
 memo decoding, and canonical replay through Zaino. It prints COMMIT, REGISTER (successful REVEAL),
 UPDATE, RELEASE, rejected
 candidates, and observed bond spends with height and txid. Use `--once` for a single catch-up pass.

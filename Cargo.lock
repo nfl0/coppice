@@ -328,24 +328,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "coppice-poc"
-version = "0.1.0"
-dependencies = [
- "coppice",
- "hex",
- "incrementalmerkletree",
- "orchard",
- "pczt",
- "rand_core",
- "serde_json",
- "sha2 0.10.9",
- "shardtree",
- "zcash_note_encryption",
- "zcash_primitives",
- "zcash_protocol",
-]
-
-[[package]]
 name = "corez"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
