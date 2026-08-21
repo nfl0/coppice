@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="coppice.png" alt="Coppice — Zcash Naming Protocol" width="1086">
+</p>
+
 # Coppice 🪵
 
 **Coppice** is a native privacy-preserving naming protocol for Zcash.
