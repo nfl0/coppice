@@ -12,7 +12,7 @@ use orchard::tree::MerkleHashOrchard;
 use serde::{Deserialize, Serialize};
 use zcash_primitives::transaction::TxId;
 
-const LOCAL_STATE_VERSION: u8 = 4;
+const LOCAL_STATE_VERSION: u8 = 5;
 pub type IronwoodTree = CommitmentTree<MerkleHashOrchard, 32>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -559,21 +559,41 @@ mod tests {
         let owner_pk = owner_key_bytes(&(&signing_key).into());
         let alice_bond = crate::bond::test_registration_bond("alice", b"UA_A");
         let bob_bond = crate::bond::test_registration_bond("bob", b"UA_B");
-        let register_alice = Operation::Register {
+        let alice_secret = [7; 32];
+        let alice_commitment = crate::state::registration_commitment(
+            "alice",
+            owner_pk,
+            alice_bond.bond_tag,
+            alice_bond.anchor,
+            b"UA_A",
+            alice_secret,
+        );
+        let reveal_alice = Operation::Reveal {
             name: "alice".into(),
             owner_pk,
             bond_tag: alice_bond.bond_tag,
             bond_anchor: alice_bond.anchor,
             bond_proof: alice_bond.proof.clone(),
             address: b"UA_A".to_vec(),
+            secret: alice_secret,
         };
-        let register_bob = Operation::Register {
+        let bob_secret = [8; 32];
+        let bob_commitment = crate::state::registration_commitment(
+            "bob",
+            owner_pk,
+            bob_bond.bond_tag,
+            bob_bond.anchor,
+            b"UA_B",
+            bob_secret,
+        );
+        let reveal_bob = Operation::Reveal {
             name: "bob".into(),
             owner_pk,
             bond_tag: bob_bond.bond_tag,
             bond_anchor: bob_bond.anchor,
             bond_proof: bob_bond.proof.clone(),
             address: b"UA_B".to_vec(),
+            secret: bob_secret,
         };
         let alice_record = NameRecord {
             owner_pk,
@@ -591,12 +611,26 @@ mod tests {
         if let Operation::Release { signature: s, .. } = &mut release_alice {
             *s = signature;
         }
-        let alice = carrier::build_coppice_transaction(&register_alice, 5).unwrap();
-        let bob = carrier::build_coppice_transaction(&register_bob, 5).unwrap();
+        let commit_alice = carrier::build_coppice_transaction(
+            &Operation::Commit {
+                commitment: alice_commitment,
+            },
+            5,
+        )
+        .unwrap();
+        let commit_bob = carrier::build_coppice_transaction(
+            &Operation::Commit {
+                commitment: bob_commitment,
+            },
+            5,
+        )
+        .unwrap();
+        let alice = carrier::build_coppice_transaction(&reveal_alice, 5).unwrap();
+        let bob = carrier::build_coppice_transaction(&reveal_bob, 5).unwrap();
         let release = carrier::build_coppice_transaction(&release_alice, 5).unwrap();
         let blocks = [
-            vec![serialized(&alice.tx)],
-            vec![serialized(&bob.tx)],
+            vec![serialized(&commit_alice.tx), serialized(&commit_bob.tx)],
+            vec![serialized(&alice.tx), serialized(&bob.tx)],
             vec![serialized(&release.tx)],
         ];
         let context: [u8; 32] = Sha256::digest(b"CoppiceIncrementalFixtureV0").into();

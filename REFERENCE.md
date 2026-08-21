@@ -5,10 +5,12 @@ strings are the exact ASCII bytes shown, without a terminator.
 
 ## Scope and synchronization
 
-V0 has exactly three operations: REGISTER, UPDATE, and RELEASE. The only automatic lifecycle
-event is bond inactivity when the registered public bond tag appears in `SpentTagTree` after its
-Ironwood nullifier is observed. Transfer, rebond, renewal, expiration, commit/reveal, governance,
-and recursive history proofs are not part of v0.
+The v1 candidate has five operations: COMMIT, REVEAL, UPDATE, RELEASE, and
+TRANSFER_WITH_NEW_BOND. Registration is the ordered COMMIT then REVEAL pair; the old direct
+REGISTER encoding is invalid. The only automatic lifecycle event is bond inactivity when the
+record's public bond tag appears in `SpentTagTree` after its Ironwood nullifier is observed.
+Renewal, expiration, auctions, delegation, governance, and recursive history proofs are not part
+of this candidate.
 
 A fresh wallet first replays every Ironwood nullifier from the network's Ironwood activation up to
 Coppice activation. This pre-activation spent set is required: commitment-tree membership alone
@@ -58,7 +60,10 @@ u16(9) || "poc-local"
 
 UPDATE appends `0x02 || name_id[32] || previous_sequence_u64 || next_sequence_u64 ||
 previous_record_hash[32] || H(new_address)[32]`. RELEASE appends `0x03 || name_id[32] ||
-previous_sequence_u64 || next_sequence_u64 || previous_record_hash[32]`. Signatures are canonical
+previous_sequence_u64 || next_sequence_u64 || previous_record_hash[32]`.
+TRANSFER_WITH_NEW_BOND appends `0x06 || name_id[32] || previous_sequence_u64 ||
+next_sequence_u64 || previous_record_hash[32] || new_owner_key[32] || new_bond_tag[32] ||
+new_bond_anchor[32] || H(new_address)[32]`. Signatures are canonical
 64-byte RedPallas `Signature<SpendAuth>` encodings. Verification uses the owner key in the current
 record.
 
@@ -67,10 +72,15 @@ record.
 Every variable byte string is `length_u16 || bytes`. No trailing bytes are allowed.
 
 ```text
-REGISTER = 0x01 || name || owner_key[32] || bond_tag[32] || bond_anchor[32] ||
-           bond_proof_as_bytestring || address
 UPDATE   = 0x02 || name || next_sequence_u64 || new_address || signature_64_as_bytestring
 RELEASE  = 0x03 || name || next_sequence_u64 || signature_64_as_bytestring
+COMMIT   = 0x04 || commitment[32]
+REVEAL   = 0x05 || name || owner_key[32] || bond_tag[32] || bond_anchor[32] ||
+           secret[32] || bond_proof_as_bytestring || address
+TRANSFER_WITH_NEW_BOND =
+           0x06 || name || next_sequence_u64 || new_owner_key[32] || new_bond_tag[32] ||
+           new_bond_anchor[32] || new_bond_proof_as_bytestring || new_address ||
+           signature_64_as_bytestring
 ```
 
 Unknown types, invalid names or keys, non-64-byte signatures, out-of-bounds lengths, truncation,
@@ -103,27 +113,58 @@ Interpret the canonical 32-byte `TxId` encoding from byte zero. The candidate ta
 `tag_bits` most-significant bits, in network byte order. V0 POC uses an all-zero tag and permits
 1 through 16 bits. Untagged transactions are never memo-decrypted.
 
+## Registration commitment
+
+The commitment is SHA-256 of the following exact byte string:
+
+```text
+"CoppiceCommitV0" || u16(len(protocol_id)) || protocol_id ||
+u16(len(network_id)) || network_id || name_id[32] || owner_key[32] ||
+bond_tag[32] || bond_anchor[32] || H(address)[32] || secret[32]
+```
+
+COMMIT inserts the 32-byte commitment with its `(block_height_u32, tx_index_u32)` position. An
+identical pending commitment is rejected. REVEAL must occur at least one block later. The
+commitment is removed only after a successful REVEAL; every rejected reveal leaves it unchanged.
+The 32-byte secret is private until reveal. The BondProof bytes are deliberately excluded from the
+commitment because they prove, but do not define, the registration statement.
+
+Pending commitments have deterministic root
+`H("CoppiceCommitSetV0" || count_u32 || entries)`, where entries are sorted lexicographically by
+commitment and each entry is `commitment[32] || block_height_u32 || tx_index_u32`.
+
 ## Transitions
 
-REGISTER succeeds only for an available canonical name whose embedded BondProof verifies against the
+REVEAL succeeds only for an available canonical name whose matching mature commitment exists and
+whose embedded BondProof verifies against the
 embedded `bond_anchor` and `bond_tag`, the supplied owner key, registration name, exact initial
 address bytes, fixed Testnet V0 network domain, and minimum value 100000000 zatoshis (1 ZEC). In addition,
 `bond_anchor` must be an
 Ironwood root that the replaying wallet independently derived from authenticated Zcash history;
 proof membership in an arbitrary caller-supplied root is never sufficient. The proof bytes are part of the canonical
-REGISTER payload; only the verified tag is retained in the NameRecord. Invalid proofs and tag,
+REVEAL payload; only the verified tag is retained in the NameRecord. Invalid proofs and tag,
 owner, name/context, network, minimum-value, or anchor mismatches deterministically reject the
 operation without changing state. A name is available when absent, Released, or its current
 `bond_tag` is present in SpentTagTree. The new registration's own tag must not already be spent.
-A valid REGISTER replaces any available record and creates sequence 0, Active, with the supplied
+A valid REVEAL consumes its commitment, replaces any available record, and creates sequence 0,
+Active, with the supplied
 owner, verified bond tag, and address. Resolution reads the tag from this authenticated record and
 returns bond-inactive whenever it is present in SpentTagTree. UPDATE succeeds only for an existing
 Active name with an unspent current bond, sequence exactly current plus one without overflow, and a
 valid owner signature over the exact current record and new address. RELEASE has the same
 existence, Active, unspent-bond, sequence and signature requirements and sets Released.
 All invalid operations leave every state byte unchanged and return a typed audit rejection.
-One unspent `bond_tag` may back at most one Active name; a second REGISTER using it is rejected.
-Within a block, the first valid REGISTER in ascending transaction-index order wins a name race.
+One unspent `bond_tag` may back at most one Active name; a second REVEAL using it is rejected.
+Within a block, the first valid REVEAL in ascending transaction-index order wins a name race.
+
+TRANSFER_WITH_NEW_BOND requires an existing Active record with an unspent current bond, sequence
+exactly current plus one, a canonical new owner key, a different unspent bond tag unused by another
+Active name, a valid new BondProof, and a signature by the current owner over the complete transfer
+message above. It atomically replaces owner, bond, address, and sequence. If `new_owner_key` equals
+the current owner key, this same operation is REBOND (transfer-to-self). Spending the old bond after
+a successful transfer has no effect because the record contains only the new tag. If the old bond
+is spent in the transfer transaction itself, spent effects are applied first and the transfer is
+rejected.
 
 ## NameTree
 
@@ -150,15 +191,16 @@ Blocks are processed by ascending height and transactions by ascending `tx_index
 transaction: parse canonical bytes; extract every Ironwood `cmx` and nullifier; insert every spent
 tag; test the txid candidate prefix; decrypt/reconstruct at most one operation; then apply it.
 Consequently, a nullifier in a transaction is visible before an operation in the same transaction.
-Wallet integration records authenticated Ironwood roots before replaying registrations that may
-refer to them. A REGISTER referring to an unknown root produces `UnknownBondAnchor` and is a no-op.
+Wallet integration records authenticated Ironwood roots before replaying reveals or transfers that
+may refer to them. A REVEAL or TRANSFER_WITH_NEW_BOND referring to an unknown root produces
+`UnknownBondAnchor` and is a no-op.
 
 For the synthetic fixture context:
 
 ```text
 CoppiceStateRoot = H(
   "CoppiceStateV0" || "poc-local" || height_u32 || fixture_block_id[32] ||
-  NameTreeRoot[32] || SpentTagTreeRoot[32]
+  NameTreeRoot[32] || PendingCommitmentRoot[32] || SpentTagTreeRoot[32]
 )
 ```
 
@@ -193,8 +235,9 @@ and injects it into the Pallas base field. The registration context is
 hi128(registration_digest)))`, where `registration_digest =
 H("CoppiceRegisterV1" || name_id || address_length_u32 || address)`; the owner binding uses
 the same construction with domain `CoppiceOwnerV0` and the canonical 32-byte owner key. Both are
-reconstructed by replay from REGISTER rather than accepted as independent fields. Context and owner
-bindings are constrained into the proof and do not reveal the note's wallet key. The witness
+reconstructed by replay from REVEAL or TRANSFER_WITH_NEW_BOND rather than accepted as independent fields. Context and owner
+bindings are constrained into the proof and do not reveal the note's wallet key. REVEAL and
+TRANSFER_WITH_NEW_BOND use this same proof statement for the new record. The witness
 contains the Orchard note, its full viewing-key material, `ask`, position and authentication path.
 The reused Orchard constraints derive the commitment, root, address and canonical nullifier.
 An additional fixed-base multiplication enforces `[ask] SpendAuthG = ak`. A 64-bit range check on

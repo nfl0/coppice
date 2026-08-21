@@ -20,13 +20,14 @@ fn serialized(tx: &zcash_primitives::transaction::Transaction) -> Vec<u8> {
 
 fn carrier_demo(bits: u8) {
     let (owner_pk, _) = owner();
-    let operation = Operation::Register {
+    let operation = Operation::Reveal {
         name: "frames".into(),
         owner_pk,
         bond_tag: [1; 32],
         bond_anchor: [0; 32],
         bond_proof: Vec::new(),
         address: vec![0x55; 900],
+        secret: [9; 32],
     };
     let built = carrier::build_coppice_transaction(&operation, bits).expect("carrier");
     let raw = serialized(&built.tx);
@@ -51,13 +52,23 @@ fn carrier_demo(bits: u8) {
 fn replay_demo() {
     let (owner_pk, key) = owner();
     let bond = bond::run_bond_poc_for_registration("alice", owner_pk, b"UA_A").expect("bond proof");
-    let register = Operation::Register {
+    let secret = [7; 32];
+    let commitment = coppice::state::registration_commitment(
+        "alice",
+        owner_pk,
+        bond.bond_tag,
+        bond.anchor,
+        b"UA_A",
+        secret,
+    );
+    let reveal = Operation::Reveal {
         name: "alice".into(),
         owner_pk,
         bond_tag: bond.bond_tag,
         bond_anchor: bond.anchor,
         bond_proof: bond.proof,
         address: b"UA_A".to_vec(),
+        secret,
     };
     let initial = NameRecord {
         owner_pk,
@@ -91,7 +102,11 @@ fn replay_demo() {
         *signature = release_signature;
     }
     let mut state = ReplayState::new(6);
-    for (index, operation) in [register, update, release].iter().enumerate() {
+    state.accept_bond_anchor(bond.anchor);
+    for (index, operation) in [Operation::Commit { commitment }, reveal, update, release]
+        .iter()
+        .enumerate()
+    {
         let built = carrier::build_coppice_transaction(operation, 6).expect("carrier");
         let result = process_serialized_transaction(
             &mut state,
@@ -103,7 +118,7 @@ fn replay_demo() {
         println!("height={} outcome={:?}", 100 + index, result.outcome);
     }
     let context = ChainContext {
-        height: 102,
+        height: 103,
         fixture_block_id: Sha256::digest(b"CoppiceStandaloneFixtureV0").into(),
     };
     println!(

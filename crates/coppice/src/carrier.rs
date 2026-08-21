@@ -414,13 +414,14 @@ mod tests {
     #[test]
     fn real_carrier_round_trip_and_effects() {
         let key = crate::owner::OwnerSigningKey::try_from([1; 32]).unwrap();
-        let op = Operation::Register {
+        let op = Operation::Reveal {
             name: "alice".into(),
             owner_pk: crate::owner::owner_key_bytes(&(&key).into()),
             bond_tag: [1; 32],
             bond_anchor: [0; 32],
             bond_proof: Vec::new(),
             address: b"UA_A".to_vec(),
+            secret: [9; 32],
         };
         let built = build_coppice_transaction(&op, 8).unwrap();
         assert!(crate::is_coppice_candidate(&built.txid, 8));
@@ -438,13 +439,14 @@ mod tests {
     #[test]
     fn real_multiframe_carrier_round_trip() {
         let key = crate::owner::OwnerSigningKey::try_from([1; 32]).unwrap();
-        let op = Operation::Register {
+        let op = Operation::Reveal {
             name: "frames".into(),
             owner_pk: crate::owner::owner_key_bytes(&(&key).into()),
             bond_tag: [1; 32],
             bond_anchor: [0; 32],
             bond_proof: Vec::new(),
             address: vec![0x55; 900],
+            secret: [9; 32],
         };
         let built = build_coppice_transaction(&op, 12).unwrap();
         let mut bytes = Vec::new();

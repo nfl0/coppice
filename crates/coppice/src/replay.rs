@@ -3,7 +3,9 @@ use crate::{
     envelope::Operation,
     ironwood::{self, IronwoodEffects},
     spent::SpentTagTree,
-    state::{CoppiceState, Transition, TransitionRejectReason, apply_operation_with_spent},
+    state::{
+        ChainPosition, CoppiceState, Transition, TransitionRejectReason, apply_operation_with_spent,
+    },
 };
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
@@ -72,6 +74,7 @@ impl ReplayState {
         b.extend_from_slice(&c.height.to_be_bytes());
         b.extend_from_slice(&c.fixture_block_id);
         b.extend_from_slice(&self.names.state_root());
+        b.extend_from_slice(&self.names.commitment_root());
         b.extend_from_slice(&self.spent.root());
         Sha256::digest(b).into()
     }
@@ -79,8 +82,8 @@ impl ReplayState {
 /// Effects are inserted before the same transaction's Coppice operation is interpreted.
 pub fn process_transaction(
     s: &mut ReplayState,
-    _height: u32,
-    _tx_index: u32,
+    height: u32,
+    tx_index: u32,
     tx: &Transaction,
 ) -> ReplayResult {
     let effects = ironwood::extract_ironwood_effects(tx);
@@ -114,9 +117,14 @@ pub fn process_transaction(
     }
     match crate::carrier::decode_bulletin(tx) {
         Ok(op) => {
-            if let Operation::Register { bond_anchor, .. } = &op
-                && !s.accepted_bond_anchors.contains(bond_anchor)
-            {
+            let bond_anchor = match &op {
+                Operation::Reveal { bond_anchor, .. } => Some(bond_anchor),
+                Operation::TransferWithNewBond {
+                    new_bond_anchor, ..
+                } => Some(new_bond_anchor),
+                _ => None,
+            };
+            if bond_anchor.is_some_and(|anchor| !s.accepted_bond_anchors.contains(anchor)) {
                 return ReplayResult {
                     effects,
                     spent_root_before_operation,
@@ -125,7 +133,15 @@ pub fn process_transaction(
                     outcome: ReplayOutcome::Rejected(ReplayRejectReason::UnknownBondAnchor),
                 };
             }
-            let t = apply_operation_with_spent(&mut s.names, Some(&s.spent), op.clone());
+            let t = apply_operation_with_spent(
+                &mut s.names,
+                Some(&s.spent),
+                op.clone(),
+                ChainPosition {
+                    block_height: height,
+                    tx_index,
+                },
+            );
             let outcome = match &t {
                 Transition::Applied => ReplayOutcome::Applied(op.clone()),
                 Transition::Rejected(r) => {
@@ -185,13 +201,8 @@ mod tests {
     };
     #[test]
     fn real_note_spend_updates_spent_tag_tree() {
-        let op = Operation::Register {
-            name: "bond-note".into(),
-            owner_pk: [3; 32],
-            bond_tag: [1; 32],
-            bond_anchor: [0; 32],
-            bond_proof: Vec::new(),
-            address: b"UA_BOND".to_vec(),
+        let op = Operation::Commit {
+            commitment: [3; 32],
         };
         let built = carrier::build_coppice_transaction(&op, 8).unwrap();
         let tag = spent_tag(&built.input_nullifier).unwrap();
@@ -225,24 +236,55 @@ mod tests {
         let owner = owner_key_bytes(&(&key).into());
         let alice_bond = crate::bond::test_registration_bond("alice", b"UA_A");
         let bob_bond = crate::bond::test_registration_bond("bob", b"UA_C");
-        let register = Operation::Register {
+        let secret = [7; 32];
+        let commitment = crate::state::registration_commitment(
+            "alice",
+            owner,
+            alice_bond.bond_tag,
+            alice_bond.anchor,
+            b"UA_A",
+            secret,
+        );
+        let reveal = Operation::Reveal {
             name: "alice".into(),
             owner_pk: owner,
             bond_tag: alice_bond.bond_tag,
             bond_anchor: alice_bond.anchor,
             bond_proof: alice_bond.proof.clone(),
             address: b"UA_A".to_vec(),
+            secret,
         };
-        let mut invalid_proof = register.clone();
-        if let Operation::Register { bond_proof, .. } = &mut invalid_proof {
+        let mut invalid_proof = reveal.clone();
+        if let Operation::Reveal { bond_proof, .. } = &mut invalid_proof {
             bond_proof[0] ^= 1;
         }
-        let mut mismatched_tag = register.clone();
-        if let Operation::Register { bond_tag, .. } = &mut mismatched_tag {
+        let mut mismatched_tag = reveal.clone();
+        if let Operation::Reveal { bond_tag, .. } = &mut mismatched_tag {
             use pasta_curves::{group::ff::PrimeField, pallas};
             let tag = Option::<pallas::Base>::from(pallas::Base::from_repr(*bond_tag)).unwrap();
             *bond_tag = (tag + pallas::Base::one()).to_repr();
         }
+        let mismatched_commitment = if let Operation::Reveal {
+            name,
+            owner_pk,
+            bond_tag,
+            bond_anchor,
+            address,
+            secret,
+            ..
+        } = &mismatched_tag
+        {
+            crate::state::registration_commitment(
+                name,
+                *owner_pk,
+                *bond_tag,
+                *bond_anchor,
+                address,
+                *secret,
+            )
+        } else {
+            unreachable!()
+        };
         let old = NameRecord {
             owner_pk: owner,
             bond_tag: alice_bond.bond_tag,
@@ -276,20 +318,45 @@ mod tests {
         if let Operation::Release { signature, .. } = &mut release {
             *signature = release_sig;
         }
-        let bob = Operation::Register {
+        let bob_secret = [8; 32];
+        let bob_commitment = crate::state::registration_commitment(
+            "bob",
+            owner,
+            bob_bond.bond_tag,
+            bob_bond.anchor,
+            b"UA_C",
+            bob_secret,
+        );
+        let bob = Operation::Reveal {
             name: "bob".into(),
             owner_pk: owner,
             bond_tag: bob_bond.bond_tag,
             bond_anchor: bob_bond.anchor,
             bond_proof: bob_bond.proof.clone(),
             address: b"UA_C".to_vec(),
+            secret: bob_secret,
         };
         let txs = [
+            carrier::build_coppice_transaction(&Operation::Commit { commitment }, 6).unwrap(),
             carrier::build_coppice_transaction(&invalid_proof, 6).unwrap(),
+            carrier::build_coppice_transaction(
+                &Operation::Commit {
+                    commitment: mismatched_commitment,
+                },
+                6,
+            )
+            .unwrap(),
             carrier::build_coppice_transaction(&mismatched_tag, 6).unwrap(),
-            carrier::build_coppice_transaction(&register, 6).unwrap(),
+            carrier::build_coppice_transaction(&reveal, 6).unwrap(),
             carrier::build_coppice_transaction(&update, 6).unwrap(),
             carrier::build_coppice_payload(&[0xff], 6).unwrap(),
+            carrier::build_coppice_transaction(
+                &Operation::Commit {
+                    commitment: bob_commitment,
+                },
+                6,
+            )
+            .unwrap(),
             carrier::build_coppice_transaction(&bob, 6).unwrap(),
             carrier::build_coppice_transaction(&release, 6).unwrap(),
         ];
@@ -297,13 +364,13 @@ mod tests {
         let mut strict = ReplayState::new(6);
         let empty_root = strict.names.state_root();
         assert_eq!(
-            process_serialized_transaction(&mut strict, 99, 0, &bytes[2])
+            process_serialized_transaction(&mut strict, 99, 0, &bytes[4])
                 .unwrap()
                 .outcome,
             ReplayOutcome::Rejected(ReplayRejectReason::UnknownBondAnchor)
         );
         assert_eq!(strict.names.state_root(), empty_root);
-        let mut trailing = bytes[0].clone();
+        let mut trailing = bytes[1].clone();
         trailing.push(0);
         assert!(matches!(
             process_serialized_transaction(&mut ReplayState::new(6), 99, 0, &trailing),
@@ -330,20 +397,20 @@ mod tests {
         assert_eq!(oa, ob);
         assert_eq!(ob, oc);
         assert_eq!(
-            oa[0],
-            ReplayOutcome::Rejected(ReplayRejectReason::InvalidOperation(
-                TransitionRejectReason::InvalidBondProof
-            ))
-        );
-        assert_eq!(
             oa[1],
             ReplayOutcome::Rejected(ReplayRejectReason::InvalidOperation(
                 TransitionRejectReason::InvalidBondProof
             ))
         );
-        assert!(matches!(oa[2], ReplayOutcome::Applied(_)));
+        assert_eq!(
+            oa[3],
+            ReplayOutcome::Rejected(ReplayRejectReason::InvalidOperation(
+                TransitionRejectReason::InvalidBondProof
+            ))
+        );
+        assert!(matches!(oa[4], ReplayOutcome::Applied(_)));
         assert!(matches!(
-            oa[4],
+            oa[6],
             ReplayOutcome::Rejected(ReplayRejectReason::MalformedCarrier)
         ));
         assert_eq!(a.names.state_root(), b.names.state_root());

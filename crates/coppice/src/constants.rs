@@ -23,6 +23,10 @@ pub const DEFAULT_TEST_TAG_BITS: u8 = 12;
 pub const NAME_ID_DOMAIN: &[u8] = b"CoppiceName";
 pub const NAME_RECORD_DOMAIN: &[u8] = b"CoppiceRecordV1";
 pub const OWNER_SIGNATURE_DOMAIN: &[u8] = b"CoppiceOwnerSigV0";
+pub const REGISTRATION_COMMITMENT_DOMAIN: &[u8] = b"CoppiceCommitV0";
+pub const COMMITMENT_SET_DOMAIN: &[u8] = b"CoppiceCommitSetV0";
+/// A reveal must be mined in a block strictly after its commitment.
+pub const MIN_COMMIT_CONFIRMATIONS: u32 = 1;
 pub const BOND_TAG_DOMAIN: &[u8; 16] = b"CoppiceBondTagV0";
 pub const BOND_OWNER_DOMAIN: &[u8] = b"CoppiceOwnerV0";
 pub const BOND_CONTEXT_DOMAIN: &[u8] = b"CoppiceCtxV0";

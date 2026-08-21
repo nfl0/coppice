@@ -168,6 +168,7 @@ fn fixture(
     corrupt_path: bool,
     ask_override: Option<SpendAuthorizingKey>,
     name: &str,
+    note_seed: &[u8],
     owner_pk: [u8; 32],
     address: &[u8],
 ) -> Option<(BondCircuit, Vec<pallas::Base>, [u8; 32])> {
@@ -194,7 +195,7 @@ fn fixture(
         .ok()?;
     let mut fixture_seed = Sha256::new();
     fixture_seed.update(b"CoppiceBondFixtureV1");
-    fixture_seed.update(name.as_bytes());
+    fixture_seed.update(note_seed);
     let mut rng = ChaCha20Rng::from_seed(fixture_seed.finalize().into());
     let (bundle, meta) = builder.build::<i64>(&mut rng).ok()??;
     let action = bundle.actions().get(meta.output_action_index(0)?)?;
@@ -259,12 +260,22 @@ pub fn run_bond_poc_for_registration(
     owner_pk: [u8; 32],
     address: &[u8],
 ) -> Result<BondMeasurement, String> {
+    run_bond_poc_for_registration_with_seed(name, owner_pk, address, name.as_bytes())
+}
+
+fn run_bond_poc_for_registration_with_seed(
+    name: &str,
+    owner_pk: [u8; 32],
+    address: &[u8],
+    note_seed: &[u8],
+) -> Result<BondMeasurement, String> {
     let (circuit, instance, _) = fixture(
         FIXTURE_VALUE,
         FIXTURE_MINIMUM,
         false,
         None,
         name,
+        note_seed,
         owner_pk,
         address,
     )
@@ -354,6 +365,7 @@ pub fn verify_registration_bond(
         false,
         None,
         name,
+        name.as_bytes(),
         owner_pk,
         address,
     ) else {
@@ -406,6 +418,16 @@ pub(crate) fn test_registration_bond(name: &str, address: &[u8]) -> &'static Bon
 }
 
 #[cfg(test)]
+pub(crate) fn test_registration_bond_with_owner_and_seed(
+    name: &str,
+    owner_pk: [u8; 32],
+    address: &[u8],
+    note_seed: &[u8],
+) -> BondMeasurement {
+    run_bond_poc_for_registration_with_seed(name, owner_pk, address, note_seed).unwrap()
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     #[test]
@@ -419,6 +441,7 @@ mod tests {
             false,
             None,
             "bonded",
+            b"bonded",
             owner,
             b"UA_BOND",
         )
@@ -456,6 +479,7 @@ mod tests {
             false,
             None,
             "bonded",
+            b"bonded",
             owner,
             b"UA_BOND",
         )
@@ -468,6 +492,7 @@ mod tests {
             true,
             None,
             "bonded",
+            b"bonded",
             owner,
             b"UA_BOND",
         )
@@ -485,6 +510,7 @@ mod tests {
                 false,
                 Some(SpendAuthorizingKey::from(&wrong_sk)),
                 "bonded",
+                b"bonded",
                 owner,
                 b"UA_BOND",
             )

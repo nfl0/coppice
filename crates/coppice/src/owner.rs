@@ -65,6 +65,25 @@ pub fn authorization_message(op: &Operation, previous: &NameRecord) -> Option<Ve
             b.extend_from_slice(&sequence.to_be_bytes());
             b.extend_from_slice(&record_hash(previous));
         }
+        Operation::TransferWithNewBond {
+            name,
+            sequence,
+            new_owner_pk,
+            new_bond_tag,
+            new_bond_anchor,
+            address,
+            ..
+        } => {
+            b.push(6);
+            b.extend_from_slice(&name_id(name));
+            b.extend_from_slice(&previous.sequence.to_be_bytes());
+            b.extend_from_slice(&sequence.to_be_bytes());
+            b.extend_from_slice(&record_hash(previous));
+            b.extend_from_slice(new_owner_pk);
+            b.extend_from_slice(new_bond_tag);
+            b.extend_from_slice(new_bond_anchor);
+            b.extend_from_slice(&Sha256::digest(address));
+        }
         _ => return None,
     }
     Some(b)
@@ -123,12 +142,48 @@ pub fn signed_release(
     }
     Some(operation)
 }
+
+/// Builds and signs a transfer. Supplying the current owner as `new_owner_pk`
+/// is the canonical rebond operation.
+#[allow(clippy::too_many_arguments)]
+pub fn signed_transfer_with_new_bond(
+    key: &OwnerSigningKey,
+    name: &str,
+    new_owner_pk: [u8; 32],
+    new_bond_tag: [u8; 32],
+    new_bond_anchor: [u8; 32],
+    new_bond_proof: Vec<u8>,
+    address: Vec<u8>,
+    previous: &NameRecord,
+) -> Option<Operation> {
+    let sequence = previous.sequence.checked_add(1)?;
+    let mut operation = Operation::TransferWithNewBond {
+        name: name.to_owned(),
+        sequence,
+        new_owner_pk,
+        new_bond_tag,
+        new_bond_anchor,
+        new_bond_proof,
+        address,
+        signature: vec![],
+    };
+    let signature = sign_operation(key, &operation, previous)?;
+    if let Operation::TransferWithNewBond {
+        signature: output, ..
+    } = &mut operation
+    {
+        *output = signature;
+    }
+    Some(operation)
+}
 pub fn verify_operation(key_bytes: [u8; 32], op: &Operation, previous: &NameRecord) -> bool {
     let Ok(key) = parse_owner_key(key_bytes) else {
         return false;
     };
     let sig = match op {
-        Operation::Update { signature, .. } | Operation::Release { signature, .. } => signature,
+        Operation::Update { signature, .. }
+        | Operation::Release { signature, .. }
+        | Operation::TransferWithNewBond { signature, .. } => signature,
         _ => return false,
     };
     let Ok(bytes): Result<[u8; 64], _> = sig.as_slice().try_into() else {

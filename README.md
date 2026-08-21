@@ -10,9 +10,12 @@ It maps human-readable names to Zcash Unified Addresses using ordinary Zcash tra
 
 The current POC demonstrates a minimal naming lifecycle:
 
-- `REGISTER` — claim an available name, set an owner and Unified Address, and attach a private ZEC bond proof.
+- `COMMIT` / `REVEAL` — hide a prospective registration until a prior-block commitment is mined,
+  then claim the available name with an owner, Unified Address, and private ZEC bond proof.
 - `UPDATE` — let the current owner change the name's Unified Address.
 - `RELEASE` — let the current owner make the name available again.
+- `TRANSFER_WITH_NEW_BOND` — move ownership and install a fresh private bond atomically. Setting
+  the new owner to the current owner is the canonical rebond operation.
 - **Bond-spend invalidation** — if the ZEC note backing a registration is later spent, replay detects its nullifier and the name becomes inactive automatically.
 
 The intended wallet model is deliberately simple:
@@ -196,7 +199,7 @@ The POC has demonstrated the following on real Zcash testnet transactions:
 - ordinary spend of a bonded Ironwood note;
 - automatic bond-spend invalidation during replay;
 - owner-authorized release;
-- REGISTER carrying an embedded `BondProof` and `bond_tag`;
+- REVEAL and TRANSFER_WITH_NEW_BOND carrying an embedded `BondProof` and `bond_tag`;
 - replay verification of the proof and its registration bindings;
 - local `resolve(name)` without externally supplied bond metadata.
 
@@ -208,13 +211,11 @@ Exact test vectors and protocol byte semantics belong in [`REFERENCE.md`](REFERE
 
 The current POC intentionally does not implement:
 
-- name transfer;
-- rebonding or renewal;
+- renewal;
 - auctions;
 - subnames;
 - delegation;
 - multi-owner/FROST policies;
-- commit/reveal registration;
 - expiration;
 - governance or treasury logic;
 - recursive whole-history proofs;
@@ -238,10 +239,11 @@ A wallet that independently replays from the Coppice activation height does not 
 
 Coppice is experimental cryptographic software. The POC and any vendored cryptographic-library changes require independent review before production use.
 
-Testnet V0 uses first-valid-chain-order registration races: there is no commit/reveal mechanism.
-This permits mempool front-running of desirable names and is an explicit experimental limitation,
-not an omitted validation rule. A production mainnet design must decide whether that tradeoff is
-acceptable before reusing these parameters.
+The v1 candidate uses a prior-block commitment before reveal to prevent a mempool observer from
+copying a cleartext registration and winning it with a higher-priority transaction. Chain order
+remains authoritative when multiple independently valid reveals race. The new operation encoding
+supersedes the earlier experimental direct-REGISTER encoding; a public deployment needs an explicit
+new activation decision before treating this candidate as live.
 
 ## Development
 

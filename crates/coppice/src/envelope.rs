@@ -7,13 +7,17 @@ const HEADER: usize = DOMAIN.len() + 1 + 1 + 1 + 1 + 2 + 32 + 8 + 2;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Operation {
-    Register {
+    Commit {
+        commitment: [u8; 32],
+    },
+    Reveal {
         name: String,
         owner_pk: [u8; 32],
         bond_tag: [u8; 32],
         bond_anchor: [u8; 32],
         bond_proof: Vec<u8>,
         address: Vec<u8>,
+        secret: [u8; 32],
     },
     Update {
         name: String,
@@ -24,6 +28,16 @@ pub enum Operation {
     Release {
         name: String,
         sequence: u64,
+        signature: Vec<u8>,
+    },
+    TransferWithNewBond {
+        name: String,
+        sequence: u64,
+        new_owner_pk: [u8; 32],
+        new_bond_tag: [u8; 32],
+        new_bond_anchor: [u8; 32],
+        new_bond_proof: Vec<u8>,
+        address: Vec<u8>,
         signature: Vec<u8>,
     },
 }
@@ -70,23 +84,29 @@ fn take_len(p: &mut &[u8]) -> Result<Vec<u8>, Error> {
 pub fn encode_operation(op: &Operation) -> Result<Vec<u8>, Error> {
     let mut o = Vec::new();
     match op {
-        Operation::Register {
+        Operation::Commit { commitment } => {
+            o.push(4);
+            o.extend_from_slice(commitment);
+        }
+        Operation::Reveal {
             name,
             owner_pk,
             bond_tag,
             bond_anchor,
             bond_proof,
             address,
+            secret,
         } => {
             if !valid_name(name) || address.len() > MAX_PAYLOAD || bond_proof.len() > MAX_PAYLOAD {
                 return Err(Error::Name);
             }
-            o.push(1);
+            o.push(5);
             put_len(&mut o, name.len())?;
             o.extend_from_slice(name.as_bytes());
             o.extend_from_slice(owner_pk);
             o.extend_from_slice(bond_tag);
             o.extend_from_slice(bond_anchor);
+            o.extend_from_slice(secret);
             put_len(&mut o, bond_proof.len())?;
             o.extend_from_slice(bond_proof);
             put_len(&mut o, address.len())?;
@@ -125,6 +145,37 @@ pub fn encode_operation(op: &Operation) -> Result<Vec<u8>, Error> {
             put_len(&mut o, signature.len())?;
             o.extend_from_slice(signature)
         }
+        Operation::TransferWithNewBond {
+            name,
+            sequence,
+            new_owner_pk,
+            new_bond_tag,
+            new_bond_anchor,
+            new_bond_proof,
+            address,
+            signature,
+        } => {
+            if !valid_name(name)
+                || address.len() > MAX_PAYLOAD
+                || new_bond_proof.len() > MAX_PAYLOAD
+                || signature.len() > MAX_PAYLOAD
+            {
+                return Err(Error::Name);
+            }
+            o.push(6);
+            put_len(&mut o, name.len())?;
+            o.extend_from_slice(name.as_bytes());
+            o.extend_from_slice(&sequence.to_be_bytes());
+            o.extend_from_slice(new_owner_pk);
+            o.extend_from_slice(new_bond_tag);
+            o.extend_from_slice(new_bond_anchor);
+            put_len(&mut o, new_bond_proof.len())?;
+            o.extend_from_slice(new_bond_proof);
+            put_len(&mut o, address.len())?;
+            o.extend_from_slice(address);
+            put_len(&mut o, signature.len())?;
+            o.extend_from_slice(signature);
+        }
     }
     if o.len() > MAX_PAYLOAD {
         return Err(Error::Length);
@@ -136,24 +187,26 @@ pub fn decode_operation(mut p: &[u8]) -> Result<Operation, Error> {
         return Err(Error::Length);
     }
     let ty = *take(&mut p, 1)?.first().ok_or(Error::Malformed)?;
-    let name = String::from_utf8(take_len(&mut p)?).map_err(|_| Error::Name)?;
-    if !valid_name(&name) {
-        return Err(Error::Name);
-    }
     let op = match ty {
-        1 => {
+        4 => Operation::Commit {
+            commitment: take(&mut p, 32)?.try_into().map_err(|_| Error::Malformed)?,
+        },
+        5 => {
+            let name = take_name(&mut p)?;
             let k: [u8; 32] = take(&mut p, 32)?.try_into().map_err(|_| Error::Malformed)?;
             crate::owner::parse_owner_key(k).map_err(|_| Error::Malformed)?;
-            Operation::Register {
+            Operation::Reveal {
                 name,
                 owner_pk: k,
                 bond_tag: take(&mut p, 32)?.try_into().map_err(|_| Error::Malformed)?,
                 bond_anchor: take(&mut p, 32)?.try_into().map_err(|_| Error::Malformed)?,
+                secret: take(&mut p, 32)?.try_into().map_err(|_| Error::Malformed)?,
                 bond_proof: take_len(&mut p)?,
                 address: take_len(&mut p)?,
             }
         }
         2 => {
+            let name = take_name(&mut p)?;
             let s = u64::from_be_bytes(take(&mut p, 8)?.try_into().map_err(|_| Error::Malformed)?);
             let address = take_len(&mut p)?;
             let signature = take_len(&mut p)?;
@@ -168,6 +221,7 @@ pub fn decode_operation(mut p: &[u8]) -> Result<Operation, Error> {
             }
         }
         3 => {
+            let name = take_name(&mut p)?;
             let s = u64::from_be_bytes(take(&mut p, 8)?.try_into().map_err(|_| Error::Malformed)?);
             let signature = take_len(&mut p)?;
             if signature.len() != 64 {
@@ -179,12 +233,44 @@ pub fn decode_operation(mut p: &[u8]) -> Result<Operation, Error> {
                 signature,
             }
         }
+        6 => {
+            let name = take_name(&mut p)?;
+            let sequence =
+                u64::from_be_bytes(take(&mut p, 8)?.try_into().map_err(|_| Error::Malformed)?);
+            let new_owner_pk = take(&mut p, 32)?.try_into().map_err(|_| Error::Malformed)?;
+            crate::owner::parse_owner_key(new_owner_pk).map_err(|_| Error::Malformed)?;
+            let new_bond_tag = take(&mut p, 32)?.try_into().map_err(|_| Error::Malformed)?;
+            let new_bond_anchor = take(&mut p, 32)?.try_into().map_err(|_| Error::Malformed)?;
+            let new_bond_proof = take_len(&mut p)?;
+            let address = take_len(&mut p)?;
+            let signature = take_len(&mut p)?;
+            if signature.len() != 64 {
+                return Err(Error::Malformed);
+            }
+            Operation::TransferWithNewBond {
+                name,
+                sequence,
+                new_owner_pk,
+                new_bond_tag,
+                new_bond_anchor,
+                new_bond_proof,
+                address,
+                signature,
+            }
+        }
         _ => return Err(Error::Malformed),
     };
     if !p.is_empty() {
         return Err(Error::Trailing);
     }
     Ok(op)
+}
+fn take_name(p: &mut &[u8]) -> Result<String, Error> {
+    let name = String::from_utf8(take_len(p)?).map_err(|_| Error::Name)?;
+    if !valid_name(&name) {
+        return Err(Error::Name);
+    }
+    Ok(name)
 }
 pub fn payload_hash(p: &[u8]) -> [u8; 32] {
     Sha256::digest(p).into()
@@ -289,13 +375,14 @@ mod tests {
     #[test]
     fn wire_and_frames() {
         let key = crate::owner::OwnerSigningKey::try_from([1; 32]).unwrap();
-        let x = Operation::Register {
+        let x = Operation::Reveal {
             name: "alice".into(),
             owner_pk: crate::owner::owner_key_bytes(&(&key).into()),
             bond_tag: [1; 32],
             bond_anchor: [2; 32],
             bond_proof: vec![3; 17],
             address: b"UA_A".to_vec(),
+            secret: [9; 32],
         };
         let p = encode_operation(&x).unwrap();
         assert_eq!(decode_operation(&p).unwrap(), x);
@@ -365,24 +452,26 @@ mod tests {
     #[test]
     fn operation_decoder_is_strict() {
         let key = crate::owner::OwnerSigningKey::try_from([1; 32]).unwrap();
-        let op = Operation::Register {
+        let op = Operation::Reveal {
             name: "alice".into(),
             owner_pk: crate::owner::owner_key_bytes(&(&key).into()),
             bond_tag: [1; 32],
             bond_anchor: [0; 32],
             bond_proof: Vec::new(),
             address: b"UA".to_vec(),
+            secret: [9; 32],
         };
         let mut p = encode_operation(&op).unwrap();
         p.push(0);
         assert_eq!(decode_operation(&p), Err(Error::Trailing));
-        let bad = Operation::Register {
+        let bad = Operation::Reveal {
             name: "alice".into(),
             owner_pk: [0xff; 32],
             bond_tag: [1; 32],
             bond_anchor: [0; 32],
             bond_proof: Vec::new(),
             address: b"UA".to_vec(),
+            secret: [9; 32],
         };
         assert!(decode_operation(&encode_operation(&bad).unwrap()).is_err());
         let update = Operation::Update {
