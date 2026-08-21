@@ -294,12 +294,15 @@ cargo build --release --features regtest_support --manifest-path ../zcash-devtoo
 ./scripts/regtest-playground.sh stop
 ```
 
-For a disposable, operator-driven two-wallet exercise (with a timestamped local log under
+For a disposable, deterministic two-wallet exercise (with a timestamped local log under
 `logs/`), use:
 
 ```bash
 ./scripts/regtest-multiwallet-test.sh --reset
 ```
+
+This test script mines fixed block counts at explicit lifecycle boundaries and has no background
+miner. Outside that test, `start` never mines and `mine COUNT` remains operator-controlled.
 
 `start` creates or reuses three local regtest wallets under `.coppice-regtest/` after two explicit
 bootstrap blocks, then starts Z3 through the installed `podman-compose`. It never mines. The Z3

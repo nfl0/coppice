@@ -172,12 +172,19 @@ configure_wallet_miner() {
 }
 
 sync_wallets() {
-  local i
+  local i attempt height
   wait_for_zaino
+  height=$(rpc getblockcount | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"])')
   for i in $(seq 1 "$WALLET_COUNT"); do
     [[ -f "$(wallet_dir "$i")/keys.toml" ]] || continue
-    wallet "$i" sync --server "$SERVER"
-    coppice "$i" sync --server "$SERVER"
+    for attempt in {1..10}; do
+      if wallet "$i" sync --server "$SERVER" \
+        && { (( height < ACTIVATION )) || coppice "$i" sync --server "$SERVER"; }; then
+        break
+      fi
+      (( attempt < 10 )) || die "wallet $i did not sync after mining"
+      sleep 1
+    done
   done
 }
 
@@ -221,12 +228,22 @@ reset() {
 }
 
 mine() {
-  local count=${1:-1}
+  local count=${1:-1} before expected height i
   [[ "$count" =~ ^[1-9][0-9]*$ ]] || die "mine count must be positive"
   wait_for_rpc
+  before=$(rpc getblockcount | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"])')
+  expected=$((before + count))
   rpc generate "[$count]" >/dev/null
-  wait_for_zaino
-  sync_wallets
+  for i in {1..30}; do
+    height=$(rpc getblockcount | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"])')
+    (( height >= expected )) && break
+    sleep 1
+  done
+  (( height >= expected )) || die "Zebra did not reach mined height $expected"
+  if [[ -f "$(wallet_dir 1)/keys.toml" ]]; then
+    wait_for_zaino
+    sync_wallets
+  fi
   printf 'Mined %s block(s).\n' "$count"
 }
 
