@@ -1,5 +1,8 @@
 # Coppice Orchard patch
 
+The root [`DEPENDENCY_PATCHES.md`](../../DEPENDENCY_PATCHES.md) documents this patch alongside the
+separate librustzcash wallet-layer hook required by carrier construction.
+
 This directory is Orchard 0.15.3 with the smallest API/circuit refactor required by the Coppice
 BondCircuit POC. Upstream Orchard 0.15.3 does not expose a reusable circuit proving the private
 old-note relations Coppice needs.

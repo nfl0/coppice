@@ -165,7 +165,14 @@ coppice/
 
 Wallet-specific UI, Flutter/FFI bindings, and networking integrations should live outside the core protocol crate.
 
-## Orchard dependency
+## Patched dependency APIs
+
+The current POC uses two explicitly documented non-consensus dependency changes: the vendored
+Orchard BondCircuit/gadget refactor and a small librustzcash wallet-layer PCZT lifecycle hook used by
+`zcash-devtool`. See [`DEPENDENCY_PATCHES.md`](DEPENDENCY_PATCHES.md) for exact revisions, changed
+files, rationale, integration consequences, and consensus-compatibility boundaries.
+
+### Orchard dependency
 
 The BondCircuit requires constrained Orchard/Ironwood circuit logic that upstream Orchard 0.15.3
 does not expose. `vendor/orchard` therefore retains the exact small non-consensus refactor used by
