@@ -107,7 +107,7 @@ Interpret the canonical 32-byte `TxId` encoding from byte zero. The candidate ta
 
 REGISTER succeeds only for an available canonical name whose embedded BondProof verifies against the
 embedded `bond_anchor` and `bond_tag`, the supplied owner key, registration name, exact initial
-address bytes, fixed Testnet V0 network domain, and minimum value 500000 zatoshis. In addition,
+address bytes, fixed Testnet V0 network domain, and minimum value 100000000 zatoshis (1 ZEC). In addition,
 `bond_anchor` must be an
 Ironwood root that the replaying wallet independently derived from authenticated Zcash history;
 proof membership in an arbitrary caller-supplied root is never sufficient. The proof bytes are part of the canonical

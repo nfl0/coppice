@@ -10,7 +10,8 @@ pub const REGTEST_V0_ACTIVATION_HEIGHT: u32 = 10;
 pub const REGTEST_IRONWOOD_ACTIVATION_HEIGHT: u32 = 2;
 /// POC discovery width chosen for fast local transaction construction.
 pub const REGTEST_TAG_BITS: u8 = 8;
-pub const MINIMUM_BOND_VALUE: u64 = 500_000;
+/// Minimum private registration bond: 1 ZEC, denominated in zatoshis.
+pub const MINIMUM_BOND_VALUE: u64 = 100_000_000;
 pub const MAX_NAME_LEN: usize = 63;
 pub const MAX_FRAMES: u8 = 32;
 pub const MAX_PAYLOAD_LEN: usize = 16 * 1024;

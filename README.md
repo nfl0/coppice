@@ -78,6 +78,11 @@ The proof demonstrates, without revealing the note itself, that:
 
 The note commitment, nullifier, exact value, tree position, receiver, and spending key remain private.
 
+The current experimental minimum bond is **1 ZEC (100,000,000 zatoshis)**. The BondCircuit proves
+the inclusive relation `note_value >= minimum`, so a note worth exactly 1 ZEC qualifies. This
+replaces the earlier Testnet V0 POC threshold of 500,000 zatoshis; proofs made against that earlier
+minimum are intentionally not accepted by the current experimental semantics.
+
 Replay accepts that proof only when the embedded root was independently derived by the wallet's
 authenticated Zcash chain scanner. This prevents a proof against an attacker-chosen tree from
 creating an unbacked registration.

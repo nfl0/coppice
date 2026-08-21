@@ -29,7 +29,8 @@ use zcash_note_encryption::try_note_decryption;
 use zcash_protocol::memo::MemoBytes;
 
 pub const BOND_K: u32 = 12;
-pub const FIXTURE_VALUE: u64 = 1_000_000;
+/// Exercises the inclusive `value >= B` boundary at exactly 1 ZEC.
+pub const FIXTURE_VALUE: u64 = constants::MINIMUM_BOND_VALUE;
 pub const FIXTURE_MINIMUM: u64 = constants::MINIMUM_BOND_VALUE;
 
 /// Private wallet material needed to prove a registration bond. Wallets obtain
@@ -450,7 +451,7 @@ mod tests {
             assert!(!verify(&params, pk.get_vk(), &proof, &bad));
         }
         let (low, low_instance, _) = fixture(
-            499_999,
+            FIXTURE_MINIMUM - 1,
             FIXTURE_MINIMUM,
             false,
             None,
