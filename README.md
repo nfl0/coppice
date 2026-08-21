@@ -256,7 +256,7 @@ cargo test --workspace
 
 If the vendored Orchard implementation is modified, its relevant upstream test suite should also remain passing.
 
-## Testnet V0 playground
+## Experimental name-manager playground
 
 `coppice-playground.sh` is experimental terminal tooling for the public Zcash testnet registry. It
 uses the sibling `zcash-devtool` checkout for wallet sync, transaction construction, proving,
@@ -286,12 +286,17 @@ Automatic commands are deliberately small:
 # after COMMIT is mined, run the same command to publish REVEAL
 ./coppice-playground.sh register alice utest1...
 ./coppice-playground.sh resolve alice
+./coppice-playground.sh names
+./coppice-playground.sh pending
+./coppice-playground.sh owner-key
 ./coppice-playground.sh update alice utest1...
 ./coppice-playground.sh release alice
 ./coppice-playground.sh watch
 ```
 
-Local state resumes on later runs. A fresh installation reconstructs it by replaying testnet from
+`names` displays the locally replayed registry with record status, owner, sequence, address, and
+bond tag. `pending` shows commit/reveal registrations staged by this wallet, and `owner-key` prints
+its canonical RedPallas owner key. Local state resumes on later runs. A fresh installation reconstructs it by replaying testnet from
 the activation height. This is POC tooling, not a production wallet.
 
 ## Local Z3 regtest playground

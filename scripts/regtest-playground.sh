@@ -270,14 +270,17 @@ play() {
   }
   local selected=1 choice name ua
   while true; do
-    printf '\nCoppice Regtest V0 (wallet %s)\n[r] Register [u] Update [x] Release [l] Resolve [m] Mine [s] Switch wallet [q] Quit\n> ' "$selected"
+    printf '\nCoppice Regtest V1 (wallet %s)\n[r] Register [u] Update [x] Release [l] Resolve [n] Names [p] Pending [k] Owner key [m] Mine [s] Switch wallet [q] Quit\n> ' "$selected"
     read -r choice
     case "$choice" in
       r|u) read -r -p 'Name: ' name; read -r -p 'Unified Address: ' ua
         [[ "$choice" == r ]] && verb=register || verb=update
         coppice "$selected" "$verb" "$name" "$ua" --identity "$(identity "$selected")" --server "$SERVER" ;;
       x) read -r -p 'Name: ' name; coppice "$selected" release "$name" --identity "$(identity "$selected")" --server "$SERVER" ;;
-      l) read -r -p 'Name: ' name; coppice "$selected" resolve "$name" || true ;;
+      l) read -r -p 'Name: ' name; coppice "$selected" resolve "$name" --server "$SERVER" || true ;;
+      n) coppice "$selected" names --server "$SERVER" ;;
+      p) coppice "$selected" pending --server "$SERVER" ;;
+      k) coppice "$selected" owner-key --identity "$(identity "$selected")" ;;
       m) mine 1 ;;
       s) read -r -p 'Wallet (1-3): ' selected; [[ "$selected" =~ ^[123]$ ]] || selected=1 ;;
       q) return ;;

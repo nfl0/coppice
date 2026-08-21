@@ -65,18 +65,30 @@ controlled_mine 3
 say "committing alice registration from wallet 1"
 ALICE_UA=$(ua 1)
 [[ -n "$ALICE_UA" ]] || { echo "wallet 1 has no unified address"; exit 1; }
+OWNER_KEY=$(coppice 1 owner-key --identity "$(identity 1)")
+[[ "$OWNER_KEY" =~ ^[0-9a-f]{64}$ ]] || { echo "invalid Coppice owner key"; exit 1; }
 coppice 1 register alice "$ALICE_UA" --identity "$(identity 1)" --server "$SERVER"
 controlled_mine 1
+PENDING=$(coppice 1 pending --server "$SERVER")
+printf '%s\n' "$PENDING"
+[[ "$PENDING" == *$'alice\tReadyToReveal'* ]] || { echo "alice reveal is not ready"; exit 1; }
 say "revealing alice registration from wallet 1"
 coppice 1 register alice "$ALICE_UA" --identity "$(identity 1)" --server "$SERVER"
 controlled_mine 1
-coppice 1 resolve alice
-coppice 2 resolve alice
+coppice 1 resolve alice --server "$SERVER"
+coppice 2 resolve alice --server "$SERVER"
+NAMES=$(coppice 2 names --server "$SERVER")
+printf '%s\n' "$NAMES"
+[[ "$NAMES" == *$'alice\tActive'* ]] || { echo "alice missing from name inventory"; exit 1; }
+[[ "$(coppice 1 pending --server "$SERVER")" == "No pending Coppice registrations." ]] || {
+  echo "completed alice registration remains pending"
+  exit 1
+}
 
 say "updating alice from wallet 1"
 coppice 1 update alice "$ALICE_UA" --identity "$(identity 1)" --server "$SERVER"
 controlled_mine 1
-coppice 2 resolve alice
+coppice 2 resolve alice --server "$SERVER"
 
 say "multi-wallet smoke test reached the registered and updated state"
 echo "log: $LOG"

@@ -67,13 +67,16 @@ interactive() {
   while true; do
     printf '\nCoppice Testnet V0\nNetwork: Zcash testnet\nActivation height: 4,288,414\n'
     status
-    printf '\n[r] Register  [u] Update  [x] Release  [l] Resolve  [w] Watch  [q] Quit\n> '
+    printf '\n[r] Register  [u] Update  [x] Release  [l] Resolve  [n] Names  [p] Pending  [k] Owner key  [w] Watch  [q] Quit\n> '
     read -r choice
     case "$choice" in
       r) read -r -p 'Name: ' name; read -r -p 'Unified Address: ' ua; run_action register "$name" "$ua" ;;
       u) read -r -p 'Name: ' name; read -r -p 'Unified Address: ' ua; run_action update "$name" "$ua" ;;
       x) read -r -p 'Name: ' name; run_action release "$name" ;;
       l) read -r -p 'Name: ' name; "$DEVTOOL" coppice --wallet-dir "$WALLET_DIR" resolve "$name" || true ;;
+      n) "$DEVTOOL" coppice --wallet-dir "$WALLET_DIR" names ;;
+      p) "$DEVTOOL" coppice --wallet-dir "$WALLET_DIR" pending ;;
+      k) "$DEVTOOL" coppice --wallet-dir "$WALLET_DIR" owner-key --identity "$IDENTITY" ;;
       w) "$DEVTOOL" coppice --wallet-dir "$WALLET_DIR" watch ;;
       q) return ;;
     esac
@@ -88,6 +91,9 @@ case "${1:-}" in
   watch) "$DEVTOOL" coppice --wallet-dir "$WALLET_DIR" watch ;;
   sync) wallet_sync ;;
   status) status ;;
+  names) wallet_sync; "$DEVTOOL" coppice --wallet-dir "$WALLET_DIR" names ;;
+  pending) "$DEVTOOL" coppice --wallet-dir "$WALLET_DIR" pending ;;
+  owner-key) "$DEVTOOL" coppice --wallet-dir "$WALLET_DIR" owner-key --identity "$IDENTITY" ;;
   "") interactive ;;
-  *) echo "usage: $0 [register NAME UA|update NAME UA|release NAME|resolve NAME|watch|sync|status]" >&2; exit 2 ;;
+  *) echo "usage: $0 [register NAME UA|update NAME UA|release NAME|resolve NAME|names|pending|owner-key|watch|sync|status]" >&2; exit 2 ;;
 esac
