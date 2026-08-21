@@ -62,9 +62,12 @@ say "shielding wallet 1 funds into real Ironwood notes"
 wallet 1 shield --identity "$(identity 1)" --server "$SERVER"
 controlled_mine 3
 
-say "registering alice from wallet 1"
+say "committing alice registration from wallet 1"
 ALICE_UA=$(ua 1)
 [[ -n "$ALICE_UA" ]] || { echo "wallet 1 has no unified address"; exit 1; }
+coppice 1 register alice "$ALICE_UA" --identity "$(identity 1)" --server "$SERVER"
+controlled_mine 1
+say "revealing alice registration from wallet 1"
 coppice 1 register alice "$ALICE_UA" --identity "$(identity 1)" --server "$SERVER"
 controlled_mine 1
 coppice 1 resolve alice

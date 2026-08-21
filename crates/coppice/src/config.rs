@@ -12,7 +12,8 @@ pub struct CoppiceConfig {
     pub minimum_bond_value: u64,
 }
 
-/// Public-testnet parameters used by the existing Testnet V0 history.
+/// Public-testnet POC parameters. `COPPICE_POC_V2` intentionally does not
+/// decode the superseded direct-REGISTER experiment.
 /// `tag_bits` is a discovery parameter for this deployment, not a claim about
 /// a future mainnet parameter.
 pub const TESTNET_V0: CoppiceConfig = CoppiceConfig {

@@ -272,7 +272,7 @@ cd coppice
 The first run creates a dedicated encrypted testnet wallet under `.coppice-testnet-v0`, prints its
 Unified Address, syncs, and replays Coppice from fixed activation height `4,288,414`. Fund that
 address with TAZ from <https://zcashfaucet.jinolabs.xyz/>; faucet access is never automated.
-REGISTER uses a real wallet-owned Ironwood note as its private bond and locks that note against
+REVEAL uses a real wallet-owned Ironwood note as its private bond and locks that note against
 accidental fee selection. The wallet therefore also needs a separate spendable note for the
 carrier transaction fee; a single-note test wallet may need one ordinary self-split transaction
 and a confirmation before registering.
@@ -282,6 +282,8 @@ Automatic commands are deliberately small:
 ```bash
 ./coppice-playground.sh sync
 ./coppice-playground.sh status
+./coppice-playground.sh register alice utest1...
+# after COMMIT is mined, run the same command to publish REVEAL
 ./coppice-playground.sh register alice utest1...
 ./coppice-playground.sh resolve alice
 ./coppice-playground.sh update alice utest1...
@@ -333,7 +335,8 @@ miner. Outside that test, `start` never mines and `mine COUNT` remains operator-
 bootstrap blocks, then starts Z3 through the installed `podman-compose`. It never mines. The Z3
 regtest network upgrades activate at heights 1 and 2, and the local Zaino endpoint is
 `127.0.0.1:28137`. The interactive flow switches among wallets and invokes the same Coppice
-REGISTER, UPDATE, RELEASE, and RESOLVE commands used by the public playground. `mine` confirms
+commit/reveal registration, UPDATE, RELEASE, and RESOLVE commands used by the public playground.
+`mine` confirms
 pending transactions only when explicitly invoked, then syncs all three wallets. On a fresh chain,
 run `start`, `mine 2`, and `start` again; thereafter mine the activation and maturity blocks you
 want. The default mining address is wallet 1 once it exists; use `COPPICE_REGTEST_MINER_ADDRESS`
@@ -362,7 +365,8 @@ To print newly replayed local activity, run:
 
 The watcher polls only Zebra's block height. For each new block it invokes the existing Rust
 `zcash-devtool coppice watch --once` path, which performs candidate detection, transaction fetch,
-memo decoding, and canonical replay through Zaino. It prints REGISTER, UPDATE, RELEASE, rejected
+memo decoding, and canonical replay through Zaino. It prints COMMIT, REGISTER (successful REVEAL),
+UPDATE, RELEASE, rejected
 candidates, and observed bond spends with height and txid. Use `--once` for a single catch-up pass.
 
 This is disposable developer infrastructure. Do not use its keys, activation height, reduced

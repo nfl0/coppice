@@ -1,4 +1,4 @@
-pub const PROTOCOL_ID: &[u8] = b"COPPICE_POC_V1";
+pub const PROTOCOL_ID: &[u8] = b"COPPICE_POC_V2";
 /// Frozen historical Testnet V0 network-domain bytes. The spelling is retained
 /// because changing it would invalidate existing signatures and BondProofs.
 pub const POC_NETWORK_ID: &[u8] = b"poc-local";

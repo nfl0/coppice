@@ -29,7 +29,7 @@ decryption.
 
 ## Constants and names
 
-The protocol identifier is `COPPICE_POC_V1`; the frozen Testnet V0 network-domain bytes are
+The protocol identifier is `COPPICE_POC_V2`; the frozen test-network domain bytes are
 `poc-local`. This historical spelling is cryptographic domain data, not a description of the
 actual network, and must not be changed for Testnet V0. Testnet V0 activates at height `4288414`;
 Ironwood nullifier accumulation starts at testnet NU6.3 height `4134000`.
@@ -54,7 +54,7 @@ H("CoppiceRecordV1" || record_bytes)`.
 Owner signature messages begin:
 
 ```text
-"CoppiceOwnerSigV0" || u16(14) || "COPPICE_POC_V1" ||
+"CoppiceOwnerSigV0" || u16(14) || "COPPICE_POC_V2" ||
 u16(9) || "poc-local"
 ```
 
@@ -91,7 +91,7 @@ and trailing bytes are invalid.
 A frame is:
 
 ```text
-"COPPICE_POC_V1"[14] || version_u8(1) || operation_id_u8(1) ||
+"COPPICE_POC_V2"[14] || version_u8(1) || operation_id_u8(1) ||
 frame_index_u8 || frame_count_u8 || payload_length_u16 || payload_hash[32] ||
 transport_nonce_u64 || chunk_length_u16 || chunk
 ```
