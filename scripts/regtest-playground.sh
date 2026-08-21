@@ -10,6 +10,9 @@ SERVER=${COPPICE_REGTEST_SERVER:-127.0.0.1:28137}
 ACTIVATION=10
 WALLET_COUNT=3
 RPC=http://127.0.0.1:29232
+# This disposable address is used only to mine the first two activation blocks
+# before a local wallet exists. It has no associated wallet key.
+BOOTSTRAP_MINER=${COPPICE_REGTEST_BOOTSTRAP_MINER_ADDRESS:-tmEdBeYYmDnzJ2R2tFdzzgpKNPzQg48j1TV}
 # Z3 currently pins Zaino 0.6, whose gRPC enum predates Ironwood. Keep Z3's
 # service configuration but select the first public Zaino release with the
 # Ironwood compact-sync protocol used by this workspace.
@@ -116,16 +119,12 @@ initialize_z3() {
   local shim
   shim=$(mktemp -d)
   make_docker_shim "$shim"
-  PATH="$shim:$PATH" "$Z3_DIR/scripts/regtest-init.sh"
+  # Z3's full initializer mines activation blocks before this playground has
+  # created a wallet mining receiver. Prepare only its local config; this
+  # harness owns service startup and deterministic wallet funding below.
+  PATH="$shim:$PATH" "$Z3_DIR/scripts/regtest-init.sh" --prepare-only
   rm -rf "$shim"
   touch "$STATE/z3-initialized"
-}
-
-ensure_chain_height() {
-  local height needed
-  height=$(rpc getblockcount | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"])')
-  needed=$((ACTIVATION - height))
-  (( needed <= 0 )) || rpc generate "[$needed]" >/dev/null
 }
 
 wallet_dir() { printf '%s/wallet-%s' "$STATE" "$1"; }
@@ -159,28 +158,24 @@ initialize_wallets() {
 
 configure_wallet_miner() {
   local miner
-  [[ -f "$(wallet_dir 1)/keys.toml" ]] || return
+  if [[ -n "${COPPICE_REGTEST_MINER_ADDRESS:-}" ]]; then
+    export ZEBRA_MINING__MINER_ADDRESS=$COPPICE_REGTEST_MINER_ADDRESS
+    return
+  fi
+  if [[ ! -f "$(wallet_dir 1)/keys.toml" ]]; then
+    export ZEBRA_MINING__MINER_ADDRESS=$BOOTSTRAP_MINER
+    return
+  fi
   miner=$(wallet 1 list-addresses --receiver transparent | sed -n 's/^Receiver(transparent): //p' | head -1)
   [[ -n "$miner" ]] || die "wallet 1 has no transparent mining receiver"
   export ZEBRA_MINING__MINER_ADDRESS=$miner
-}
-
-fund_wallet_one() {
-  [[ -f "$STATE/wallet-1-funded" ]] && return
-  configure_wallet_miner
-  # Recreate Zebra once so subsequent coinbase rewards belong to wallet 1,
-  # then mature the first reward immediately on the tiny local chain.
-  compose --profile indexer up -d zebra cookie-permissions zallet zaino
-  wait_for_rpc
-  rpc generate '[101]' >/dev/null
-  wait_for_zaino
-  touch "$STATE/wallet-1-funded"
 }
 
 sync_wallets() {
   local i
   wait_for_zaino
   for i in $(seq 1 "$WALLET_COUNT"); do
+    [[ -f "$(wallet_dir "$i")/keys.toml" ]] || continue
     wallet "$i" sync --server "$SERVER"
     coppice "$i" sync --server "$SERVER"
   done
@@ -194,10 +189,20 @@ start() {
   configure_wallet_miner
   compose --profile indexer up -d zebra cookie-permissions zallet zaino
   wait_for_rpc
-  ensure_chain_height
+  local height
+  height=$(rpc getblockcount | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"])')
+  if (( height < 2 )); then
+    printf 'Regtest is at height %s. Mine 2 blocks manually, then run start again to create wallets.\n' "$height"
+    return
+  fi
   initialize_wallets
-  fund_wallet_one
-  printf 'Coppice regtest ready (activation %s, Zaino %s).\n' "$ACTIVATION" "$SERVER"
+  # Wallets now exist, so restart Zebra with wallet 1 as the default mining
+  # address. No blocks are mined here; callers advance the chain explicitly.
+  configure_wallet_miner
+  compose --profile indexer up -d --force-recreate zebra
+  wait_for_rpc
+  wait_for_zaino
+  printf 'Coppice regtest ready (activation %s, Zaino %s). Mine blocks manually.\n' "$ACTIVATION" "$SERVER"
 }
 
 stop() {
@@ -243,6 +248,9 @@ status() {
 
 play() {
   start
+  [[ -f "$(wallet_dir 1)/keys.toml" ]] || {
+    die "mine two bootstrap blocks with '$0 mine 2', then run play again"
+  }
   local selected=1 choice name ua
   while true; do
     printf '\nCoppice Regtest V0 (wallet %s)\n[r] Register [u] Update [x] Release [l] Resolve [m] Mine [s] Switch wallet [q] Quit\n> ' "$selected"

@@ -294,15 +294,34 @@ cargo build --release --features regtest_support --manifest-path ../zcash-devtoo
 ./scripts/regtest-playground.sh stop
 ```
 
-`start` creates or reuses three local regtest wallets under `.coppice-regtest/`, starts Z3 through
-the installed `podman-compose`, and mines to fixed local Coppice activation height `10`. The Z3
+For a disposable, operator-driven two-wallet exercise (with a timestamped local log under
+`logs/`), use:
+
+```bash
+./scripts/regtest-multiwallet-test.sh --reset
+```
+
+`start` creates or reuses three local regtest wallets under `.coppice-regtest/` after two explicit
+bootstrap blocks, then starts Z3 through the installed `podman-compose`. It never mines. The Z3
 regtest network upgrades activate at heights 1 and 2, and the local Zaino endpoint is
 `127.0.0.1:28137`. The interactive flow switches among wallets and invokes the same Coppice
 REGISTER, UPDATE, RELEASE, and RESOLVE commands used by the public playground. `mine` confirms
-pending transactions immediately and syncs all three wallets. On first start, mining is assigned
-to wallet 1 and enough blocks are generated to mature its first coinbase reward; use the normal
-`zcash-devtool` send/shield commands to distribute test funds. `reset` removes only the local Z3
-volumes and `.coppice-regtest/` wallet state.
+pending transactions only when explicitly invoked, then syncs all three wallets. On a fresh chain,
+run `start`, `mine 2`, and `start` again; thereafter mine the activation and maturity blocks you
+want. The default mining address is wallet 1 once it exists; use `COPPICE_REGTEST_MINER_ADDRESS`
+when restarting the services to direct new coinbases elsewhere. Use the normal `zcash-devtool`
+send/shield commands to distribute test funds. `reset` removes only the local Z3 volumes and
+`.coppice-regtest/` wallet state.
+
+### Current funding observation
+
+On this Zebra regtest setup, the generic transparent-input selector can choose a newer immature
+coinbase output even when older rewards are mature. A first shield attempt can therefore be
+rejected until the selected output receives 100 confirmations. Zaino currently reports this as a
+generic backing-node error; Zebra's `sendrawtransaction` response exposes the useful
+`immature transparent coinbase spend` detail. This is local wallet/test-harness friction, not a
+Coppice protocol failure: mine enough blocks and retry before treating the result as a funded
+Ironwood bond.
 
 Z3 currently pins Zaino 0.6; the script overrides only that container image to the public Zaino
 0.8 no-TLS image because 0.6 predates the Ironwood compact-sync enum used by `zcash-devtool`.

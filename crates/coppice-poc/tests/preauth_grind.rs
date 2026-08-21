@@ -177,6 +177,9 @@ fn preauthorization_memo_grind_keeps_action_statement_fixed() {
         start.elapsed(),
         attempts as f64 / start.elapsed().as_secs_f64()
     );
+    // Wallet integrations carry the grounded PCZT across a serialization
+    // boundary before independent prove/sign roles consume it.
+    let p = Pczt::parse(&p.serialize().unwrap()).unwrap();
     let p = Prover::new(p)
         .create_ironwood_proof(&orchard::circuit::ProvingKey::build(
             orchard::circuit::OrchardCircuitVersion::PostNu6_3,
