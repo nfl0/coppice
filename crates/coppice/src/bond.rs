@@ -337,20 +337,13 @@ struct BondProofVector {
 }
 
 #[derive(Serialize)]
-struct OwnerKeyVector {
-    source: &'static str,
-    pallas_scalar: String,
-    redpallas_spendauth_verification_key: String,
-}
-
-#[derive(Serialize)]
 struct BondTagVector {
     version: &'static str,
     canonical_nullifier: String,
     poseidon_bond_tag: String,
 }
 
-/// Generates the dedicated bond proof fixture and the two native vectors.
+/// Generates the dedicated bond proof fixture and bond-tag vector.
 ///
 /// `source_git_commit` is explicit so the generated artifact can identify the
 /// source commit without creating a commit-hash cycle when the vectors themselves
@@ -358,7 +351,7 @@ struct BondTagVector {
 pub fn generate_coppice_bond_vectors(
     source_git_commit: &str,
     canonical_nullifier: [u8; 32],
-) -> Result<(String, String, String), String> {
+) -> Result<(String, String), String> {
     const PROOF_RNG_SEED: [u8; 32] = [42; 32];
     const FIXTURE_POSITION: u32 = 1;
     const PUBLIC_INPUT_NAMES: [&str; 7] = [
@@ -490,15 +483,6 @@ pub fn generate_coppice_bond_vectors(
         return Err(format!("unexpected proof length: {}", bond.proof_length));
     }
 
-    let owner_key =
-        crate::owner::OwnerSigningKey::try_from([1; 32]).map_err(|_| "native owner key")?;
-    let owner_vector = OwnerKeyVector {
-        source: "reference-v0 owner partial vector",
-        pallas_scalar: hex::encode(<[u8; 32]>::from(&owner_key)),
-        redpallas_spendauth_verification_key: hex::encode(crate::owner::owner_key_bytes(
-            &(&owner_key).into(),
-        )),
-    };
     let bond_tag = spent_tag(&canonical_nullifier).map_err(|_| "canonical nullifier")?;
     let tag_vector = BondTagVector {
         version: "Coppice bond tag v1 Poseidon P128Pow5T3 ConstantLength<2>",
@@ -511,7 +495,7 @@ pub fn generate_coppice_bond_vectors(
             .map(|json| json + "\n")
             .map_err(|e| e.to_string())
     }
-    Ok((json(&bond)?, json(&owner_vector)?, json(&tag_vector)?))
+    Ok((json(&bond)?, json(&tag_vector)?))
 }
 
 fn prove<C: halo2_proofs::plonk::Circuit<pallas::Base>>(
@@ -940,10 +924,8 @@ mod tests {
     fn dedicated_bond_vectors_regenerate_byte_for_byte() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let bond_path = root.join("test-vectors/coppice_bond_v1.json");
-        let owner_path = root.join("test-vectors/owner_keys.json");
         let tag_path = root.join("test-vectors/bond_tags.json");
         let expected_bond = std::fs::read_to_string(bond_path).expect("bond vector");
-        let expected_owner = std::fs::read_to_string(owner_path).expect("owner vector");
         let expected_tag = std::fs::read_to_string(tag_path).expect("tag vector");
         let bond: serde_json::Value = serde_json::from_str(&expected_bond).unwrap();
         let tag: serde_json::Value = serde_json::from_str(&expected_tag).unwrap();
@@ -953,10 +935,8 @@ mod tests {
                 .unwrap()
                 .try_into()
                 .unwrap();
-        let (bond, owner, tag) =
-            generate_coppice_bond_vectors(source, canonical_nullifier).unwrap();
+        let (bond, tag) = generate_coppice_bond_vectors(source, canonical_nullifier).unwrap();
         assert_eq!(bond, expected_bond);
-        assert_eq!(owner, expected_owner);
         assert_eq!(tag, expected_tag);
     }
 
