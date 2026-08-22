@@ -26,8 +26,8 @@ pub use inventory::{
 };
 pub use locking::{
     CoppiceLockBackend, DesiredLockSetError, OutputLockBackendError, OutputLockStoreBridge,
-    ReconciliationError, ReconciliationReport, desired_lock_tags, lock_owner_for_bond,
-    reconcile_locks,
+    ReconciliationError, ReconciliationReport, WalletCoppiceLockBackend, WalletCoppiceLockError,
+    desired_lock_tags, lock_owner_for_bond, reconcile_locks,
 };
 pub use pending::{
     PendingRegistration, PendingRegistrationCollection, PendingRegistrationCollectionError,
@@ -57,9 +57,10 @@ pub use witness::{
 
 pub use bond_prover::{WalletBondPrivateMaterial, WalletBondProverError, prove_selected_bond};
 pub use carrier_tx::{
-    CarrierConstructionError, CarrierProposalError, CarrierTransactionRequestError,
-    ConstructedCarrierTransaction, PreparedCarrierProposal, carrier_transaction_request,
-    create_carrier_transaction, propose_carrier_transaction,
+    CarrierConstructionError, CarrierProposalError, CarrierProposalValidationError,
+    CarrierTransactionRequestError, ConstructedCarrierTransaction, PostBuildInvariantError,
+    PreparedCarrierProposal, carrier_transaction_request, create_carrier_transaction,
+    propose_carrier_transaction,
 };
 /// The exact pinned librustzcash lock-owner type used by this adapter.
 pub use zcash_client_backend::wallet::LockOwner;

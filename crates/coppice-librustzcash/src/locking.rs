@@ -1,13 +1,16 @@
 use std::{collections::BTreeSet, fmt::Debug};
 
+use orchard::keys::FullViewingKey;
+use zcash_client_backend::data_api::{InputSource, wallet::TargetHeight};
 use zcash_client_backend::data_api::{OutputLockStore, locking::LockError};
 use zcash_client_backend::wallet::LockOwner;
 use zcash_client_backend::wallet::OutputRef;
 use zcash_protocol::consensus::BlockHeight;
 
 use crate::{
-    InventoryError, IronwoodOutputId, IronwoodViewingCapability, OwnedBond, OwnedIronwoodNote,
-    OwnedIronwoodNoteSource, PendingRegistrationCollection,
+    InputSourceIronwoodNoteSource, InventoryError, IronwoodNoteSourceError, IronwoodOutputId,
+    IronwoodViewingCapability, OwnedBond, OwnedIronwoodNote, OwnedIronwoodNoteSource,
+    PendingRegistrationCollection,
     inventory::{ClassifiedNote, classify_notes},
 };
 
@@ -52,6 +55,46 @@ pub enum OutputLockBackendError<NoteSourceError, StorageError> {
     Storage(StorageError),
     UnexpectedLockCount { output: OutputRef, count: usize },
     UnknownLockFailure,
+}
+
+pub type WalletCoppiceLockError<DbT> = OutputLockBackendError<
+    IronwoodNoteSourceError<<DbT as InputSource>::Error, <DbT as OutputLockStore>::Error>,
+    <DbT as OutputLockStore>::Error,
+>;
+
+enum ExactLockError<E> {
+    Conflict(OutputRef),
+    Storage(E),
+    UnexpectedCount { output: OutputRef, count: usize },
+    Unknown,
+}
+
+fn ensure_exact_lock<Store: OutputLockStore>(
+    store: &mut Store,
+    output: OutputRef,
+    owner: LockOwner,
+    expiry_height: BlockHeight,
+) -> Result<(), ExactLockError<Store::Error>> {
+    match store.lock_outputs(&[output], owner, expiry_height) {
+        Ok(1) => Ok(()),
+        Ok(count) => Err(ExactLockError::UnexpectedCount { output, count }),
+        Err(LockError::LockFailure(output)) => Err(ExactLockError::Conflict(output)),
+        Err(LockError::Storage(error)) => Err(ExactLockError::Storage(error)),
+        Err(_) => Err(ExactLockError::Unknown),
+    }
+}
+
+fn map_exact_lock_error<NoteError, StorageError>(
+    error: ExactLockError<StorageError>,
+) -> OutputLockBackendError<NoteError, StorageError> {
+    match error {
+        ExactLockError::Conflict(output) => OutputLockBackendError::LockConflict(output),
+        ExactLockError::Storage(error) => OutputLockBackendError::Storage(error),
+        ExactLockError::UnexpectedCount { output, count } => {
+            OutputLockBackendError::UnexpectedLockCount { output, count }
+        }
+        ExactLockError::Unknown => OutputLockBackendError::UnknownLockFailure,
+    }
 }
 
 /// Composes a wallet-owned note source with the pinned public
@@ -112,18 +155,8 @@ where
     ) -> Result<(), Self::Error> {
         let output = output_id.as_output_ref();
         let owner = lock_owner_for_bond(bond_tag);
-        match self
-            .lock_store
-            .lock_outputs(&[output], owner, expiry_height)
-        {
-            Ok(1) => Ok(()),
-            Ok(count) => Err(OutputLockBackendError::UnexpectedLockCount { output, count }),
-            Err(LockError::LockFailure(output)) => {
-                Err(OutputLockBackendError::LockConflict(output))
-            }
-            Err(LockError::Storage(error)) => Err(OutputLockBackendError::Storage(error)),
-            Err(_) => Err(OutputLockBackendError::UnknownLockFailure),
-        }
+        ensure_exact_lock(&mut self.lock_store, output, owner, expiry_height)
+            .map_err(map_exact_lock_error)
     }
 
     fn remove_coppice_lock(
@@ -134,6 +167,103 @@ where
         let output = output_id.as_output_ref();
         self.lock_store
             .unlock_output(&output, lock_owner_for_bond(bond_tag))
+            .map_err(OutputLockBackendError::Storage)
+    }
+
+    fn max_lock_expiry_height(&self) -> BlockHeight {
+        BlockHeight::from_u32(u32::MAX)
+    }
+}
+
+/// One-object facade for inventory and Coppice lock mutation over a real wallet
+/// backend. It is deliberately transient and contains no self-references.
+pub struct WalletCoppiceLockBackend<'a, DbT>
+where
+    DbT: InputSource + OutputLockStore<AccountId = <DbT as InputSource>::AccountId>,
+{
+    wallet_db: &'a mut DbT,
+    account: <DbT as InputSource>::AccountId,
+    target_height: TargetHeight,
+    orchard_fvk: &'a FullViewingKey,
+    capability: IronwoodViewingCapability,
+}
+
+impl<'a, DbT> WalletCoppiceLockBackend<'a, DbT>
+where
+    DbT: InputSource + OutputLockStore<AccountId = <DbT as InputSource>::AccountId>,
+{
+    pub fn new(
+        wallet_db: &'a mut DbT,
+        account: <DbT as InputSource>::AccountId,
+        target_height: TargetHeight,
+        orchard_fvk: &'a FullViewingKey,
+        capability: IronwoodViewingCapability,
+    ) -> Self {
+        Self {
+            wallet_db,
+            account,
+            target_height,
+            orchard_fvk,
+            capability,
+        }
+    }
+
+    pub fn wallet_db_mut(&mut self) -> &mut DbT {
+        self.wallet_db
+    }
+
+    pub const fn capability(&self) -> IronwoodViewingCapability {
+        self.capability
+    }
+
+    pub const fn target_height(&self) -> TargetHeight {
+        self.target_height
+    }
+}
+
+impl<DbT> CoppiceLockBackend for WalletCoppiceLockBackend<'_, DbT>
+where
+    DbT: InputSource + OutputLockStore<AccountId = <DbT as InputSource>::AccountId>,
+    <DbT as InputSource>::Error: Debug,
+    <DbT as OutputLockStore>::Error: Debug,
+{
+    type Error = WalletCoppiceLockError<DbT>;
+
+    fn owned_unspent_ironwood_notes(&self) -> Result<Vec<OwnedIronwoodNote>, Self::Error> {
+        InputSourceIronwoodNoteSource::new(
+            &*self.wallet_db,
+            &*self.wallet_db,
+            self.account,
+            self.target_height,
+            self.orchard_fvk,
+            self.capability,
+        )
+        .owned_unspent_ironwood_notes()
+        .map_err(OutputLockBackendError::NoteSource)
+    }
+
+    fn ensure_coppice_lock(
+        &mut self,
+        output_id: &IronwoodOutputId,
+        bond_tag: [u8; 32],
+        expiry_height: BlockHeight,
+    ) -> Result<(), Self::Error> {
+        ensure_exact_lock(
+            self.wallet_db,
+            output_id.as_output_ref(),
+            lock_owner_for_bond(bond_tag),
+            expiry_height,
+        )
+        .map_err(map_exact_lock_error)
+    }
+
+    fn remove_coppice_lock(
+        &mut self,
+        output_id: &IronwoodOutputId,
+        bond_tag: [u8; 32],
+    ) -> Result<bool, Self::Error> {
+        self.wallet_db
+            .unlock_output(&output_id.as_output_ref(), lock_owner_for_bond(bond_tag))
             .map_err(OutputLockBackendError::Storage)
     }
 

@@ -113,6 +113,8 @@ pub enum SpendGuardError<HostError, BackendError: Debug> {
 /// backend. `Enabled` and `GuardOnly` always perform exact tip comparison and
 /// a fresh lock reconciliation before invoking `proposal_fn`; this also repairs
 /// locks that were cleared by an external generic wallet recovery operation.
+/// The callback receives that same reconciled mutable backend, allowing one
+/// concrete wallet object to continue directly into proposal construction.
 pub fn with_coppice_spend_guard<Host, Backend, Proposal>(
     mode: CoppiceProtectionMode,
     host_tip_source: &Host,
@@ -120,14 +122,14 @@ pub fn with_coppice_spend_guard<Host, Backend, Proposal>(
     pending: &PendingRegistrationCollection,
     capability: IronwoodViewingCapability,
     lock_backend: &mut Backend,
-    proposal_fn: impl FnOnce() -> Proposal,
+    proposal_fn: impl FnOnce(&mut Backend) -> Proposal,
 ) -> Result<(Proposal, Option<ReconciliationReport>), SpendGuardError<Host::Error, Backend::Error>>
 where
     Host: HostCanonicalTipSource,
     Backend: CoppiceLockBackend,
 {
     if !mode.protects_spend() {
-        return Ok((proposal_fn(), None));
+        return Ok((proposal_fn(lock_backend), None));
     }
 
     require_exact_canonical_tip(host_tip_source, reducer).map_err(|error| match error {
@@ -155,7 +157,7 @@ where
     let active_tags = active_canonical_bond_tags(reducer);
     let report = reconcile_locks(&active_tags, pending, capability, lock_backend)
         .map_err(SpendGuardError::ReconciliationFailed)?;
-    Ok((proposal_fn(), Some(report)))
+    Ok((proposal_fn(lock_backend), Some(report)))
 }
 
 #[cfg(test)]
@@ -383,7 +385,7 @@ mod tests {
         host: &FakeHost,
         pending: &PendingRegistrationCollection,
         backend: &mut FakeBackend,
-        proposal: impl FnOnce() -> Proposal,
+        proposal: impl FnOnce(&mut FakeBackend) -> Proposal,
     ) -> Result<(Proposal, Option<ReconciliationReport>), SpendGuardError<HostError, BackendError>>
     {
         let reducer = reducer();
@@ -410,7 +412,7 @@ mod tests {
             &host,
             &empty_pending(),
             &mut backend,
-            || {
+            |_| {
                 called.set(called.get() + 1);
             },
         );
@@ -437,7 +439,7 @@ mod tests {
             &host,
             &empty_pending(),
             &mut backend,
-            || called.set(called.get() + 1),
+            |_| called.set(called.get() + 1),
         );
         assert!(matches!(
             result,
@@ -462,7 +464,7 @@ mod tests {
             &host,
             &empty_pending(),
             &mut backend,
-            || called.set(called.get() + 1),
+            |_| called.set(called.get() + 1),
         );
         assert!(matches!(
             result,
@@ -482,7 +484,8 @@ mod tests {
             &host,
             &empty_pending(),
             &mut backend,
-            || {
+            |backend| {
+                assert!(backend.locks.is_empty());
                 called.set(called.get() + 1);
                 42
             },
@@ -509,7 +512,7 @@ mod tests {
             &host,
             &empty_pending(),
             &mut backend,
-            || called.set(called.get() + 1),
+            |_| called.set(called.get() + 1),
         );
         assert!(matches!(
             result,
@@ -535,7 +538,9 @@ mod tests {
             &host,
             &empty_pending(),
             &mut backend,
-            || {
+            |backend| {
+                assert!(backend.fail_inventory);
+                assert!(backend.fail_lock);
                 called.set(called.get() + 1);
                 7
             },
@@ -558,7 +563,7 @@ mod tests {
             &empty_pending(),
             IronwoodViewingCapability::IncomingOnly,
             &mut backend,
-            || called.set(called.get() + 1),
+            |_| called.set(called.get() + 1),
         );
         assert!(matches!(
             result,
@@ -583,7 +588,7 @@ mod tests {
             &pending,
             IronwoodViewingCapability::FullViewing,
             &mut backend,
-            || called.set(called.get() + 1),
+            |_| called.set(called.get() + 1),
         );
         assert!(matches!(
             result,
@@ -610,7 +615,7 @@ mod tests {
             &host,
             &empty_pending(),
             &mut backend,
-            || called.set(called.get() + 1),
+            |_| called.set(called.get() + 1),
         );
         assert!(matches!(
             result,
@@ -639,7 +644,7 @@ mod tests {
             &pending,
             IronwoodViewingCapability::FullViewing,
             &mut backend,
-            || called.set(called.get() + 1),
+            |_| called.set(called.get() + 1),
         );
         assert!(matches!(
             result,
@@ -649,6 +654,26 @@ mod tests {
         ));
         assert_eq!(called.get(), 0);
         assert_eq!(backend, before);
+    }
+
+    #[test]
+    fn callback_observes_unrelated_foreign_lock_on_same_backend() {
+        let reducer = reducer();
+        let host = matching_host(&reducer);
+        let output_id = note(9).output_id;
+        let foreign = LockOwner::new([0xa9; 32]);
+        let mut backend = FakeBackend::new(vec![note(9)]).with_lock(output_id, foreign);
+        with_coppice_spend_guard(
+            CoppiceProtectionMode::Enabled,
+            &host,
+            &reducer,
+            &empty_pending(),
+            IronwoodViewingCapability::FullViewing,
+            &mut backend,
+            |backend| assert_eq!(backend.locks[&output_id].owner, foreign),
+        )
+        .unwrap();
+        assert_eq!(backend.locks[&output_id].owner, foreign);
     }
 
     #[test]
@@ -666,7 +691,7 @@ mod tests {
             &pending,
             IronwoodViewingCapability::FullViewing,
             &mut backend,
-            || (),
+            |_| (),
         )
         .unwrap();
         assert_eq!(
@@ -683,7 +708,11 @@ mod tests {
             &pending,
             IronwoodViewingCapability::FullViewing,
             &mut backend,
-            || {
+            |backend| {
+                assert_eq!(
+                    backend.locks[&output_id].owner,
+                    lock_owner_for_bond(bond_tag)
+                );
                 called.set(called.get() + 1);
             },
         )

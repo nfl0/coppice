@@ -639,6 +639,11 @@ proposal MUST route every payment to Ironwood, and the stored finished
 transaction MUST be decrypted and reconstructed before it is handed to a
 broadcaster.
 
+`create_proposed_transactions` stores constructed transactions before Coppice
+can perform that final inspection. A post-build invariant failure is therefore
+an integration-recovery condition and MUST retain the affected txid; it is not
+a claim that wallet state was rolled back or an ordinary request to retry.
+
 It SHOULD depend on librustzcash public traits rather than directly on `zcash_client_sqlite` where practical.
 
 Historical Ironwood witness retrieval is a required proving capability. Because

@@ -317,6 +317,7 @@ mod tests {
         notes: Vec<ReceivedNote<u32, Note>>,
         spendable: BTreeMap<(TxId, u32), Option<ReceivedNote<u32, WalletNote>>>,
         select_calls: Cell<usize>,
+        select_target: Cell<Option<u32>>,
         spendable_calls: Cell<usize>,
     }
 
@@ -362,11 +363,13 @@ mod tests {
             &self,
             _account: Self::AccountId,
             _sources: &[ShieldedPool],
-            _target_height: TargetHeight,
+            target_height: TargetHeight,
             _exclude: &[Self::NoteRef],
             _lock_filter: LockFilter<'_>,
         ) -> Result<ReceivedNotes<Self::NoteRef>, Self::Error> {
             self.select_calls.set(self.select_calls.get() + 1);
+            self.select_target
+                .set(Some(BlockHeight::from(target_height).into()));
             Ok(ReceivedNotes::new(vec![], vec![], self.notes.clone()))
         }
 
@@ -425,6 +428,140 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct CombinedWallet {
+        source: FakeSource,
+        locks: BTreeMap<OutputRef, (zcash_client_backend::wallet::LockOwner, BlockHeight)>,
+        lock_reads: Cell<usize>,
+    }
+
+    impl InputSource for CombinedWallet {
+        type Error = ();
+        type AccountId = u32;
+        type NoteRef = u32;
+
+        fn get_spendable_note(
+            &self,
+            txid: &TxId,
+            protocol: ShieldedPool,
+            index: u32,
+            target_height: TargetHeight,
+            lock_filter: LockFilter<'_>,
+        ) -> Result<Option<ReceivedNote<Self::NoteRef, WalletNote>>, Self::Error> {
+            self.source
+                .get_spendable_note(txid, protocol, index, target_height, lock_filter)
+        }
+
+        fn anchor_computable(
+            &self,
+            protocol: ShieldedPool,
+            height: BlockHeight,
+        ) -> Result<bool, Self::Error> {
+            self.source.anchor_computable(protocol, height)
+        }
+
+        fn select_spendable_notes(
+            &self,
+            account: Self::AccountId,
+            target_value: TargetValue,
+            sources: &[ShieldedPool],
+            target_height: TargetHeight,
+            confirmations_policy: ConfirmationsPolicy,
+            exclude: &[Self::NoteRef],
+            lock_filter: LockFilter<'_>,
+        ) -> Result<ReceivedNotes<Self::NoteRef>, Self::Error> {
+            self.source.select_spendable_notes(
+                account,
+                target_value,
+                sources,
+                target_height,
+                confirmations_policy,
+                exclude,
+                lock_filter,
+            )
+        }
+
+        fn select_unspent_notes(
+            &self,
+            account: Self::AccountId,
+            sources: &[ShieldedPool],
+            target_height: TargetHeight,
+            exclude: &[Self::NoteRef],
+            lock_filter: LockFilter<'_>,
+        ) -> Result<ReceivedNotes<Self::NoteRef>, Self::Error> {
+            self.source
+                .select_unspent_notes(account, sources, target_height, exclude, lock_filter)
+        }
+
+        fn get_account_metadata(
+            &self,
+            account: Self::AccountId,
+            selector: &NoteFilter,
+            target_height: TargetHeight,
+            exclude: &[Self::NoteRef],
+            lock_filter: LockFilter<'_>,
+        ) -> Result<AccountMeta, Self::Error> {
+            self.source
+                .get_account_metadata(account, selector, target_height, exclude, lock_filter)
+        }
+    }
+
+    impl OutputLockStore for CombinedWallet {
+        type Error = ();
+        type AccountId = u32;
+
+        fn lock_outputs(
+            &mut self,
+            outputs: &[OutputRef],
+            owner: zcash_client_backend::wallet::LockOwner,
+            expiry: BlockHeight,
+        ) -> Result<usize, LockError<Self::Error>> {
+            if let Some(conflict) = outputs.iter().find(|output| {
+                self.locks
+                    .get(output)
+                    .is_some_and(|(existing, _)| *existing != owner)
+            }) {
+                return Err(LockError::LockFailure(*conflict));
+            }
+            for output in outputs {
+                self.locks.insert(*output, (owner, expiry));
+            }
+            Ok(outputs.len())
+        }
+
+        fn unlock_output(
+            &mut self,
+            output: &OutputRef,
+            owner: zcash_client_backend::wallet::LockOwner,
+        ) -> Result<bool, Self::Error> {
+            if self
+                .locks
+                .get(output)
+                .is_some_and(|(existing, _)| *existing == owner)
+            {
+                self.locks.remove(output);
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        }
+
+        fn clear_locked_outputs(
+            &mut self,
+            _account: Self::AccountId,
+        ) -> Result<usize, Self::Error> {
+            panic!("Coppice must never call clear_locked_outputs")
+        }
+
+        fn get_locked_outputs(
+            &self,
+            _account: Self::AccountId,
+        ) -> Result<Vec<OutputRef>, Self::Error> {
+            self.lock_reads.set(self.lock_reads.get() + 1);
+            Ok(self.locks.keys().copied().collect())
+        }
+    }
+
     fn fvk() -> FullViewingKey {
         let spending_key = SpendingKey::from_bytes([7; 32]).unwrap();
         FullViewingKey::from(&spending_key)
@@ -476,6 +613,44 @@ mod tests {
             fvk,
             capability,
         )
+    }
+
+    #[test]
+    fn one_wallet_facade_reuses_inventory_and_mutates_the_same_lock_store() {
+        use crate::{CoppiceLockBackend, WalletCoppiceLockBackend, lock_owner_for_bond};
+
+        let key = fvk();
+        let received = note(&key, 4, 500);
+        let mut wallet = CombinedWallet::default();
+        wallet.source.notes.push(received.clone());
+        wallet.source.spendable.insert(
+            (*received.txid(), u32::from(received.output_index())),
+            Some(wallet_note(&received, ValuePool::Ironwood)),
+        );
+        let target = TargetHeight::from(BlockHeight::from_u32(77));
+        let mut facade = WalletCoppiceLockBackend::new(
+            &mut wallet,
+            0,
+            target,
+            &key,
+            IronwoodViewingCapability::FullViewing,
+        );
+        assert_eq!(facade.target_height(), target);
+        let notes = facade.owned_unspent_ironwood_notes().unwrap();
+        assert_eq!(notes.len(), 1);
+        let output = notes[0].output_id;
+        let tag = coppice::bond_tag::derive_v1_bond_tag(&notes[0].nullifier).unwrap();
+        facade
+            .ensure_coppice_lock(&output, tag, facade.max_lock_expiry_height())
+            .unwrap();
+        assert_eq!(
+            facade.wallet_db_mut().locks[&output.as_output_ref()].0,
+            lock_owner_for_bond(tag)
+        );
+        assert!(facade.remove_coppice_lock(&output, tag).unwrap());
+        assert!(facade.wallet_db_mut().locks.is_empty());
+        assert_eq!(facade.wallet_db_mut().lock_reads.get(), 1);
+        assert_eq!(facade.wallet_db_mut().source.select_target.get(), Some(77));
     }
 
     #[test]

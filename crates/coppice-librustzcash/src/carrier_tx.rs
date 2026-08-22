@@ -18,7 +18,7 @@ use zcash_client_backend::{
             ConfirmationsPolicy, CreateErrT, LockRequest, ProposeTransferErrT, SpendingKeys,
             create_proposed_transactions,
             input_selection::{InputSelector, SpendPolicy},
-            propose_transfer,
+            propose_transfer, unlock_proposal_inputs,
         },
     },
     fees::ChangeStrategy,
@@ -36,8 +36,9 @@ use zcash_protocol::{
 use zip321::{Payment, PaymentError, TransactionRequest, Zip321Error};
 
 use crate::{
-    CoppiceLockBackend, CoppiceProtectionMode, HostCanonicalTipSource, IronwoodViewingCapability,
-    PendingRegistrationCollection, PreparedCarrier, SpendGuardError, with_coppice_spend_guard,
+    CoppiceProtectionMode, HostCanonicalTipSource, IronwoodViewingCapability,
+    PendingRegistrationCollection, PreparedCarrier, SpendGuardError, WalletCoppiceLockBackend,
+    WalletCoppiceLockError, with_coppice_spend_guard,
 };
 
 #[derive(Debug)]
@@ -106,40 +107,53 @@ impl<FeeRuleT, NoteRef> PreparedCarrierProposal<'_, FeeRuleT, NoteRef> {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CarrierProposalValidationError {
+    UnexpectedTargetHeight { expected: u32, actual: u32 },
+    CarrierPaymentNotIronwood { payment_index: usize },
+    MultiStepCarrierProposalUnsupported { steps: usize },
+}
+
+fn cleanup_rejected_proposal<E>(
+    validation: CarrierProposalValidationError,
+    lock_request: Option<LockRequest>,
+    cleanup: impl FnOnce(zcash_client_backend::wallet::LockOwner) -> Result<(), E>,
+) -> Result<CarrierProposalValidationError, (CarrierProposalValidationError, E)> {
+    if let Some(lock_request) = lock_request {
+        cleanup(lock_request.owner()).map_err(|error| (validation, error))?;
+    }
+    Ok(validation)
+}
+
 #[derive(Debug)]
-pub enum CarrierProposalError<HostError, LockError: Debug, ProposalError> {
+pub enum CarrierProposalError<HostError, LockError: Debug, ProposalError, CleanupError> {
     Request(CarrierTransactionRequestError),
     NetworkMismatch,
     LockedInputsPermitted,
     SpendGuard(SpendGuardError<HostError, LockError>),
     Proposal(ProposalError),
     TargetHeightOverflow,
-    UnexpectedTargetHeight { expected: u32, actual: u32 },
-    IronwoodNotActive { target_height: u32 },
-    CarrierPaymentNotIronwood { payment_index: usize },
-    MultiStepCarrierProposalUnsupported { steps: usize },
+    IronwoodNotActive {
+        target_height: u32,
+    },
+    PostProposalValidation(CarrierProposalValidationError),
+    ProposalCleanup {
+        validation: CarrierProposalValidationError,
+        error: CleanupError,
+    },
 }
 
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
-pub fn propose_carrier_transaction<
-    'a,
-    Host,
-    LockBackend,
-    DbT,
-    ParamsT,
-    InputsT,
-    ChangeT,
-    CommitmentTreeErrT,
->(
+pub fn propose_carrier_transaction<'a, Host, DbT, ParamsT, InputsT, ChangeT, CommitmentTreeErrT>(
     mode: CoppiceProtectionMode,
     host_tip_source: &Host,
     reducer: &V1Reducer,
     pending: &PendingRegistrationCollection,
     capability: IronwoodViewingCapability,
-    lock_backend: &mut LockBackend,
     wallet_db: &mut DbT,
     params: &ParamsT,
     spend_from_account: <DbT as InputSource>::AccountId,
+    orchard_fvk: &orchard::keys::FullViewingKey,
     input_selector: &InputsT,
     change_strategy: &ChangeT,
     confirmations_policy: ConfirmationsPolicy,
@@ -150,14 +164,15 @@ pub fn propose_carrier_transaction<
     PreparedCarrierProposal<'a, ChangeT::FeeRule, DbT::NoteRef>,
     CarrierProposalError<
         Host::Error,
-        LockBackend::Error,
+        WalletCoppiceLockError<DbT>,
         ProposeTransferErrT<DbT, CommitmentTreeErrT, InputsT, ChangeT>,
+        <DbT as WalletRead>::Error,
     >,
 >
 where
     Host: HostCanonicalTipSource,
-    LockBackend: CoppiceLockBackend,
-    DbT: WalletWrite + InputSource<Error = <DbT as WalletRead>::Error>,
+    DbT: WalletWrite
+        + InputSource<Error = <DbT as WalletRead>::Error, AccountId = <DbT as WalletRead>::AccountId>,
     DbT::NoteRef: Copy + Eq + Ord,
     ParamsT: consensus::Parameters + Clone,
     InputsT: InputSelector<InputSource = DbT>,
@@ -176,16 +191,33 @@ where
         .height
         .checked_add(1)
         .ok_or(CarrierProposalError::TargetHeightOverflow)?;
+    if !params.is_nu_active(
+        NetworkUpgrade::Nu6_3,
+        BlockHeight::from_u32(expected_height),
+    ) {
+        return Err(CarrierProposalError::IronwoodNotActive {
+            target_height: expected_height,
+        });
+    }
+    let target_height = zcash_client_backend::data_api::wallet::TargetHeight::from(expected_height);
+    let mut backend = WalletCoppiceLockBackend::new(
+        wallet_db,
+        spend_from_account,
+        target_height,
+        orchard_fvk,
+        capability,
+    );
+    let reconcile_capability = backend.capability();
     let (proposal_result, _) = with_coppice_spend_guard(
         mode,
         host_tip_source,
         reducer,
         pending,
-        capability,
-        lock_backend,
-        || {
+        reconcile_capability,
+        &mut backend,
+        |backend| {
             propose_transfer(
-                wallet_db,
+                backend.wallet_db_mut(),
                 params,
                 spend_from_account,
                 input_selector,
@@ -200,28 +232,36 @@ where
     )
     .map_err(CarrierProposalError::SpendGuard)?;
     let proposal = proposal_result.map_err(CarrierProposalError::Proposal)?;
-    let target_height: u32 = BlockHeight::from(proposal.min_target_height()).into();
-    if target_height != expected_height {
-        return Err(CarrierProposalError::UnexpectedTargetHeight {
+    let actual_target_height: u32 = BlockHeight::from(proposal.min_target_height()).into();
+    let validation = if actual_target_height != expected_height {
+        Some(CarrierProposalValidationError::UnexpectedTargetHeight {
             expected: expected_height,
-            actual: target_height,
-        });
-    }
-    if !params.is_nu_active(NetworkUpgrade::Nu6_3, BlockHeight::from_u32(target_height)) {
-        return Err(CarrierProposalError::IronwoodNotActive { target_height });
-    }
-    if proposal.steps().len() != 1 {
-        return Err(CarrierProposalError::MultiStepCarrierProposalUnsupported {
-            steps: proposal.steps().len(),
-        });
-    }
-    let step = proposal.steps().first();
-    for index in 0..prepared.frames().len() {
-        if step.payment_pools().get(&index) != Some(&PoolType::IRONWOOD) {
-            return Err(CarrierProposalError::CarrierPaymentNotIronwood {
-                payment_index: index,
-            });
-        }
+            actual: actual_target_height,
+        })
+    } else if proposal.steps().len() != 1 {
+        Some(
+            CarrierProposalValidationError::MultiStepCarrierProposalUnsupported {
+                steps: proposal.steps().len(),
+            },
+        )
+    } else {
+        let step = proposal.steps().first();
+        (0..prepared.frames().len()).find_map(|index| {
+            (step.payment_pools().get(&index) != Some(&PoolType::IRONWOOD)).then_some(
+                CarrierProposalValidationError::CarrierPaymentNotIronwood {
+                    payment_index: index,
+                },
+            )
+        })
+    };
+    if let Some(validation) = validation {
+        let validation = cleanup_rejected_proposal(validation, lock_inputs, |owner| {
+            unlock_proposal_inputs(backend.wallet_db_mut(), &proposal, owner)
+        })
+        .map_err(
+            |(validation, error)| CarrierProposalError::ProposalCleanup { validation, error },
+        )?;
+        return Err(CarrierProposalError::PostProposalValidation(validation));
     }
     Ok(PreparedCarrierProposal {
         proposal,
@@ -242,7 +282,17 @@ pub struct ConstructedCarrierTransaction {
 pub enum CarrierConstructionError<DbError, ConstructionError> {
     InvalidExpectedPayload,
     Construction(ConstructionError),
-    UnexpectedTransactionCount { count: usize },
+    UnexpectedTransactionCount {
+        count: usize,
+    },
+    PostBuildInvariant {
+        txid: TxId,
+        reason: PostBuildInvariantError<DbError>,
+    },
+}
+
+#[derive(Debug)]
+pub enum PostBuildInvariantError<DbError> {
     ConstructedTransactionUnavailable(DbError),
     MissingConstructedTransaction,
     MissingIronwoodBundle,
@@ -295,22 +345,40 @@ where
     let txid = *txids.first();
     let tx: Transaction = wallet_db
         .get_transaction(txid)
-        .map_err(CarrierConstructionError::ConstructedTransactionUnavailable)?
-        .ok_or(CarrierConstructionError::MissingConstructedTransaction)?;
+        .map_err(|error| CarrierConstructionError::PostBuildInvariant {
+            txid,
+            reason: PostBuildInvariantError::ConstructedTransactionUnavailable(error),
+        })?
+        .ok_or(CarrierConstructionError::PostBuildInvariant {
+            txid,
+            reason: PostBuildInvariantError::MissingConstructedTransaction,
+        })?;
     if tx.ironwood_bundle().is_none() {
-        return Err(CarrierConstructionError::MissingIronwoodBundle);
+        return Err(CarrierConstructionError::PostBuildInvariant {
+            txid,
+            reason: PostBuildInvariantError::MissingIronwoodBundle,
+        });
     }
     let inspection = inspect_v1_bulletin_for(&tx, prepared.rendezvous, prepared.deployment_id)
-        .map_err(CarrierConstructionError::BulletinDecode)?;
+        .map_err(|error| CarrierConstructionError::PostBuildInvariant {
+            txid,
+            reason: PostBuildInvariantError::BulletinDecode(error),
+        })?;
     if inspection.frames().len() != prepared.prepared.frames().len() {
-        return Err(CarrierConstructionError::BulletinFrameCountMismatch {
-            expected: prepared.prepared.frames().len(),
-            actual: inspection.frames().len(),
+        return Err(CarrierConstructionError::PostBuildInvariant {
+            txid,
+            reason: PostBuildInvariantError::BulletinFrameCountMismatch {
+                expected: prepared.prepared.frames().len(),
+                actual: inspection.frames().len(),
+            },
         });
     }
     for (index, expected) in prepared.prepared.frames().iter().enumerate() {
         if !inspection.frames().contains(expected) {
-            return Err(CarrierConstructionError::BulletinFrameMismatch { index });
+            return Err(CarrierConstructionError::PostBuildInvariant {
+                txid,
+                reason: PostBuildInvariantError::BulletinFrameMismatch { index },
+            });
         }
     }
     if inspection.operation() != &expected_operation
@@ -320,15 +388,24 @@ where
             != Some(prepared.prepared.payload())
         || inspection.payload() != prepared.prepared.payload()
     {
-        return Err(CarrierConstructionError::PayloadMismatch);
+        return Err(CarrierConstructionError::PostBuildInvariant {
+            txid,
+            reason: PostBuildInvariantError::PayloadMismatch,
+        });
     }
     let mut encoded = Vec::new();
     tx.write(&mut encoded)
-        .map_err(|_| CarrierConstructionError::Serialization)?;
+        .map_err(|_| CarrierConstructionError::PostBuildInvariant {
+            txid,
+            reason: PostBuildInvariantError::Serialization,
+        })?;
     let serialized_size = encoded.len();
     if serialized_size > MAX_TRANSACTION_LEN {
-        return Err(CarrierConstructionError::TransactionTooLarge {
-            size: serialized_size,
+        return Err(CarrierConstructionError::PostBuildInvariant {
+            txid,
+            reason: PostBuildInvariantError::TransactionTooLarge {
+                size: serialized_size,
+            },
         });
     }
     Ok(ConstructedCarrierTransaction {
@@ -345,6 +422,8 @@ mod tests {
         constants::{MAX_ADDRESS_LEN, MAX_BOND_PROOF_LEN, REGTEST_V0_ACTIVATION_HEIGHT},
         envelope::Operation,
     };
+    use std::cell::Cell;
+    use zcash_client_backend::wallet::LockOwner;
     use zcash_protocol::consensus::NetworkType;
 
     use super::*;
@@ -442,6 +521,52 @@ mod tests {
                 secret: [6; 32],
             },
             18,
+        );
+    }
+
+    #[test]
+    fn rejected_proposal_cleanup_is_exact_owner_scoped_and_optional() {
+        let owner = LockOwner::new([9; 32]);
+        let request = LockRequest::new(owner, 10);
+        let calls = Cell::new(0);
+        let observed = Cell::new(None);
+        let validation =
+            CarrierProposalValidationError::CarrierPaymentNotIronwood { payment_index: 2 };
+        assert_eq!(
+            cleanup_rejected_proposal(validation, Some(request), |actual| {
+                calls.set(calls.get() + 1);
+                observed.set(Some(actual));
+                Ok::<_, ()>(())
+            }),
+            Ok(validation)
+        );
+        assert_eq!(calls.get(), 1);
+        assert_eq!(observed.get(), Some(owner));
+
+        let no_lock_calls = Cell::new(0);
+        assert_eq!(
+            cleanup_rejected_proposal(validation, None, |_| {
+                no_lock_calls.set(no_lock_calls.get() + 1);
+                Ok::<_, ()>(())
+            }),
+            Ok(validation)
+        );
+        assert_eq!(no_lock_calls.get(), 0);
+    }
+
+    #[test]
+    fn rejected_proposal_cleanup_failure_is_explicit() {
+        let validation = CarrierProposalValidationError::UnexpectedTargetHeight {
+            expected: 10,
+            actual: 11,
+        };
+        let owner = LockOwner::new([8; 32]);
+        assert_eq!(
+            cleanup_rejected_proposal(validation, Some(LockRequest::new(owner, 10)), |actual| {
+                assert_eq!(actual, owner);
+                Err("storage")
+            }),
+            Err((validation, "storage"))
         );
     }
 }
