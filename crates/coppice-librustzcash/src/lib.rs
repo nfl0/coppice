@@ -35,12 +35,13 @@ pub use pending::{
     pending_attempt_expired, pending_commit_expired,
 };
 pub use register::{
-    BeginRegistrationError, CarrierPreparationError, CommitTransitionError, CompletionMismatch,
-    LifecycleError, PrepareRevealError, PreparedCarrier, PreparedCommit, PreparedReveal,
-    RegistrationBondMaterialSource, RegistrationOwner, RegistrationStage,
-    abandon_expired_registration, abandon_registration, begin_registration, complete_registration,
-    prepare_reveal, record_commit_broadcast, record_commit_mined,
-    registration_matches_active_record, registration_stage,
+    BeginRegistrationError, CanonicalCommitMissing, CarrierPreparationError, CommitTransitionError,
+    CompletionMismatch, LifecycleError, ObserveCanonicalCommitError, PrepareRevealError,
+    PreparedCarrier, PreparedCommit, PreparedReveal, RegistrationBondMaterialSource,
+    RegistrationOwner, RegistrationStage, abandon_expired_registration, abandon_registration,
+    begin_registration, canonical_commit_height, complete_registration, observe_canonical_commit,
+    prepare_reveal, record_commit_broadcast, registration_matches_active_record,
+    registration_stage,
 };
 pub use selection::{FreshnessEligibility, SelectedBondNote, select_bond_note};
 pub use source::{

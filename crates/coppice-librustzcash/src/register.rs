@@ -18,6 +18,7 @@ use coppice::{
     reducer_v1::V1Reducer,
     registration::registration_commitment,
     reveal::{RevealValidationError, canonical_v1_address},
+    state::CoppiceState,
 };
 use rand_core::{CryptoRng, RngCore};
 
@@ -110,15 +111,16 @@ pub enum RegistrationOwner<'a> {
 pub enum RegistrationStage {
     Prepared,
     CommitBroadcast,
-    CommitMined,
+    /// The semantic commitment exists in the last observed canonical reducer
+    /// state, independently of which transaction carried it.
+    CommitCanonical,
 }
 
 pub fn registration_stage(pending: &PendingRegistration) -> RegistrationStage {
     match (pending.commit_txid(), pending.commit_height()) {
-        (None, None) => RegistrationStage::Prepared,
+        (_, Some(_)) => RegistrationStage::CommitCanonical,
         (Some(_), None) => RegistrationStage::CommitBroadcast,
-        (Some(_), Some(_)) => RegistrationStage::CommitMined,
-        (None, Some(_)) => unreachable!("public pending transitions require a COMMIT txid"),
+        (None, None) => RegistrationStage::Prepared,
     }
 }
 
@@ -254,8 +256,6 @@ where
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CommitTransitionError {
     UnknownCommitment,
-    CommitTxidMissing,
-    CommitTxidMismatch,
     Pending(PendingRegistrationCollectionError),
 }
 
@@ -274,23 +274,50 @@ pub fn record_commit_broadcast(
         })
 }
 
-pub fn record_commit_mined(
+/// Observes the semantic commitment in the current canonical reducer state.
+/// The reducer's `ChainPosition`, not this wallet's broadcast txid, supplies
+/// the cached height. Repeated observations follow reorg height changes.
+pub fn observe_canonical_commit<Host: HostCanonicalTipSource>(
+    host_tip_source: &Host,
+    reducer: &V1Reducer,
     pending: &mut PendingRegistrationCollection,
     commitment: &[u8; 32],
-    txid: [u8; 32],
-    height: u32,
-) -> Result<(), CommitTransitionError> {
-    let local = pending
-        .get(commitment)
-        .ok_or(CommitTransitionError::UnknownCommitment)?;
-    match local.commit_txid() {
-        None => return Err(CommitTransitionError::CommitTxidMissing),
-        Some(stored) if stored != txid => return Err(CommitTransitionError::CommitTxidMismatch),
-        Some(_) => {}
+) -> Result<u32, ObserveCanonicalCommitError<Host::Error>> {
+    require_exact_canonical_tip(host_tip_source, reducer)
+        .map_err(ObserveCanonicalCommitError::Tip)?;
+    if pending.get(commitment).is_none() {
+        return Err(ObserveCanonicalCommitError::UnknownCommitment);
     }
+    let height = canonical_commit_height(reducer.state(), commitment)
+        .map_err(|_| ObserveCanonicalCommitError::CanonicalCommitMissing)?;
     pending
-        .mark_commit_mined(commitment, height)
-        .map_err(CommitTransitionError::Pending)
+        .observe_canonical_commit_height(commitment, height)
+        .map_err(ObserveCanonicalCommitError::Pending)?;
+    Ok(height)
+}
+
+#[derive(Debug)]
+pub enum ObserveCanonicalCommitError<HostError> {
+    Tip(ExactCanonicalTipError<HostError>),
+    UnknownCommitment,
+    CanonicalCommitMissing,
+    Pending(PendingRegistrationCollectionError),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CanonicalCommitMissing;
+
+/// Resolves the protocol COMMIT height from canonical reducer state only.
+/// Wallet transport metadata is deliberately absent from this API.
+pub fn canonical_commit_height(
+    state: &CoppiceState,
+    commitment: &[u8; 32],
+) -> Result<u32, CanonicalCommitMissing> {
+    state
+        .pending
+        .get(commitment)
+        .map(|position| position.block_height)
+        .ok_or(CanonicalCommitMissing)
 }
 
 pub trait RegistrationBondMaterialSource {
@@ -306,13 +333,9 @@ pub trait RegistrationBondMaterialSource {
 pub enum PrepareRevealError<HostError, BackendError: Debug, WitnessError, MaterialError: Debug> {
     Tip(ExactCanonicalTipError<HostError>),
     UnknownPending,
-    CommitNotBroadcast,
-    CommitNotMined,
-    CommitHeightAboveTip { commit_height: u32, tip_height: u32 },
     Timing(PendingTimingError),
     CommitExpired,
     CanonicalCommitMissing,
-    CanonicalCommitHeightMismatch { local: u32, canonical: u32 },
     Freshness(FreshnessContextError),
     BondNoLongerFresh { position: u32, position_floor: u32 },
     Reconciliation(ReconciliationError<BackendError>),
@@ -358,19 +381,9 @@ where
         .get(commitment)
         .cloned()
         .ok_or(PrepareRevealError::UnknownPending)?;
-    pending
-        .commit_txid()
-        .ok_or(PrepareRevealError::CommitNotBroadcast)?;
-    let commit_height = pending
-        .commit_height()
-        .ok_or(PrepareRevealError::CommitNotMined)?;
+    let commit_height = canonical_commit_height(reducer.state(), commitment)
+        .map_err(|_| PrepareRevealError::CanonicalCommitMissing)?;
     let tip_height = reducer.tip().height;
-    if commit_height > tip_height {
-        return Err(PrepareRevealError::CommitHeightAboveTip {
-            commit_height,
-            tip_height,
-        });
-    }
     if crate::pending_commit_expired(
         commit_height,
         reducer.deployment().commit_ttl_blocks,
@@ -379,17 +392,6 @@ where
     .map_err(PrepareRevealError::Timing)?
     {
         return Err(PrepareRevealError::CommitExpired);
-    }
-    let canonical = reducer
-        .state()
-        .pending
-        .get(commitment)
-        .ok_or(PrepareRevealError::CanonicalCommitMissing)?;
-    if canonical.block_height != commit_height {
-        return Err(PrepareRevealError::CanonicalCommitHeightMismatch {
-            local: commit_height,
-            canonical: canonical.block_height,
-        });
     }
     let freshness = freshness_for_canonical_commit(reducer, commit_height)
         .map_err(PrepareRevealError::Freshness)?;
@@ -533,7 +535,7 @@ pub enum LifecycleError<HostError, BackendError: Debug> {
     Tip(ExactCanonicalTipError<HostError>),
     UnknownPending,
     CompletionMismatch(CompletionMismatch),
-    CommitNotMined,
+    CanonicalCommitMissing,
     Timing(PendingTimingError),
     NotExpired,
     Reconciliation(ReconciliationError<BackendError>),
@@ -627,9 +629,10 @@ where
     let local = pending
         .get(commitment)
         .ok_or(LifecycleError::UnknownPending)?;
-    let commit_height = local
-        .commit_height()
-        .ok_or(LifecycleError::CommitNotMined)?;
+    let commit_height = canonical_commit_height(reducer.state(), commitment)
+        .ok()
+        .or(local.commit_height())
+        .ok_or(LifecycleError::CanonicalCommitMissing)?;
     if !crate::pending_commit_expired(
         commit_height,
         reducer.deployment().commit_ttl_blocks,
@@ -657,8 +660,11 @@ mod tests {
         config::{DeploymentParameters, REGTEST_V0, Rendezvous},
         constants::REGTEST_V0_ACTIVATION_HEIGHT,
         owner::{OwnerSigningKey, owner_key_bytes},
+        pending::{ChainPosition, PendingCommitments},
+        recent_spent::RecentSpent,
         record::NameRecord,
         reducer_v1::{ActivationCheckpoint, CanonicalBlockInput, IronwoodFrontier, ReplayTip},
+        state::CoppiceState,
     };
     use rand_chacha::ChaCha20Rng;
     use rand_core::SeedableRng;
@@ -1021,7 +1027,7 @@ mod tests {
     }
 
     #[test]
-    fn transition_stage_is_derived_and_txid_is_cross_checked() {
+    fn stage_separates_broadcast_from_reorg_updatable_canonical_observation() {
         let reducer = reducer();
         let host = Host(reducer.tip());
         let mut collection = PendingRegistrationCollection::new();
@@ -1046,17 +1052,72 @@ mod tests {
             registration_stage(collection.get(&commitment).unwrap()),
             RegistrationStage::CommitBroadcast
         );
-        assert_eq!(
-            record_commit_mined(&mut collection, &commitment, [8; 32], 100),
-            Err(CommitTransitionError::CommitTxidMismatch)
-        );
-        let mined_height = next_height(&reducer);
-        record_commit_mined(&mut collection, &commitment, txid, mined_height).unwrap();
-        record_commit_mined(&mut collection, &commitment, txid, mined_height).unwrap();
+        collection
+            .observe_canonical_commit_height(&commitment, 108)
+            .unwrap();
         assert_eq!(
             registration_stage(collection.get(&commitment).unwrap()),
-            RegistrationStage::CommitMined
+            RegistrationStage::CommitCanonical
         );
+        collection
+            .observe_canonical_commit_height(&commitment, 111)
+            .unwrap();
+        collection
+            .observe_canonical_commit_height(&commitment, 111)
+            .unwrap();
+        assert_eq!(
+            collection.get(&commitment).unwrap().commit_height(),
+            Some(111)
+        );
+        assert_eq!(
+            collection.get(&commitment).unwrap().commit_txid(),
+            Some(txid)
+        );
+    }
+
+    fn state_with_commit(commitment: [u8; 32], height: u32) -> CoppiceState {
+        let mut protocol_pending = PendingCommitments::new();
+        protocol_pending.insert(
+            commitment,
+            ChainPosition {
+                block_height: height,
+                tx_index: 7,
+            },
+        );
+        CoppiceState::from_authoritative_parts(
+            BTreeMap::new(),
+            protocol_pending,
+            RecentSpent::new(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn canonical_height_ignores_transport_cache_and_follows_reorg_state() {
+        let commitment = [0x44; 32];
+        let earlier_copy = state_with_commit(commitment, 108);
+        assert_eq!(canonical_commit_height(&earlier_copy, &commitment), Ok(108));
+
+        let reorg_replacement = state_with_commit(commitment, 111);
+        assert_eq!(
+            canonical_commit_height(&reorg_replacement, &commitment),
+            Ok(111)
+        );
+        assert_eq!(
+            canonical_commit_height(&CoppiceState::default(), &commitment),
+            Err(CanonicalCommitMissing)
+        );
+
+        // A stale wallet cache of 110 is intentionally not an input to the
+        // protocol lookup: copied COMMIT height 108 remains authoritative.
+        let stale_local_height = 110;
+        assert_ne!(
+            canonical_commit_height(&earlier_copy, &commitment).unwrap(),
+            stale_local_height
+        );
+        let canonical_height = canonical_commit_height(&earlier_copy, &commitment).unwrap();
+        assert!(crate::pending_commit_expired(canonical_height, 20, 128).unwrap());
+        assert!(!crate::pending_commit_expired(stale_local_height, 20, 128).unwrap());
     }
 
     struct NeverWitness(Cell<usize>);
@@ -1103,9 +1164,10 @@ mod tests {
         )
         .unwrap()
         .commitment;
-        record_commit_broadcast(&mut collection, &commitment, [7; 32]).unwrap();
         let mined_height = next_height(&reducer);
-        record_commit_mined(&mut collection, &commitment, [7; 32], mined_height).unwrap();
+        collection
+            .observe_canonical_commit_height(&commitment, mined_height)
+            .unwrap();
         advance_empty(&mut reducer, mined_height);
         let host = Host(reducer.tip());
         let mut witness = NeverWitness(Cell::new(0));

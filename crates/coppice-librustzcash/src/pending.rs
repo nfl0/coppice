@@ -22,7 +22,11 @@ pub struct PendingRegistration {
     bond_tag: [u8; 32],
     secret: [u8; 32],
     commitment: [u8; 32],
+    /// Wallet-local identifier of the transaction this wallet broadcast, if
+    /// known. It is transport metadata and has no protocol authority.
     commit_txid: Option<[u8; 32]>,
+    /// Last observed canonical reducer height for the semantic commitment.
+    /// This is a reorg-updatable cache, not the mined height of `commit_txid`.
     commit_height: Option<u32>,
 }
 
@@ -39,8 +43,6 @@ pub enum PendingRegistrationValidationError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PendingRegistrationTransitionError {
     CommitTxidAlreadyRecorded,
-    CommitHeightRequiresTxid,
-    CommitHeightAlreadyRecorded,
 }
 
 impl PendingRegistration {
@@ -138,21 +140,13 @@ impl PendingRegistration {
         }
     }
 
-    pub fn record_commit_mined(
-        &mut self,
-        height: u32,
-    ) -> Result<(), PendingRegistrationTransitionError> {
-        if self.commit_txid.is_none() {
-            return Err(PendingRegistrationTransitionError::CommitHeightRequiresTxid);
-        }
-        match self.commit_height {
-            None => {
-                self.commit_height = Some(height);
-                Ok(())
-            }
-            Some(existing) if existing == height => Ok(()),
-            Some(_) => Err(PendingRegistrationTransitionError::CommitHeightAlreadyRecorded),
-        }
+    /// Updates the last canonical reducer observation for this commitment.
+    ///
+    /// This is crate-private so arbitrary callers cannot assign protocol
+    /// heights. The registration controller calls it only after reading the
+    /// current reducer's authenticated pending map.
+    pub(crate) fn observe_canonical_commit_height(&mut self, height: u32) {
+        self.commit_height = Some(height);
     }
 }
 
@@ -226,7 +220,7 @@ impl PendingRegistrationCollection {
             .map_err(PendingRegistrationCollectionError::Transition)
     }
 
-    pub fn mark_commit_mined(
+    pub(crate) fn observe_canonical_commit_height(
         &mut self,
         commitment: &[u8; 32],
         height: u32,
@@ -234,8 +228,8 @@ impl PendingRegistrationCollection {
         self.by_commitment
             .get_mut(commitment)
             .ok_or(PendingRegistrationCollectionError::UnknownCommitment)?
-            .record_commit_mined(height)
-            .map_err(PendingRegistrationCollectionError::Transition)
+            .observe_canonical_commit_height(height);
+        Ok(())
     }
 
     /// Removes a completed or deliberately abandoned local attempt.
@@ -244,7 +238,8 @@ impl PendingRegistrationCollection {
     }
 }
 
-/// Returns whether a mined local COMMIT is expired at canonical height `height`.
+/// Returns whether a canonically observed COMMIT is expired at canonical
+/// height `height`.
 ///
 /// This delegates to the core's checked pending-expiry arithmetic and never
 /// mutates or removes local metadata.
@@ -256,8 +251,9 @@ pub fn pending_commit_expired(
     coppice::pending::commitment_expired_at_end_of_block(commit_height, commit_ttl_blocks, height)
 }
 
-/// Returns whether a local attempt with a mined COMMIT is expired. An attempt
-/// that has not recorded a mined height is not expired by this helper.
+/// Returns whether a local attempt's last observed canonical COMMIT height is
+/// expired. An attempt without a cached canonical observation is not expired
+/// by this audit helper.
 pub fn pending_attempt_expired(
     pending: &PendingRegistration,
     commit_ttl_blocks: u32,
@@ -377,7 +373,7 @@ mod tests {
     }
 
     #[test]
-    fn collection_rejects_duplicates_and_requires_broadcast_before_mined() {
+    fn canonical_height_cache_is_independent_of_broadcast_and_reorg_updatable() {
         let first = pending();
         let commitment = first.commitment();
         let mut collection = PendingRegistrationCollection::new();
@@ -386,19 +382,19 @@ mod tests {
             collection.insert(first),
             Err(PendingRegistrationCollectionError::DuplicateCommitment)
         );
-        assert_eq!(
-            collection.mark_commit_mined(&commitment, 10),
-            Err(PendingRegistrationCollectionError::Transition(
-                PendingRegistrationTransitionError::CommitHeightRequiresTxid
-            ))
-        );
+        collection
+            .observe_canonical_commit_height(&commitment, 10)
+            .unwrap();
+        assert_eq!(collection.get(&commitment).unwrap().commit_txid(), None);
         collection
             .mark_commit_broadcast(&commitment, [7; 32])
             .unwrap();
-        collection.mark_commit_mined(&commitment, 10).unwrap();
+        collection
+            .observe_canonical_commit_height(&commitment, 11)
+            .unwrap();
         assert_eq!(
             collection.get(&commitment).unwrap().commit_height(),
-            Some(10)
+            Some(11)
         );
     }
 
@@ -406,8 +402,7 @@ mod tests {
     fn expiration_uses_checked_protocol_arithmetic_without_deleting_metadata() {
         let mut pending = pending();
         assert!(!pending_attempt_expired(&pending, 20, 100).unwrap());
-        pending.record_commit_txid([7; 32]).unwrap();
-        pending.record_commit_mined(100).unwrap();
+        pending.observe_canonical_commit_height(100);
         assert!(!pending_attempt_expired(&pending, 20, 119).unwrap());
         assert!(pending_attempt_expired(&pending, 20, 120).unwrap());
         assert_eq!(
