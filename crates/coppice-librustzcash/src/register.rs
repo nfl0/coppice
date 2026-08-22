@@ -50,17 +50,24 @@ impl PreparedCarrier {
     pub fn frames(&self) -> &[[u8; 512]] {
         &self.frames
     }
+
+    pub(crate) fn from_operation(
+        deployment_id: [u8; 32],
+        operation: &Operation,
+    ) -> Result<Self, CarrierPreparationError> {
+        let payload = envelope::encode_operation(operation)
+            .map_err(CarrierPreparationError::OperationEncoding)?;
+        let frames = carrier_v1::encode_frames_v1(deployment_id, &payload)
+            .map_err(CarrierPreparationError::Framing)?;
+        Ok(Self { payload, frames })
+    }
 }
 
 fn prepare_carrier(
     reducer: &V1Reducer,
     operation: &Operation,
 ) -> Result<PreparedCarrier, CarrierPreparationError> {
-    let payload = envelope::encode_operation(operation)
-        .map_err(CarrierPreparationError::OperationEncoding)?;
-    let frames = carrier_v1::encode_frames_v1(reducer.deployment_id(), &payload)
-        .map_err(CarrierPreparationError::Framing)?;
-    Ok(PreparedCarrier { payload, frames })
+    PreparedCarrier::from_operation(reducer.deployment_id(), operation)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -22,6 +22,7 @@ orchard = { version = "0.15.0", features = ["std"] }
 pasta_curves = "0.5"
 rand_chacha = "0.3"
 rand_core = "0.6"
+sapling = { package = "sapling-crypto", version = "0.7.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
@@ -32,6 +33,7 @@ zcash_client_backend = { git = "https://github.com/zcash/librustzcash.git", rev 
 zcash_keys = { git = "https://github.com/zcash/librustzcash.git", rev = "6c07e5f3297febf469e5cc8d0b91321e0767cdd7" }
 zcash_primitives = { version = "=0.30.0", features = ["std"] }
 zcash_protocol = { version = "=0.10.3", features = ["std", "local-consensus"] }
+zip321 = { git = "https://github.com/zcash/librustzcash.git", rev = "6c07e5f3297febf469e5cc8d0b91321e0767cdd7" }
 zip32 = "0.2.1"
 
 [patch.crates-io]

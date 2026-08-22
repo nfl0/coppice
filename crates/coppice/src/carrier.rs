@@ -21,6 +21,30 @@ pub enum V1CarrierError {
     Malformed,
     Build,
 }
+
+/// Read-only result of decrypting and reconstructing one canonical v1 bulletin.
+///
+/// This intentionally has no `Debug`: an unpublished REVEAL payload contains
+/// its registration secret.
+pub struct V1BulletinInspection {
+    operation: Operation,
+    payload: Vec<u8>,
+    frames: Vec<[u8; 512]>,
+}
+
+impl V1BulletinInspection {
+    pub fn operation(&self) -> &Operation {
+        &self.operation
+    }
+
+    pub fn payload(&self) -> &[u8] {
+        &self.payload
+    }
+
+    pub fn frames(&self) -> &[[u8; 512]] {
+        &self.frames
+    }
+}
 /// Returns the deployment's public incoming capability. It contains no spending authority.
 pub fn bulletin_ivk(rendezvous: Rendezvous) -> Result<IncomingViewingKey, Error> {
     Option::from(IncomingViewingKey::from_bytes(&rendezvous.orchard_ivk)).ok_or(Error::Build)
@@ -86,17 +110,39 @@ pub fn decode_v1_bulletin_for(
     rendezvous: Rendezvous,
     deployment_id: [u8; 32],
 ) -> Result<Operation, V1CarrierError> {
+    inspect_v1_bulletin_for(tx, rendezvous, deployment_id).map(|inspection| inspection.operation)
+}
+
+/// Decrypts the exact CPV1 rendezvous frames from a finished Ironwood
+/// transaction and reconstructs their canonical indexed payload.
+pub fn inspect_v1_bulletin_for(
+    tx: &Transaction,
+    rendezvous: Rendezvous,
+    deployment_id: [u8; 32],
+) -> Result<V1BulletinInspection, V1CarrierError> {
     let bundle = tx.ironwood_bundle().ok_or(V1CarrierError::NotFound)?;
     let ivk = bulletin_ivk(rendezvous)
         .map_err(|_| V1CarrierError::Build)?
         .prepare();
-    let memos = bundle.actions().iter().filter_map(|action| {
-        let domain = IronwoodDomain::for_action(action);
-        try_note_decryption(&domain, &ivk, action).map(|(_, _, memo)| memo)
-    });
-    decode_v1_memos_for(memos, deployment_id)
+    let frames = bundle
+        .actions()
+        .iter()
+        .filter_map(|action| {
+            let domain = IronwoodDomain::for_action(action);
+            try_note_decryption(&domain, &ivk, action).map(|(_, _, memo)| memo)
+        })
+        .filter(carrier_v1::is_v1_frame)
+        .collect::<Vec<_>>();
+    let payload = reconstruct_v1_memos_for(&frames, deployment_id)?;
+    let operation = envelope::decode_operation(&payload).map_err(|_| V1CarrierError::Malformed)?;
+    Ok(V1BulletinInspection {
+        operation,
+        payload,
+        frames,
+    })
 }
 
+#[cfg(test)]
 fn decode_v1_memos_for(
     memos: impl IntoIterator<Item = [u8; 512]>,
     deployment_id: [u8; 32],
@@ -108,6 +154,14 @@ fn decode_v1_memos_for(
         .into_iter()
         .filter(carrier_v1::is_v1_frame)
         .collect::<Vec<_>>();
+    let payload = reconstruct_v1_memos_for(&frames, deployment_id)?;
+    envelope::decode_operation(&payload).map_err(|_| V1CarrierError::Malformed)
+}
+
+fn reconstruct_v1_memos_for(
+    frames: &[[u8; 512]],
+    deployment_id: [u8; 32],
+) -> Result<Vec<u8>, V1CarrierError> {
     if frames.is_empty() {
         return Err(V1CarrierError::NotFound);
     }
@@ -117,7 +171,7 @@ fn decode_v1_memos_for(
         Err(carrier_v1::Error::WrongDeployment) => return Err(V1CarrierError::NotFound),
         Err(_) => return Err(V1CarrierError::Malformed),
     };
-    envelope::decode_operation(&payload).map_err(|_| V1CarrierError::Malformed)
+    Ok(payload)
 }
 
 #[cfg(test)]

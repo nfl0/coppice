@@ -632,6 +632,13 @@ construction MUST NOT rely on output insertion order to preserve frame order.
 It may add rendezvous outputs in any builder order; canonical v1 reconstruction
 uses each memo's explicit `frame_index`.
 
+Carrier transaction construction SHOULD map each prepared frame to one
+zero-valued payment to the Orchard-only rendezvous Unified Address and use the
+normal `propose_transfer` and `create_proposed_transactions` wallet path. The
+proposal MUST route every payment to Ironwood, and the stored finished
+transaction MUST be decrypted and reconstructed before it is handed to a
+broadcaster.
+
 It SHOULD depend on librustzcash public traits rather than directly on `zcash_client_sqlite` where practical.
 
 Historical Ironwood witness retrieval is a required proving capability. Because

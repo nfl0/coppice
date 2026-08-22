@@ -14,13 +14,18 @@ workspace = true
 coppice.workspace = true
 orchard.workspace = true
 rand_core.workspace = true
+sapling.workspace = true
 incrementalmerkletree.workspace = true
 shardtree.workspace = true
 zcash_client_backend = { workspace = true, features = ["orchard"] }
 zcash_keys = { workspace = true, features = ["orchard", "sapling", "std"] }
+zcash_primitives.workspace = true
 zcash_protocol.workspace = true
+zip321.workspace = true
 
 [dev-dependencies]
+hex.workspace = true
 rand_chacha.workspace = true
+serde_json.workspace = true
 zcash_address.workspace = true
 zip32.workspace = true

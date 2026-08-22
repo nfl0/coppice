@@ -1,11 +1,11 @@
 //! Wallet-local Coppice primitives for librustzcash integrations.
 //!
 //! This crate deliberately contains no wallet database, synchronization, RPC,
-//! transaction-construction, or UI integration. Its inputs are locally derived
-//! wallet facts and its lock backend is an explicit seam for a later concrete
-//! wallet implementation.
+//! broadcast, or UI integration. It adapts locally derived wallet facts and
+//! the host's public wallet traits, including normal transaction construction.
 
 mod bond_prover;
+mod carrier_tx;
 mod guard;
 mod inventory;
 mod locking;
@@ -56,5 +56,10 @@ pub use witness::{
 };
 
 pub use bond_prover::{WalletBondPrivateMaterial, WalletBondProverError, prove_selected_bond};
+pub use carrier_tx::{
+    CarrierConstructionError, CarrierProposalError, CarrierTransactionRequestError,
+    ConstructedCarrierTransaction, PreparedCarrierProposal, carrier_transaction_request,
+    create_carrier_transaction, propose_carrier_transaction,
+};
 /// The exact pinned librustzcash lock-owner type used by this adapter.
 pub use zcash_client_backend::wallet::LockOwner;
