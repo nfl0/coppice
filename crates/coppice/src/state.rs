@@ -1,792 +1,656 @@
-use crate::envelope::{Operation, valid_name};
-use crate::name_tree::{NameProof, prove, root, verify};
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+//! Canonical v1 reducer state and replay-independent, prevalidated mutations.
+
+use crate::{name_tree_v1, pending, recent_spent, record};
 use std::collections::BTreeMap;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Status {
-    Active,
-    Released,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CoppiceState {
+    pub names: BTreeMap<String, record::NameRecord>,
+    pub pending: pending::PendingCommitments,
+    pub recent_spent: recent_spent::RecentSpent,
+    active_bond_index: BTreeMap<[u8; 32], String>,
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NameRecord {
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrevalidatedRevealPath {
+    NewName,
+    TerminalReplacement,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PrevalidatedReveal {
+    pub name: String,
     pub owner_pk: [u8; 32],
     pub bond_tag: [u8; 32],
-    pub sequence: u64,
     pub address: Vec<u8>,
-    pub status: Status,
-}
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CoppiceState {
-    pub names: BTreeMap<String, NameRecord>,
-    #[serde(default, with = "commitment_map_serde")]
-    pub commitments: BTreeMap<[u8; 32], ChainPosition>,
+    pub commitment: [u8; 32],
+    pub path: PrevalidatedRevealPath,
 }
 
-mod commitment_map_serde {
-    use super::ChainPosition;
-    use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
-    use std::collections::BTreeMap;
-
-    pub fn serialize<S>(
-        value: &BTreeMap<[u8; 32], ChainPosition>,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        value.iter().collect::<Vec<_>>().serialize(serializer)
-    }
-
-    pub fn deserialize<'de, D>(
-        deserializer: D,
-    ) -> Result<BTreeMap<[u8; 32], ChainPosition>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let entries = Vec::<([u8; 32], ChainPosition)>::deserialize(deserializer)?;
-        let mut value = BTreeMap::new();
-        for (commitment, position) in entries {
-            if value.insert(commitment, position).is_some() {
-                return Err(D::Error::custom("duplicate registration commitment"));
-            }
-        }
-        Ok(value)
-    }
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ChainPosition {
-    pub block_height: u32,
-    pub tx_index: u32,
-}
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Transition {
-    Applied,
-    Rejected(TransitionRejectReason),
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TransitionRejectReason {
-    InvalidName,
-    InvalidOwnerKey,
-    DuplicateRegister,
-    UnknownName,
-    ReleasedName,
-    InvalidSequence,
-    OversizedAddress,
-    InvalidBondProof,
-    BondAlreadyInUse,
-    BondSpent,
-    InvalidSignature,
+pub enum StateMutationError {
     DuplicateCommitment,
     UnknownCommitment,
-    CommitmentNotMature,
+    UnknownName,
+    NameNotActive,
+    ActiveNameExists,
+    InvalidReplacementPath,
+    InvalidSequence,
+    InvalidTerminalHeight,
+    BondAlreadyInUse,
+    BondSpent,
+    DuplicateActiveBondTag,
+    InvariantInconsistency,
+    PendingArithmetic(pending::PendingTimingError),
+    RecentSpentArithmetic(recent_spent::RecentSpentArithmeticError),
 }
+
+impl Default for CoppiceState {
+    fn default() -> Self {
+        Self {
+            names: BTreeMap::new(),
+            pending: pending::PendingCommitments::new(),
+            recent_spent: recent_spent::RecentSpent::new(),
+            active_bond_index: BTreeMap::new(),
+        }
+    }
+}
+
 impl CoppiceState {
-    pub fn state_root(&self) -> [u8; 32] {
-        root(&self.names)
+    pub fn from_authoritative_parts(
+        names: BTreeMap<String, record::NameRecord>,
+        pending: pending::PendingCommitments,
+        recent_spent: recent_spent::RecentSpent,
+    ) -> Result<Self, StateMutationError> {
+        let active_bond_index = Self::rebuild_active_bond_index(&names)?;
+        Ok(Self {
+            names,
+            pending,
+            recent_spent,
+            active_bond_index,
+        })
     }
-    pub fn prove_name(&self, n: &str) -> NameProof {
-        prove(&self.names, n)
-    }
-    pub fn verify_name(&self, n: &str, r: Option<&NameRecord>, p: &NameProof) -> bool {
-        verify(self.state_root(), n, r, p)
-    }
-    pub fn commitment_root(&self) -> [u8; 32] {
-        let mut bytes = crate::constants::COMMITMENT_SET_DOMAIN.to_vec();
-        bytes.extend_from_slice(&(self.commitments.len() as u32).to_be_bytes());
-        for (commitment, position) in &self.commitments {
-            bytes.extend_from_slice(commitment);
-            bytes.extend_from_slice(&position.block_height.to_be_bytes());
-            bytes.extend_from_slice(&position.tx_index.to_be_bytes());
-        }
-        Sha256::digest(bytes).into()
-    }
-}
 
-pub fn registration_commitment(
-    name: &str,
-    owner_pk: [u8; 32],
-    bond_tag: [u8; 32],
-    bond_anchor: [u8; 32],
-    address: &[u8],
-    secret: [u8; 32],
-) -> [u8; 32] {
-    let mut bytes = crate::constants::REGISTRATION_COMMITMENT_DOMAIN.to_vec();
-    bytes.extend_from_slice(&(crate::constants::PROTOCOL_ID.len() as u16).to_be_bytes());
-    bytes.extend_from_slice(crate::constants::PROTOCOL_ID);
-    bytes.extend_from_slice(&(crate::constants::NETWORK_ID.len() as u16).to_be_bytes());
-    bytes.extend_from_slice(crate::constants::NETWORK_ID);
-    bytes.extend_from_slice(&crate::owner::name_id(name));
-    bytes.extend_from_slice(&owner_pk);
-    bytes.extend_from_slice(&bond_tag);
-    bytes.extend_from_slice(&bond_anchor);
-    bytes.extend_from_slice(&Sha256::digest(address));
-    bytes.extend_from_slice(&secret);
-    Sha256::digest(bytes).into()
-}
-#[cfg(test)]
-pub(crate) fn apply_operation(
-    s: &mut CoppiceState,
-    op: Operation,
-    position: ChainPosition,
-) -> Transition {
-    apply_operation_with_spent(s, None, op, position)
-}
+    fn rebuild_active_bond_index(
+        names: &BTreeMap<String, record::NameRecord>,
+    ) -> Result<BTreeMap<[u8; 32], String>, StateMutationError> {
+        let mut index = BTreeMap::new();
+        for (name, record) in names {
+            if record.status == record::NameStatus::Active
+                && index.insert(record.bond_tag, name.clone()).is_some()
+            {
+                return Err(StateMutationError::DuplicateActiveBondTag);
+            }
+        }
+        Ok(index)
+    }
 
-/// Applies an operation against the complete authenticated registry state.
-/// The spent-tag view is required for chain replay; the wrapper above remains
-/// useful for isolated transition tests.
-pub(crate) fn apply_operation_with_spent(
-    s: &mut CoppiceState,
-    spent: Option<&crate::spent::SpentTagTree>,
-    op: Operation,
-    position: ChainPosition,
-) -> Transition {
-    match &op {
-        Operation::Commit { commitment } => {
-            if s.commitments.contains_key(commitment) {
-                return Transition::Rejected(TransitionRejectReason::DuplicateCommitment);
-            }
-            s.commitments.insert(*commitment, position);
-            Transition::Applied
+    fn verify_active_bond_index(&self) -> Result<(), StateMutationError> {
+        let rebuilt = Self::rebuild_active_bond_index(&self.names)
+            .map_err(|_| StateMutationError::InvariantInconsistency)?;
+        if rebuilt != self.active_bond_index {
+            return Err(StateMutationError::InvariantInconsistency);
         }
-        Operation::Reveal {
-            name,
-            owner_pk,
-            bond_tag,
-            bond_anchor,
-            bond_proof,
-            address,
-            secret,
-            ..
-        } => {
-            if !valid_name(name) {
-                return Transition::Rejected(TransitionRejectReason::InvalidName);
-            }
-            if address.len() > crate::constants::MAX_PAYLOAD_LEN {
-                return Transition::Rejected(TransitionRejectReason::OversizedAddress);
-            }
-            if crate::owner::parse_owner_key(*owner_pk).is_err() {
-                return Transition::Rejected(TransitionRejectReason::InvalidOwnerKey);
-            }
-            let commitment =
-                registration_commitment(name, *owner_pk, *bond_tag, *bond_anchor, address, *secret);
-            let Some(committed_at) = s.commitments.get(&commitment).copied() else {
-                return Transition::Rejected(TransitionRejectReason::UnknownCommitment);
-            };
-            let Some(maturity_height) = committed_at
-                .block_height
-                .checked_add(crate::constants::MIN_COMMIT_CONFIRMATIONS)
-            else {
-                return Transition::Rejected(TransitionRejectReason::CommitmentNotMature);
-            };
-            if position.block_height < maturity_height {
-                return Transition::Rejected(TransitionRejectReason::CommitmentNotMature);
-            }
-            if spent.is_some_and(|tree| tree.contains(bond_tag)) {
-                return Transition::Rejected(TransitionRejectReason::BondSpent);
-            }
-            if let Some(existing) = s.names.get(name) {
-                let available = existing.status == Status::Released
-                    || spent.is_some_and(|tree| tree.contains(&existing.bond_tag));
-                if !available {
-                    return Transition::Rejected(TransitionRejectReason::DuplicateRegister);
-                }
-            }
-            if s.names.iter().any(|(other_name, record)| {
-                other_name != name
-                    && record.status == Status::Active
-                    && record.bond_tag == *bond_tag
-                    && !spent.is_some_and(|tree| tree.contains(&record.bond_tag))
-            }) {
-                return Transition::Rejected(TransitionRejectReason::BondAlreadyInUse);
-            }
-            if !crate::bond::verify_registration_bond(
-                name,
-                *owner_pk,
-                *bond_tag,
-                *bond_anchor,
-                bond_proof,
-                address,
-            ) {
-                return Transition::Rejected(TransitionRejectReason::InvalidBondProof);
-            }
-            s.names.insert(
-                name.clone(),
-                NameRecord {
-                    owner_pk: *owner_pk,
-                    bond_tag: *bond_tag,
-                    sequence: 0,
-                    address: address.clone(),
-                    status: Status::Active,
-                },
-            );
-            s.commitments.remove(&commitment);
-            Transition::Applied
+        Ok(())
+    }
+
+    pub fn active_bond_index(&self) -> &BTreeMap<[u8; 32], String> {
+        &self.active_bond_index
+    }
+
+    pub fn apply_prevalidated_commit(
+        &mut self,
+        commitment: [u8; 32],
+        position: pending::ChainPosition,
+    ) -> Result<(), StateMutationError> {
+        if self.pending.contains_key(&commitment) {
+            return Err(StateMutationError::DuplicateCommitment);
         }
-        Operation::Update {
-            name,
-            sequence,
-            address,
-            ..
-        } => {
-            let Some(old) = s.names.get(name).cloned() else {
-                return Transition::Rejected(TransitionRejectReason::UnknownName);
-            };
-            if old.status != Status::Active {
-                return Transition::Rejected(TransitionRejectReason::ReleasedName);
+        self.pending.insert(commitment, position);
+        Ok(())
+    }
+
+    pub fn apply_prevalidated_reveal(
+        &mut self,
+        reveal: PrevalidatedReveal,
+    ) -> Result<(), StateMutationError> {
+        self.verify_active_bond_index()?;
+        if !self.pending.contains_key(&reveal.commitment) {
+            return Err(StateMutationError::UnknownCommitment);
+        }
+        if self.recent_spent.contains_key(&reveal.bond_tag) {
+            return Err(StateMutationError::BondSpent);
+        }
+        if self.active_bond_index.contains_key(&reveal.bond_tag) {
+            return Err(StateMutationError::BondAlreadyInUse);
+        }
+        match (self.names.get(&reveal.name), reveal.path) {
+            (None, PrevalidatedRevealPath::NewName) => {}
+            (Some(existing), _) if existing.status == record::NameStatus::Active => {
+                return Err(StateMutationError::ActiveNameExists);
             }
-            if spent.is_some_and(|tree| tree.contains(&old.bond_tag)) {
-                return Transition::Rejected(TransitionRejectReason::BondSpent);
-            }
-            if old.sequence.checked_add(1) != Some(*sequence) {
-                return Transition::Rejected(TransitionRejectReason::InvalidSequence);
-            }
-            if address.len() > crate::constants::MAX_PAYLOAD_LEN {
-                return Transition::Rejected(TransitionRejectReason::OversizedAddress);
-            }
-            if !crate::owner::verify_operation(old.owner_pk, &op, &old) {
-                return Transition::Rejected(TransitionRejectReason::InvalidSignature);
-            }
-            if let Some(r) = s.names.get_mut(name) {
-                r.sequence = *sequence;
-                r.address = address.clone();
-                Transition::Applied
-            } else {
-                Transition::Rejected(TransitionRejectReason::UnknownName)
+            (Some(_), PrevalidatedRevealPath::TerminalReplacement) => {}
+            _ => return Err(StateMutationError::InvalidReplacementPath),
+        }
+
+        self.pending.remove(&reveal.commitment);
+        self.names.insert(
+            reveal.name.clone(),
+            record::NameRecord {
+                owner_pk: reveal.owner_pk,
+                bond_tag: reveal.bond_tag,
+                sequence: 0,
+                address: reveal.address,
+                status: record::NameStatus::Active,
+            },
+        );
+        self.active_bond_index.insert(reveal.bond_tag, reveal.name);
+        Ok(())
+    }
+
+    pub fn apply_prevalidated_update(
+        &mut self,
+        name: &str,
+        next_sequence: u64,
+        new_address: Vec<u8>,
+    ) -> Result<(), StateMutationError> {
+        self.verify_active_bond_index()?;
+        let current = self
+            .names
+            .get(name)
+            .ok_or(StateMutationError::UnknownName)?;
+        if current.status != record::NameStatus::Active {
+            return Err(StateMutationError::NameNotActive);
+        }
+        if current.sequence.checked_add(1) != Some(next_sequence) {
+            return Err(StateMutationError::InvalidSequence);
+        }
+        if self
+            .active_bond_index
+            .get(&current.bond_tag)
+            .map(String::as_str)
+            != Some(name)
+        {
+            return Err(StateMutationError::InvariantInconsistency);
+        }
+        let current = self.names.get_mut(name).expect("record checked above");
+        current.sequence = next_sequence;
+        current.address = new_address;
+        Ok(())
+    }
+
+    pub fn apply_prevalidated_release(
+        &mut self,
+        name: &str,
+        next_sequence: u64,
+        terminal_height: u32,
+    ) -> Result<(), StateMutationError> {
+        self.verify_active_bond_index()?;
+        let current = self
+            .names
+            .get(name)
+            .ok_or(StateMutationError::UnknownName)?;
+        if current.status != record::NameStatus::Active {
+            return Err(StateMutationError::NameNotActive);
+        }
+        if current.sequence.checked_add(1) != Some(next_sequence) {
+            return Err(StateMutationError::InvalidSequence);
+        }
+        if terminal_height == 0 {
+            return Err(StateMutationError::InvalidTerminalHeight);
+        }
+        if self
+            .active_bond_index
+            .get(&current.bond_tag)
+            .map(String::as_str)
+            != Some(name)
+        {
+            return Err(StateMutationError::InvariantInconsistency);
+        }
+        let bond_tag = current.bond_tag;
+        let current = self.names.get_mut(name).expect("record checked above");
+        current.sequence = next_sequence;
+        current.status = record::NameStatus::Released { terminal_height };
+        self.active_bond_index.remove(&bond_tag);
+        Ok(())
+    }
+
+    pub fn process_prevalidated_bond_tag(
+        &mut self,
+        bond_tag: [u8; 32],
+        current_height: u32,
+    ) -> Result<(), StateMutationError> {
+        self.verify_active_bond_index()?;
+        let indexed_name = self.active_bond_index.get(&bond_tag).cloned();
+        if let Some(name) = &indexed_name {
+            let record = self
+                .names
+                .get(name)
+                .ok_or(StateMutationError::InvariantInconsistency)?;
+            if record.status != record::NameStatus::Active || record.bond_tag != bond_tag {
+                return Err(StateMutationError::InvariantInconsistency);
             }
         }
-        Operation::Release { name, sequence, .. } => {
-            let Some(old) = s.names.get(name).cloned() else {
-                return Transition::Rejected(TransitionRejectReason::UnknownName);
+
+        self.recent_spent.entry(bond_tag).or_insert(current_height);
+        if let Some(name) = indexed_name {
+            self.names
+                .get_mut(&name)
+                .expect("record consistency checked above")
+                .status = record::NameStatus::BondSpent {
+                terminal_height: current_height,
             };
-            if old.status != Status::Active {
-                return Transition::Rejected(TransitionRejectReason::ReleasedName);
-            }
-            if spent.is_some_and(|tree| tree.contains(&old.bond_tag)) {
-                return Transition::Rejected(TransitionRejectReason::BondSpent);
-            }
-            if old.sequence.checked_add(1) != Some(*sequence) {
-                return Transition::Rejected(TransitionRejectReason::InvalidSequence);
-            }
-            if !crate::owner::verify_operation(old.owner_pk, &op, &old) {
-                return Transition::Rejected(TransitionRejectReason::InvalidSignature);
-            }
-            if let Some(r) = s.names.get_mut(name) {
-                r.sequence = *sequence;
-                r.status = Status::Released;
-                Transition::Applied
-            } else {
-                Transition::Rejected(TransitionRejectReason::UnknownName)
+            self.active_bond_index.remove(&bond_tag);
+        }
+        Ok(())
+    }
+
+    pub fn expire_pending_at_end_of_block(
+        &mut self,
+        height: u32,
+        commit_ttl_blocks: u32,
+    ) -> Result<usize, StateMutationError> {
+        let mut expired = Vec::new();
+        for (commitment, position) in &self.pending {
+            if pending::commitment_expired_at_end_of_block(
+                position.block_height,
+                commit_ttl_blocks,
+                height,
+            )
+            .map_err(StateMutationError::PendingArithmetic)?
+            {
+                expired.push(*commitment);
             }
         }
+        for commitment in &expired {
+            self.pending.remove(commitment);
+        }
+        Ok(expired.len())
+    }
+
+    pub fn prune_recent_spent_at_end_of_block(
+        &mut self,
+        activation_height: u32,
+        height: u32,
+        bond_note_max_age_blocks: u32,
+        commit_ttl_blocks: u32,
+    ) -> Result<(u32, usize), StateMutationError> {
+        let oldest = recent_spent::oldest_retained_height(
+            activation_height,
+            height,
+            bond_note_max_age_blocks,
+            commit_ttl_blocks,
+        )
+        .map_err(StateMutationError::RecentSpentArithmetic)?;
+        let removed = recent_spent::prune(&mut self.recent_spent, oldest);
+        Ok((oldest, removed))
+    }
+
+    pub fn name_tree_root(&self) -> Result<[u8; 32], name_tree_v1::NameTreeError> {
+        name_tree_v1::root(&self.names)
+    }
+
+    pub fn pending_root(&self) -> Result<[u8; 32], pending::PendingEncodingError> {
+        pending::root(&self.pending)
+    }
+
+    pub fn recent_spent_root(
+        &self,
+        oldest_retained_height: u32,
+    ) -> Result<[u8; 32], recent_spent::RecentSpentEncodingError> {
+        recent_spent::root(oldest_retained_height, &self.recent_spent)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::owner::{OwnerSigningKey, owner_key_bytes, sign_operation};
-    fn authorize_reveal(state: &mut CoppiceState, operation: &Operation, height: u32) {
-        let Operation::Reveal {
-            name,
-            owner_pk,
-            bond_tag,
-            bond_anchor,
-            address,
-            secret,
-            ..
-        } = operation
-        else {
-            return;
+
+    const NAME: &str = "alice";
+    const ADDRESS: &[u8] = b"u1synthetic-conformance-address";
+    const NEW_ADDRESS: &[u8] = b"u1synthetic-new-address";
+
+    fn active(tag: [u8; 32], sequence: u64) -> record::NameRecord {
+        record::NameRecord {
+            owner_pk: core::array::from_fn(|index| index as u8),
+            bond_tag: tag,
+            sequence,
+            address: ADDRESS.to_vec(),
+            status: record::NameStatus::Active,
+        }
+    }
+
+    fn state_with_record(name: &str, record: record::NameRecord) -> CoppiceState {
+        let mut names = BTreeMap::new();
+        names.insert(name.to_owned(), record);
+        CoppiceState::from_authoritative_parts(
+            names,
+            pending::PendingCommitments::new(),
+            recent_spent::RecentSpent::new(),
+        )
+        .unwrap()
+    }
+
+    fn reveal(commitment: [u8; 32], tag: [u8; 32]) -> PrevalidatedReveal {
+        PrevalidatedReveal {
+            name: NAME.to_owned(),
+            owner_pk: core::array::from_fn(|index| index as u8),
+            bond_tag: tag,
+            address: ADDRESS.to_vec(),
+            commitment,
+            path: PrevalidatedRevealPath::NewName,
+        }
+    }
+
+    #[test]
+    fn active_bond_index_rebuilds_from_authoritative_records() {
+        let empty = CoppiceState::default();
+        assert!(empty.active_bond_index().is_empty());
+
+        let mut names = BTreeMap::new();
+        names.insert("alice".to_owned(), active([1; 32], 0));
+        names.insert("bob".to_owned(), active([2; 32], 0));
+        names.insert(
+            "carol".to_owned(),
+            record::NameRecord {
+                status: record::NameStatus::Released {
+                    terminal_height: 10,
+                },
+                bond_tag: [1; 32],
+                ..active([1; 32], 0)
+            },
+        );
+        names.insert(
+            "dave".to_owned(),
+            record::NameRecord {
+                status: record::NameStatus::BondSpent {
+                    terminal_height: 11,
+                },
+                bond_tag: [2; 32],
+                ..active([2; 32], 0)
+            },
+        );
+        let state = CoppiceState::from_authoritative_parts(
+            names,
+            pending::PendingCommitments::new(),
+            recent_spent::RecentSpent::new(),
+        )
+        .unwrap();
+        assert_eq!(state.active_bond_index().len(), 2);
+        assert_eq!(
+            state.active_bond_index().get(&[1; 32]),
+            Some(&"alice".to_owned())
+        );
+        assert_eq!(
+            state.active_bond_index().get(&[2; 32]),
+            Some(&"bob".to_owned())
+        );
+    }
+
+    #[test]
+    fn duplicate_active_bond_tag_is_rejected_on_rebuild() {
+        let mut names = BTreeMap::new();
+        names.insert("alice".to_owned(), active([1; 32], 0));
+        names.insert("bob".to_owned(), active([1; 32], 0));
+        assert_eq!(
+            CoppiceState::from_authoritative_parts(
+                names,
+                pending::PendingCommitments::new(),
+                recent_spent::RecentSpent::new(),
+            ),
+            Err(StateMutationError::DuplicateActiveBondTag)
+        );
+    }
+
+    #[test]
+    fn prevalidated_commit_rejects_a_still_pending_duplicate() {
+        let commitment = [3; 32];
+        let position = pending::ChainPosition {
+            block_height: 100,
+            tx_index: 7,
         };
-        state.commitments.insert(
-            registration_commitment(name, *owner_pk, *bond_tag, *bond_anchor, address, *secret),
-            ChainPosition {
-                block_height: height.saturating_sub(1),
+        let mut state = CoppiceState::default();
+        assert_eq!(
+            state.apply_prevalidated_commit(commitment, position),
+            Ok(())
+        );
+        assert_eq!(
+            state.apply_prevalidated_commit(commitment, position),
+            Err(StateMutationError::DuplicateCommitment)
+        );
+        assert_eq!(state.pending.len(), 1);
+    }
+
+    #[test]
+    fn transition_vector_reveal_creates_active() {
+        let commitment = [3; 32];
+        let tag = [0x42; 32];
+        let mut state = CoppiceState::default();
+        state
+            .apply_prevalidated_commit(
+                commitment,
+                pending::ChainPosition {
+                    block_height: 100,
+                    tx_index: 7,
+                },
+            )
+            .unwrap();
+        state
+            .apply_prevalidated_reveal(reveal(commitment, tag))
+            .unwrap();
+        assert_eq!(state.names[NAME], active(tag, 0));
+        assert!(state.pending.is_empty());
+        assert_eq!(state.active_bond_index().get(&tag), Some(&NAME.to_owned()));
+    }
+
+    #[test]
+    fn rejected_reveals_are_atomic() {
+        let commitment = [3; 32];
+        let tag = [0x42; 32];
+        let mut missing = CoppiceState::default();
+        assert_eq!(
+            missing.apply_prevalidated_reveal(reveal(commitment, tag)),
+            Err(StateMutationError::UnknownCommitment)
+        );
+
+        let mut active_name = state_with_record(NAME, active([1; 32], 0));
+        active_name.pending.insert(
+            commitment,
+            pending::ChainPosition {
+                block_height: 1,
                 tx_index: 0,
             },
         );
-    }
-    #[test]
-    fn commit_reveal_update_release() {
-        let key = OwnerSigningKey::try_from([1; 32]).unwrap();
-        let owner_pk = owner_key_bytes(&(&key).into());
-        let bond = crate::bond::test_registration_bond("alice", b"UA_A");
-        let mut s = CoppiceState::default();
-        let x = Operation::Reveal {
-            name: "alice".into(),
-            owner_pk,
-            bond_tag: bond.bond_tag,
-            bond_anchor_height: 0,
-            bond_anchor: bond.anchor,
-            bond_proof: bond.proof.clone(),
-            address: b"UA_A".to_vec(),
-            secret: [7; 32],
-        };
-        authorize_reveal(&mut s, &x, 1);
+        let before = active_name.clone();
         assert_eq!(
-            apply_operation(
-                &mut s,
-                x.clone(),
-                ChainPosition {
-                    block_height: 1,
-                    tx_index: 0
-                }
-            ),
-            Transition::Applied
+            active_name.apply_prevalidated_reveal(reveal(commitment, tag)),
+            Err(StateMutationError::ActiveNameExists)
         );
-        assert_ne!(s.state_root(), [0; 32]);
+        assert_eq!(active_name, before);
 
-        assert_ne!(
-            apply_operation(
-                &mut s,
-                x,
-                ChainPosition {
-                    block_height: 1,
-                    tx_index: 1
-                }
-            ),
-            Transition::Applied
-        );
-        let previous = s.names["alice"].clone();
-        let mut update = Operation::Update {
-            name: "alice".into(),
-            sequence: 1,
-            address: b"UA_B".to_vec(),
-            signature: vec![],
-        };
-        if let Some(sig) = sign_operation(&key, &update, &previous) {
-            if let Operation::Update { signature, .. } = &mut update {
-                *signature = sig;
-            }
-        }
-        assert_eq!(
-            apply_operation(
-                &mut s,
-                update,
-                ChainPosition {
-                    block_height: 2,
-                    tx_index: 0
-                }
-            ),
-            Transition::Applied
-        );
-        let previous = s.names["alice"].clone();
-        let mut release = Operation::Release {
-            name: "alice".into(),
-            sequence: 2,
-            signature: vec![],
-        };
-        if let Some(sig) = sign_operation(&key, &release, &previous) {
-            if let Operation::Release { signature, .. } = &mut release {
-                *signature = sig;
-            }
-        }
-        assert_eq!(
-            apply_operation(
-                &mut s,
-                release,
-                ChainPosition {
-                    block_height: 3,
-                    tx_index: 0
-                }
-            ),
-            Transition::Applied
-        );
-        assert_eq!(s.names["alice"].status, Status::Released)
-    }
-
-    #[test]
-    fn rejected_owner_mutations_are_noops() {
-        use rand_core::OsRng;
-        let key = OwnerSigningKey::try_from([1; 32]).unwrap();
-        let owner = owner_key_bytes(&(&key).into());
-        let base = || {
-            let mut s = CoppiceState::default();
-            s.names.insert(
-                "alice".into(),
-                NameRecord {
-                    owner_pk: owner,
-                    bond_tag: [1; 32],
-                    sequence: 0,
-                    address: b"UA_A".to_vec(),
-                    status: Status::Active,
-                },
-            );
-            s
-        };
-        let previous = base().names["alice"].clone();
-        let mut valid = Operation::Update {
-            name: "alice".into(),
-            sequence: 1,
-            address: b"UA_B".to_vec(),
-            signature: vec![],
-        };
-        let sig = sign_operation(&key, &valid, &previous).unwrap();
-        if let Operation::Update { signature, .. } = &mut valid {
-            *signature = sig;
-        }
-        let mut variants = Vec::new();
-        let mut x = valid.clone();
-        if let Operation::Update { name, .. } = &mut x {
-            *name = "bob".into()
-        }
-        variants.push(x);
-        let mut x = valid.clone();
-        if let Operation::Update { sequence, .. } = &mut x {
-            *sequence = 2
-        }
-        variants.push(x);
-        let mut x = valid.clone();
-        if let Operation::Update { address, .. } = &mut x {
-            *address = b"UA_X".to_vec()
-        }
-        variants.push(x);
-        let mut x = valid.clone();
-        if let Operation::Update { signature, .. } = &mut x {
-            signature[0] ^= 1
-        }
-        variants.push(x);
-        let mut altered = crate::owner::authorization_message(
-            &Operation::Update {
-                name: "alice".into(),
-                sequence: 1,
-                address: b"UA_B".to_vec(),
-                signature: vec![],
+        let mut spent = CoppiceState::default();
+        spent.pending.insert(
+            commitment,
+            pending::ChainPosition {
+                block_height: 1,
+                tx_index: 0,
             },
-            &previous,
-        )
-        .unwrap();
-        altered[0] ^= 1;
-        let bad_sig = <[u8; 64]>::from(&key.sign(OsRng, &altered)).to_vec();
-        let mut x = valid.clone();
-        if let Operation::Update { signature, .. } = &mut x {
-            *signature = bad_sig
-        }
-        variants.push(x);
-        for op in variants {
-            let mut s = base();
-            let before = s.state_root();
-            assert_ne!(
-                apply_operation(
-                    &mut s,
-                    op,
-                    ChainPosition {
-                        block_height: 2,
-                        tx_index: 0
-                    }
-                ),
-                Transition::Applied
-            );
-            assert_eq!(before, s.state_root());
-        }
-        let other = OwnerSigningKey::try_from([2; 32]).unwrap();
-        let mut wrong = Operation::Update {
-            name: "alice".into(),
-            sequence: 1,
-            address: b"UA_B".to_vec(),
-            signature: vec![],
-        };
-        let sig = sign_operation(&other, &wrong, &previous).unwrap();
-        if let Operation::Update { signature, .. } = &mut wrong {
-            *signature = sig
-        }
-        let mut s = base();
-        let before = s.state_root();
-        assert_ne!(
-            apply_operation(
-                &mut s,
-                wrong,
-                ChainPosition {
-                    block_height: 2,
-                    tx_index: 0
-                }
-            ),
-            Transition::Applied
         );
-        assert_eq!(before, s.state_root());
-        let mut release = Operation::Release {
-            name: "alice".into(),
-            sequence: 1,
-            signature: vec![],
-        };
-        if let Operation::Release { signature, .. } = &mut release {
-            *signature = sign_operation(
-                &key,
-                &Operation::Release {
-                    name: "alice".into(),
-                    sequence: 1,
-                    signature: vec![],
-                },
-                &previous,
-            )
+        spent.recent_spent.insert(tag, 1);
+        let before = spent.clone();
+        assert_eq!(
+            spent.apply_prevalidated_reveal(reveal(commitment, tag)),
+            Err(StateMutationError::BondSpent)
+        );
+        assert_eq!(spent, before);
+
+        let mut collision = state_with_record("bob", active(tag, 0));
+        collision.pending.insert(
+            commitment,
+            pending::ChainPosition {
+                block_height: 1,
+                tx_index: 0,
+            },
+        );
+        let before = collision.clone();
+        assert_eq!(
+            collision.apply_prevalidated_reveal(reveal(commitment, tag)),
+            Err(StateMutationError::BondAlreadyInUse)
+        );
+        assert_eq!(collision, before);
+    }
+
+    #[test]
+    fn transition_vectors_update_increment_and_skip() {
+        let tag = [0x42; 32];
+        let mut state = state_with_record(NAME, active(tag, 0));
+        state
+            .apply_prevalidated_update(NAME, 1, NEW_ADDRESS.to_vec())
             .unwrap();
-        }
-        let mut as_update = valid.clone();
-        if let (Operation::Update { signature: a, .. }, Operation::Release { signature: b, .. }) =
-            (&mut as_update, &release)
-        {
-            *a = b.clone()
-        }
-        let mut s = base();
-        let before = s.state_root();
-        assert_ne!(
-            apply_operation(
-                &mut s,
-                as_update,
-                ChainPosition {
-                    block_height: 2,
-                    tx_index: 0
-                }
-            ),
-            Transition::Applied
+        let updated = &state.names[NAME];
+        assert_eq!(updated.sequence, 1);
+        assert_eq!(updated.address, NEW_ADDRESS);
+        assert_eq!(updated.owner_pk, active(tag, 0).owner_pk);
+        assert_eq!(updated.bond_tag, tag);
+        assert_eq!(updated.status, record::NameStatus::Active);
+        assert_eq!(state.active_bond_index().get(&tag), Some(&NAME.to_owned()));
+
+        let mut skipped = state_with_record(NAME, active(tag, 0));
+        let before = skipped.clone();
+        assert_eq!(
+            skipped.apply_prevalidated_update(NAME, 2, NEW_ADDRESS.to_vec()),
+            Err(StateMutationError::InvalidSequence)
         );
-        assert_eq!(before, s.state_root());
+        assert_eq!(skipped, before);
     }
 
     #[test]
-    fn owner_operation_helpers_use_the_next_sequence() {
-        let key = OwnerSigningKey::try_from([1; 32]).unwrap();
-        let owner = owner_key_bytes(&(&key).into());
-        let previous = NameRecord {
-            owner_pk: owner,
-            bond_tag: [1; 32],
-            sequence: 41,
-            address: b"UA_A".to_vec(),
-            status: Status::Active,
-        };
-        let update =
-            crate::owner::signed_update(&key, "alice", b"UA_B".to_vec(), &previous).unwrap();
-        assert!(crate::owner::verify_operation(owner, &update, &previous));
-        assert!(matches!(update, Operation::Update { sequence: 42, .. }));
-        let release = crate::owner::signed_release(&key, "alice", &previous).unwrap();
-        assert!(crate::owner::verify_operation(owner, &release, &previous));
-        assert!(matches!(release, Operation::Release { sequence: 42, .. }));
-    }
-
-    #[test]
-    fn spent_bond_blocks_owner_actions_and_release_makes_name_available() {
-        let key = OwnerSigningKey::try_from([1; 32]).unwrap();
-        let owner_pk = owner_key_bytes(&(&key).into());
-        let bond = crate::bond::test_registration_bond("alice", b"UA_NEW");
-        let mut state = CoppiceState::default();
-        state.names.insert(
-            "alice".into(),
-            NameRecord {
-                owner_pk,
-                bond_tag: bond.bond_tag,
-                sequence: 0,
-                address: b"UA_A".to_vec(),
-                status: Status::Active,
-            },
-        );
-        let previous = state.names["alice"].clone();
-        let mut update = Operation::Update {
-            name: "alice".into(),
-            sequence: 1,
-            address: b"UA_B".to_vec(),
-            signature: vec![],
-        };
-        let update_signature = sign_operation(&key, &update, &previous).unwrap();
-        if let Operation::Update { signature, .. } = &mut update {
-            *signature = update_signature;
-        }
-        let mut spent = crate::spent::SpentTagTree::default();
-        spent.insert_spent_tag(previous.bond_tag);
-        let root = state.state_root();
-        assert_eq!(
-            apply_operation_with_spent(
-                &mut state,
-                Some(&spent),
-                update,
-                ChainPosition {
-                    block_height: 2,
-                    tx_index: 0
-                },
-            ),
-            Transition::Rejected(TransitionRejectReason::BondSpent)
-        );
-        assert_eq!(root, state.state_root());
-
-        let spent_register = Operation::Reveal {
-            name: "alice".into(),
-            owner_pk,
-            bond_tag: bond.bond_tag,
-            bond_anchor_height: 0,
-            bond_anchor: bond.anchor,
-            bond_proof: bond.proof.clone(),
-            address: b"UA_NEW".to_vec(),
-            secret: [7; 32],
-        };
-        authorize_reveal(&mut state, &spent_register, 2);
-        assert_eq!(
-            apply_operation_with_spent(
-                &mut state,
-                Some(&spent),
-                spent_register,
-                ChainPosition {
-                    block_height: 2,
-                    tx_index: 0
-                },
-            ),
-            Transition::Rejected(TransitionRejectReason::BondSpent)
-        );
-
-        state.names.get_mut("alice").unwrap().status = Status::Released;
-        let register = Operation::Reveal {
-            name: "alice".into(),
-            owner_pk,
-            bond_tag: bond.bond_tag,
-            bond_anchor_height: 0,
-            bond_anchor: bond.anchor,
-            bond_proof: bond.proof.clone(),
-            address: b"UA_NEW".to_vec(),
-            secret: [8; 32],
-        };
-        authorize_reveal(&mut state, &register, 3);
-        assert_eq!(
-            apply_operation_with_spent(
-                &mut state,
-                None,
-                register,
-                ChainPosition {
-                    block_height: 3,
-                    tx_index: 0
-                },
-            ),
-            Transition::Applied
-        );
-        assert_eq!(state.names["alice"].sequence, 0);
-        assert_eq!(state.names["alice"].address, b"UA_NEW");
-    }
-
-    #[test]
-    fn one_unspent_bond_cannot_back_two_active_names() {
-        let key = OwnerSigningKey::try_from([1; 32]).unwrap();
-        let owner_pk = owner_key_bytes(&(&key).into());
-        let alice_bond = crate::bond::test_registration_bond("alice", b"UA_A");
-        let bob_bond = crate::bond::test_registration_bond("bob", b"UA_C");
-        assert_ne!(alice_bond.bond_tag, bob_bond.bond_tag);
-        let mut state = CoppiceState::default();
-        state.names.insert(
-            "alice".into(),
-            NameRecord {
-                owner_pk,
-                bond_tag: bob_bond.bond_tag,
-                sequence: 0,
-                address: b"UA_A".to_vec(),
-                status: Status::Active,
-            },
-        );
-        let root = state.state_root();
-        let register_bob = Operation::Reveal {
-            name: "bob".into(),
-            owner_pk,
-            bond_tag: bob_bond.bond_tag,
-            bond_anchor_height: 0,
-            bond_anchor: bob_bond.anchor,
-            bond_proof: bob_bond.proof.clone(),
-            address: b"UA_C".to_vec(),
-            secret: [7; 32],
-        };
-        authorize_reveal(&mut state, &register_bob, 2);
-        assert_eq!(
-            apply_operation_with_spent(
-                &mut state,
-                None,
-                register_bob,
-                ChainPosition {
-                    block_height: 2,
-                    tx_index: 0
-                },
-            ),
-            Transition::Rejected(TransitionRejectReason::BondAlreadyInUse)
-        );
-        assert_eq!(root, state.state_root());
-    }
-
-    #[test]
-    fn commit_reveal_requires_a_prior_block_and_is_atomic() {
-        let key = OwnerSigningKey::try_from([1; 32]).unwrap();
-        let owner_pk = owner_key_bytes(&(&key).into());
-        let bond = crate::bond::test_registration_bond("alice", b"UA_A");
-        let secret = [42; 32];
-        let commitment = registration_commitment(
-            "alice",
-            owner_pk,
-            bond.bond_tag,
-            bond.anchor,
-            b"UA_A",
-            secret,
-        );
-        let reveal = Operation::Reveal {
-            name: "alice".into(),
-            owner_pk,
-            bond_tag: bond.bond_tag,
-            bond_anchor_height: 0,
-            bond_anchor: bond.anchor,
-            bond_proof: bond.proof.clone(),
-            address: b"UA_A".to_vec(),
-            secret,
-        };
-        let mut state = CoppiceState::default();
-        assert_eq!(
-            apply_operation(
-                &mut state,
-                Operation::Commit { commitment },
-                ChainPosition {
-                    block_height: 10,
-                    tx_index: 0
-                },
-            ),
-            Transition::Applied
-        );
-        let encoded = serde_json::to_vec(&state).unwrap();
-        let decoded: CoppiceState = serde_json::from_slice(&encoded).unwrap();
-        assert_eq!(decoded, state);
+    fn update_rejects_sequence_overflow() {
+        let mut state = state_with_record(NAME, active([1; 32], u64::MAX));
         let before = state.clone();
         assert_eq!(
-            apply_operation(
-                &mut state,
-                reveal.clone(),
-                ChainPosition {
-                    block_height: 10,
-                    tx_index: 1
-                },
-            ),
-            Transition::Rejected(TransitionRejectReason::CommitmentNotMature)
+            state.apply_prevalidated_update(NAME, 0, NEW_ADDRESS.to_vec()),
+            Err(StateMutationError::InvalidSequence)
         );
         assert_eq!(state, before);
-        let mut wrong = reveal.clone();
-        if let Operation::Reveal { secret, .. } = &mut wrong {
-            secret[0] ^= 1;
-        }
+    }
+
+    #[test]
+    fn transition_vector_release_terminal_is_atomic() {
+        let tag = [0x42; 32];
+        let mut state = state_with_record(NAME, active(tag, 1));
+        let original = state.names[NAME].clone();
+        state.apply_prevalidated_release(NAME, 2, 205).unwrap();
+        assert_eq!(state.names[NAME].sequence, 2);
         assert_eq!(
-            apply_operation(
-                &mut state,
-                wrong,
-                ChainPosition {
-                    block_height: 11,
-                    tx_index: 0
-                },
-            ),
-            Transition::Rejected(TransitionRejectReason::UnknownCommitment)
+            state.names[NAME].status,
+            record::NameStatus::Released {
+                terminal_height: 205
+            }
+        );
+        assert_eq!(state.names[NAME].owner_pk, original.owner_pk);
+        assert_eq!(state.names[NAME].bond_tag, original.bond_tag);
+        assert_eq!(state.names[NAME].address, original.address);
+        assert!(!state.active_bond_index().contains_key(&tag));
+
+        let mut rejected = state_with_record(NAME, active(tag, 1));
+        let before = rejected.clone();
+        assert_eq!(
+            rejected.apply_prevalidated_release(NAME, 3, 205),
+            Err(StateMutationError::InvalidSequence)
+        );
+        assert_eq!(rejected, before);
+    }
+
+    #[test]
+    fn transition_vector_bond_spend_terminal_and_first_seen() {
+        let tag = [0x42; 32];
+        let mut state = state_with_record(NAME, active(tag, 0));
+        let original = state.names[NAME].clone();
+        state.process_prevalidated_bond_tag(tag, 190).unwrap();
+        assert_eq!(state.recent_spent.get(&tag), Some(&190));
+        assert_eq!(
+            state.names[NAME].status,
+            record::NameStatus::BondSpent {
+                terminal_height: 190
+            }
+        );
+        assert_eq!(state.names[NAME].owner_pk, original.owner_pk);
+        assert_eq!(state.names[NAME].bond_tag, original.bond_tag);
+        assert_eq!(state.names[NAME].sequence, original.sequence);
+        assert_eq!(state.names[NAME].address, original.address);
+        assert!(!state.active_bond_index().contains_key(&tag));
+        state.process_prevalidated_bond_tag(tag, 191).unwrap();
+        assert_eq!(state.recent_spent.get(&tag), Some(&190));
+
+        let unknown = [9; 32];
+        state.process_prevalidated_bond_tag(unknown, 192).unwrap();
+        assert_eq!(state.recent_spent.get(&unknown), Some(&192));
+    }
+
+    #[test]
+    fn bond_tag_processing_rejects_inconsistent_index_atomically() {
+        let tag = [0x42; 32];
+        let mut state = state_with_record(NAME, active(tag, 0));
+        state.names.get_mut(NAME).unwrap().bond_tag = [8; 32];
+        let before = state.clone();
+        assert_eq!(
+            state.process_prevalidated_bond_tag(tag, 190),
+            Err(StateMutationError::InvariantInconsistency)
         );
         assert_eq!(state, before);
-        assert_eq!(
-            apply_operation(
-                &mut state,
-                reveal,
-                ChainPosition {
-                    block_height: 11,
-                    tx_index: 1
-                },
-            ),
-            Transition::Applied
+    }
+
+    #[test]
+    fn pending_deadline_block_expires_only_at_explicit_end_of_block() {
+        let commitment = [3; 32];
+        let mut state = CoppiceState::default();
+        state.pending.insert(
+            commitment,
+            pending::ChainPosition {
+                block_height: 100,
+                tx_index: 0,
+            },
         );
-        assert!(state.commitments.is_empty());
-        assert_eq!(state.names["alice"].address, b"UA_A");
+        assert!(state.pending.contains_key(&commitment));
+        assert_eq!(state.expire_pending_at_end_of_block(119, 20), Ok(0));
+        assert!(state.pending.contains_key(&commitment));
+        assert_eq!(state.expire_pending_at_end_of_block(120, 20), Ok(1));
+        assert!(!state.pending.contains_key(&commitment));
+    }
+
+    #[test]
+    fn recent_spent_pruning_keeps_the_boundary() {
+        let mut state = CoppiceState::default();
+        state.recent_spent.insert([1; 32], 130);
+        state.recent_spent.insert([2; 32], 131);
+        state.recent_spent.insert([3; 32], 132);
+        let (oldest, removed) = state
+            .prune_recent_spent_at_end_of_block(100, 150, 10, 10)
+            .unwrap();
+        assert_eq!(oldest, 131);
+        assert_eq!(removed, 1);
+        assert!(!state.recent_spent.contains_key(&[1; 32]));
+        assert_eq!(state.recent_spent.get(&[2; 32]), Some(&131));
+        assert_eq!(state.recent_spent.get(&[3; 32]), Some(&132));
+    }
+
+    #[test]
+    fn derived_root_accessors_use_canonical_v1_primitives() {
+        let mut state = state_with_record(NAME, active([0x42; 32], 0));
+        state.pending.insert(
+            [3; 32],
+            pending::ChainPosition {
+                block_height: 100,
+                tx_index: 7,
+            },
+        );
+        state.recent_spent.insert([4; 32], 110);
+        assert_eq!(state.name_tree_root(), name_tree_v1::root(&state.names));
+        assert_eq!(state.pending_root(), pending::root(&state.pending));
+        assert_eq!(
+            state.recent_spent_root(100),
+            recent_spent::root(100, &state.recent_spent)
+        );
     }
 }

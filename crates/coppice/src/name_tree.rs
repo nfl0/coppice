@@ -1,4 +1,4 @@
-use crate::{constants, owner, state::NameRecord};
+use crate::{constants, legacy_state::NameRecord, owner};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
@@ -107,7 +107,7 @@ pub fn verify(root: [u8; 32], name: &str, record: Option<&NameRecord>, p: &NameP
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{NameRecord, Status};
+    use crate::legacy_state::{NameRecord, Status};
     #[test]
     fn member_and_absent_proofs() {
         let mut m = BTreeMap::new();

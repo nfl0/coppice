@@ -8,6 +8,8 @@ pub mod crypto;
 pub mod envelope;
 pub mod incremental;
 pub mod ironwood;
+#[doc(hidden)]
+pub mod legacy_state;
 pub mod name_tree;
 pub mod name_tree_v1;
 pub mod owner;

@@ -1,5 +1,5 @@
 //! Canonical RedPallas owner authorization for the POC state machine.
-use crate::{constants, crypto, envelope::Operation, state::NameRecord};
+use crate::{constants, crypto, envelope::Operation, legacy_state::NameRecord};
 use orchard::primitives::redpallas::{Signature, SigningKey, SpendAuth, VerificationKey};
 use rand_core::OsRng;
 use sha2::{Digest, Sha256};
@@ -22,7 +22,7 @@ pub fn canonical_record_bytes(r: &NameRecord) -> Vec<u8> {
     b.extend_from_slice(&r.owner_pk);
     b.extend_from_slice(&r.bond_tag);
     b.extend_from_slice(&r.sequence.to_be_bytes());
-    b.push(if matches!(r.status, crate::state::Status::Active) {
+    b.push(if matches!(r.status, crate::legacy_state::Status::Active) {
         1
     } else {
         2

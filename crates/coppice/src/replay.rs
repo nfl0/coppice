@@ -1,10 +1,10 @@
 use crate::{
     envelope::Operation,
     ironwood::{self, IronwoodEffects},
-    spent::SpentTagTree,
-    state::{
+    legacy_state::{
         ChainPosition, CoppiceState, Transition, TransitionRejectReason, apply_operation_with_spent,
     },
+    spent::SpentTagTree,
 };
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;

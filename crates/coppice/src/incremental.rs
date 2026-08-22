@@ -1,11 +1,11 @@
 //! Minimal local wallet persistence for replay resumed after a process restart.
 use crate::{
+    legacy_state::{CoppiceState, Status},
     replay::{
         ChainContext, ReplayOutcome, ReplayState, SerializedReplayError,
         process_serialized_transaction,
     },
     spent::SpentTagTree,
-    state::{CoppiceState, Status},
 };
 use incrementalmerkletree::frontier::CommitmentTree;
 use orchard::tree::MerkleHashOrchard;
