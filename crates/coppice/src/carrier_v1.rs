@@ -1,7 +1,8 @@
 //! Canonical Coppice v1 carrier framing over raw Ironwood memo plaintexts.
 //!
 //! This module is deliberately separate from the V0 compatibility framing in
-//! [`crate::envelope`]. V1 has no nonce, frame index, or per-frame length.
+//! [`crate::envelope`]. V1 has an explicit frame index, but no nonce or
+//! per-frame length. Reconstruction is scoped to one transaction.
 
 use crate::{constants, crypto};
 
@@ -11,7 +12,9 @@ pub const START_FRAME_TYPE: u8 = 0x00;
 pub const CONT_FRAME_TYPE: u8 = 0x01;
 
 const PREFIX_LEN: usize = 1 + MAGIC.len();
-const START_DEPLOYMENT_OFFSET: usize = PREFIX_LEN + 1;
+const FRAME_TYPE_OFFSET: usize = PREFIX_LEN;
+const FRAME_INDEX_OFFSET: usize = FRAME_TYPE_OFFSET + 1;
+const START_DEPLOYMENT_OFFSET: usize = FRAME_INDEX_OFFSET + 1;
 const START_FRAME_COUNT_OFFSET: usize = START_DEPLOYMENT_OFFSET + 32;
 const START_PAYLOAD_LENGTH_OFFSET: usize = START_FRAME_COUNT_OFFSET + 1;
 const START_DIGEST_OFFSET: usize = START_PAYLOAD_LENGTH_OFFSET + 2;
@@ -24,8 +27,14 @@ pub enum Error {
     FrameCount,
     FrameCountMismatch,
     WrongMagic,
-    FirstFrameNotStart,
-    SecondStart,
+    NoStart,
+    MultipleStart,
+    InvalidStartIndex,
+    InvalidContIndex,
+    IndexOutOfRange,
+    DuplicateIndex,
+    MissingIndex,
+    UnexpectedIndex,
     UnknownFrameType,
     WrongDeployment,
     Padding,
@@ -65,7 +74,7 @@ pub fn encode_frames_v1(deployment_id: [u8; 32], payload: &[u8]) -> Result<Vec<[
 
     let start_chunk_len = payload.len().min(constants::START_CHUNK_CAP);
     let mut start = [0u8; 512];
-    write_prefix(&mut start, START_FRAME_TYPE);
+    write_prefix(&mut start, START_FRAME_TYPE, 0);
     start[START_DEPLOYMENT_OFFSET..START_DEPLOYMENT_OFFSET + deployment_id.len()]
         .copy_from_slice(&deployment_id);
     start[START_FRAME_COUNT_OFFSET] = frame_count as u8;
@@ -78,9 +87,10 @@ pub fn encode_frames_v1(deployment_id: [u8; 32], payload: &[u8]) -> Result<Vec<[
 
     let mut offset = start_chunk_len;
     while offset < payload.len() {
+        let frame_index = u8::try_from(frames.len()).map_err(|_| Error::FrameCount)?;
         let chunk_len = (payload.len() - offset).min(constants::CONT_CHUNK_CAP);
         let mut cont = [0u8; 512];
-        write_prefix(&mut cont, CONT_FRAME_TYPE);
+        write_prefix(&mut cont, CONT_FRAME_TYPE, frame_index);
         cont[constants::CONT_FRAME_HEADER..constants::CONT_FRAME_HEADER + chunk_len]
             .copy_from_slice(&payload[offset..offset + chunk_len]);
         frames.push(cont);
@@ -97,10 +107,13 @@ pub fn start_metadata(
     expected_deployment_id: [u8; 32],
 ) -> Result<(usize, usize), Error> {
     ensure_prefix(memo)?;
-    match memo[PREFIX_LEN] {
+    match memo[FRAME_TYPE_OFFSET] {
         START_FRAME_TYPE => {}
-        CONT_FRAME_TYPE => return Err(Error::FirstFrameNotStart),
+        CONT_FRAME_TYPE => return Err(Error::NoStart),
         _ => return Err(Error::UnknownFrameType),
+    }
+    if memo[FRAME_INDEX_OFFSET] != 0 {
+        return Err(Error::InvalidStartIndex);
     }
 
     if memo[START_DEPLOYMENT_OFFSET..START_DEPLOYMENT_OFFSET + 32] != expected_deployment_id {
@@ -124,7 +137,7 @@ pub fn start_metadata(
     Ok((frame_count, payload_length))
 }
 
-/// Reconstructs an action-ordered set of raw v1 memo plaintexts.
+/// Reconstructs an arbitrarily action-ordered set of raw v1 memo plaintexts.
 pub fn reconstruct_frames_v1(
     frames: &[[u8; 512]],
     expected_deployment_id: [u8; 32],
@@ -136,29 +149,61 @@ pub fn reconstruct_frames_v1(
         return Err(Error::FrameCount);
     }
 
-    let (frame_count, payload_length) = start_metadata(&frames[0], expected_deployment_id)?;
+    let mut indexed: [Option<&[u8; 512]>; 32] = [None; 32];
+    let mut start = None;
+    for frame in frames {
+        ensure_prefix(frame)?;
+        let kind = frame[FRAME_TYPE_OFFSET];
+        let index = frame[FRAME_INDEX_OFFSET];
+        if index >= constants::MAX_FRAMES {
+            return Err(Error::IndexOutOfRange);
+        }
+        match kind {
+            START_FRAME_TYPE => {
+                if index != 0 {
+                    return Err(Error::InvalidStartIndex);
+                }
+                if start.replace(frame).is_some() {
+                    return Err(Error::MultipleStart);
+                }
+            }
+            CONT_FRAME_TYPE => {
+                if index == 0 {
+                    return Err(Error::InvalidContIndex);
+                }
+            }
+            _ => return Err(Error::UnknownFrameType),
+        }
+        let slot = &mut indexed[usize::from(index)];
+        if slot.replace(frame).is_some() {
+            return Err(Error::DuplicateIndex);
+        }
+    }
+
+    let start = start.ok_or(Error::NoStart)?;
+    let (frame_count, payload_length) = start_metadata(start, expected_deployment_id)?;
+    if indexed[frame_count..].iter().any(Option::is_some) {
+        return Err(Error::UnexpectedIndex);
+    }
+    if indexed[..frame_count].iter().any(Option::is_none) {
+        return Err(Error::MissingIndex);
+    }
     if frames.len() != frame_count {
         return Err(Error::FrameCountMismatch);
     }
 
-    let digest: [u8; 32] = frames[0][START_DIGEST_OFFSET..START_DIGEST_OFFSET + 32]
+    let digest: [u8; 32] = start[START_DIGEST_OFFSET..START_DIGEST_OFFSET + 32]
         .try_into()
         .map_err(|_| Error::WrongMagic)?;
     let start_chunk_len = payload_length.min(constants::START_CHUNK_CAP);
     let mut payload = Vec::with_capacity(payload_length);
     payload.extend_from_slice(
-        &frames[0][constants::START_FRAME_HEADER..constants::START_FRAME_HEADER + start_chunk_len],
+        &start[constants::START_FRAME_HEADER..constants::START_FRAME_HEADER + start_chunk_len],
     );
 
     let mut offset = start_chunk_len;
-    for frame in frames.iter().skip(1) {
-        ensure_prefix(frame)?;
-        match frame[PREFIX_LEN] {
-            CONT_FRAME_TYPE => {}
-            START_FRAME_TYPE => return Err(Error::SecondStart),
-            _ => return Err(Error::UnknownFrameType),
-        }
-
+    for frame in indexed.iter().take(frame_count).skip(1) {
+        let frame = frame.expect("complete index set checked above");
         let remaining = payload_length
             .checked_sub(offset)
             .ok_or(Error::FrameCountMismatch)?;
@@ -193,10 +238,11 @@ pub fn is_v1_frame(memo: &[u8; 512]) -> bool {
         ]
 }
 
-fn write_prefix(memo: &mut [u8; 512], frame_type: u8) {
+fn write_prefix(memo: &mut [u8; 512], frame_type: u8, frame_index: u8) {
     memo[0] = ZIP302_ARBITRARY_DATA;
     memo[1..PREFIX_LEN].copy_from_slice(MAGIC);
-    memo[PREFIX_LEN] = frame_type;
+    memo[FRAME_TYPE_OFFSET] = frame_type;
+    memo[FRAME_INDEX_OFFSET] = frame_index;
 }
 
 fn ensure_prefix(memo: &[u8; 512]) -> Result<(), Error> {
@@ -270,8 +316,34 @@ mod tests {
         assert_eq!(vectors.len(), 6);
         assert_eq!(fixture["start_chunk_cap"], constants::START_CHUNK_CAP);
         assert_eq!(fixture["cont_chunk_cap"], constants::CONT_CHUNK_CAP);
+        assert_eq!(fixture["start_header"], constants::START_FRAME_HEADER);
+        assert_eq!(fixture["cont_header"], constants::CONT_FRAME_HEADER);
+        assert_eq!(fixture["frame_index_offset"], FRAME_INDEX_OFFSET);
         assert_eq!(fixture["max_frames"], constants::MAX_FRAMES);
         assert_eq!(fixture["max_payload_len"], constants::MAX_PAYLOAD_LEN);
+
+        let permutation = &fixture["permutation_cases"][0];
+        assert_eq!(permutation["frame_order"], serde_json::json!([2, 0, 1]));
+        let permutation_payload = patterned_payload(944);
+        let permutation_frames = encode_frames_v1(DEPLOYMENT_ID, &permutation_payload).unwrap();
+        let shuffled = permutation["frame_order"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|index| permutation_frames[index.as_u64().unwrap() as usize])
+            .collect::<Vec<_>>();
+        assert_eq!(
+            reconstruct_frames_v1(&shuffled, DEPLOYMENT_ID).unwrap(),
+            permutation_payload
+        );
+        assert_eq!(
+            fixture["negative_cases"],
+            serde_json::json!([
+                {"id":"duplicate-index","expected_error":"DuplicateIndex"},
+                {"id":"missing-index","expected_error":"MissingIndex"},
+                {"id":"out-of-range-index","expected_error":"IndexOutOfRange"}
+            ])
+        );
 
         for vector in vectors {
             let payload_length = vector["payload_length"].as_u64().unwrap() as usize;
@@ -293,6 +365,12 @@ mod tests {
 
             let encoded = encode_frames_v1(DEPLOYMENT_ID, &payload).unwrap();
             assert_eq!(encoded, expected, "{} frames", vector["id"]);
+            assert!(
+                encoded
+                    .iter()
+                    .enumerate()
+                    .all(|(index, frame)| usize::from(frame[FRAME_INDEX_OFFSET]) == index)
+            );
             assert_eq!(
                 reconstruct_frames_v1(&expected, DEPLOYMENT_ID).unwrap(),
                 payload,
@@ -307,9 +385,13 @@ mod tests {
         assert_eq!(required_frames(1).unwrap(), 1);
         assert_eq!(required_frames(constants::START_CHUNK_CAP).unwrap(), 1);
         assert_eq!(required_frames(constants::START_CHUNK_CAP + 1).unwrap(), 2);
-        assert_eq!(required_frames(945).unwrap(), 2);
-        assert_eq!(required_frames(946).unwrap(), 3);
+        assert_eq!(required_frames(943).unwrap(), 2);
+        assert_eq!(required_frames(944).unwrap(), 3);
         assert_eq!(required_frames(constants::MAX_PAYLOAD_LEN).unwrap(), 32);
+        assert_eq!(
+            required_frames(constants::MAX_PAYLOAD_LEN + 1),
+            Err(Error::PayloadTooLarge)
+        );
     }
 
     fn assert_rejected(label: &str, frames: &[[u8; 512]]) {
@@ -339,30 +421,32 @@ mod tests {
         frame_count_large[0][START_FRAME_COUNT_OFFSET] = constants::MAX_FRAMES + 1;
         assert_rejected("frame count over 32", &frame_count_large);
 
-        let mut wrong_count = encode_frames_v1(DEPLOYMENT_ID, &vec![0; 440]).unwrap();
+        let mut wrong_count = encode_frames_v1(DEPLOYMENT_ID, &vec![0; 439]).unwrap();
         wrong_count[0][START_FRAME_COUNT_OFFSET] = 1;
         assert_rejected("wrong required frame count", &wrong_count);
 
-        let mut cont_before_start = wrong_count.clone();
-        cont_before_start[0][START_FRAME_COUNT_OFFSET] = 2;
-        cont_before_start.swap(0, 1);
-        assert_rejected("CONT before START", &cont_before_start);
+        let mut reversed = encode_frames_v1(DEPLOYMENT_ID, &vec![0; 439]).unwrap();
+        reversed.reverse();
+        assert_eq!(
+            reconstruct_frames_v1(&reversed, DEPLOYMENT_ID).unwrap(),
+            vec![0; 439]
+        );
 
-        let mut duplicate_start = encode_frames_v1(DEPLOYMENT_ID, &vec![0; 440]).unwrap();
+        let mut duplicate_start = encode_frames_v1(DEPLOYMENT_ID, &vec![0; 439]).unwrap();
         duplicate_start[1] = duplicate_start[0];
         assert_rejected("duplicate START", &duplicate_start);
 
-        let mut unknown_type = encode_frames_v1(DEPLOYMENT_ID, &vec![0; 440]).unwrap();
-        unknown_type[1][PREFIX_LEN] = 0x02;
+        let mut unknown_type = encode_frames_v1(DEPLOYMENT_ID, &vec![0; 439]).unwrap();
+        unknown_type[1][FRAME_TYPE_OFFSET] = 0x02;
         assert_rejected("unknown frame type", &unknown_type);
 
         let mut wrong_deployment = one.clone();
         wrong_deployment[0][START_DEPLOYMENT_OFFSET] ^= 1;
         assert_rejected("wrong deployment ID", &wrong_deployment);
 
-        let mut payload_length_mismatch = encode_frames_v1(DEPLOYMENT_ID, &vec![0; 440]).unwrap();
+        let mut payload_length_mismatch = encode_frames_v1(DEPLOYMENT_ID, &vec![0; 439]).unwrap();
         payload_length_mismatch[0][START_PAYLOAD_LENGTH_OFFSET..START_PAYLOAD_LENGTH_OFFSET + 2]
-            .copy_from_slice(&439u16.to_be_bytes());
+            .copy_from_slice(&438u16.to_be_bytes());
         assert_rejected("payload length mismatch", &payload_length_mismatch);
 
         let mut digest_mutation = one.clone();
@@ -373,28 +457,115 @@ mod tests {
         start_padding[0][constants::START_FRAME_HEADER + 3] = 1;
         assert_rejected("START padding nonzero", &start_padding);
 
-        let mut cont_padding = encode_frames_v1(DEPLOYMENT_ID, &vec![0; 440]).unwrap();
+        let mut cont_padding = encode_frames_v1(DEPLOYMENT_ID, &vec![0; 439]).unwrap();
         cont_padding[1][constants::CONT_FRAME_HEADER + 1] = 1;
         assert_rejected("CONT padding nonzero", &cont_padding);
 
-        let valid_multi = encode_frames_v1(DEPLOYMENT_ID, &vec![0; 946]).unwrap();
-        let missing_cont = valid_multi[..2].to_vec();
-        assert_rejected("missing CONT", &missing_cont);
-        let mut extra_cont = encode_frames_v1(DEPLOYMENT_ID, &vec![0; 440]).unwrap();
-        extra_cont.push(extra_cont[1]);
-        assert_rejected("extra CONT", &extra_cont);
-
-        let mut reordered = valid_multi.clone();
-        reordered.swap(0, 1);
-        assert_rejected("reordered START and CONT", &reordered);
+        let valid_multi = encode_frames_v1(DEPLOYMENT_ID, &vec![0; 944]).unwrap();
+        let missing_final = valid_multi[..2].to_vec();
+        assert_eq!(
+            reconstruct_frames_v1(&missing_final, DEPLOYMENT_ID),
+            Err(Error::MissingIndex)
+        );
+        let missing_middle = vec![valid_multi[0], valid_multi[2]];
+        assert_eq!(
+            reconstruct_frames_v1(&missing_middle, DEPLOYMENT_ID),
+            Err(Error::MissingIndex)
+        );
+        let mut extra_cont = encode_frames_v1(DEPLOYMENT_ID, &vec![0; 439]).unwrap();
+        let mut extra = extra_cont[1];
+        extra[FRAME_INDEX_OFFSET] = 2;
+        extra_cont.push(extra);
+        assert_eq!(
+            reconstruct_frames_v1(&extra_cont, DEPLOYMENT_ID),
+            Err(Error::UnexpectedIndex)
+        );
 
         let truncated = valid_multi[..2].to_vec();
-        assert_rejected("truncated logical frame set", &truncated);
+        assert_eq!(
+            reconstruct_frames_v1(&truncated, DEPLOYMENT_ID),
+            Err(Error::MissingIndex)
+        );
 
         let mut conflicting = encode_frames_v1(DEPLOYMENT_ID, b"first").unwrap();
         let second = encode_frames_v1(DEPLOYMENT_ID, b"second").unwrap();
         conflicting.extend(second);
         assert_rejected("conflicting second operation", &conflicting);
+
+        let mut bad_start_index = one.clone();
+        bad_start_index[0][FRAME_INDEX_OFFSET] = 5;
+        assert_eq!(
+            reconstruct_frames_v1(&bad_start_index, DEPLOYMENT_ID),
+            Err(Error::InvalidStartIndex)
+        );
+        let mut old_no_index = one[0];
+        old_no_index.copy_within(FRAME_INDEX_OFFSET + 1.., FRAME_INDEX_OFFSET);
+        old_no_index[511] = 0;
+        assert_eq!(
+            reconstruct_frames_v1(&[old_no_index], DEPLOYMENT_ID),
+            Err(Error::InvalidStartIndex)
+        );
+        let mut cont_zero = encode_frames_v1(DEPLOYMENT_ID, &vec![0; 439]).unwrap();
+        cont_zero[1][FRAME_INDEX_OFFSET] = 0;
+        assert_eq!(
+            reconstruct_frames_v1(&cont_zero, DEPLOYMENT_ID),
+            Err(Error::InvalidContIndex)
+        );
+        let mut out_of_range = encode_frames_v1(DEPLOYMENT_ID, &vec![0; 439]).unwrap();
+        out_of_range[1][FRAME_INDEX_OFFSET] = 32;
+        assert_eq!(
+            reconstruct_frames_v1(&out_of_range, DEPLOYMENT_ID),
+            Err(Error::IndexOutOfRange)
+        );
+        let mut duplicate_index = valid_multi.clone();
+        duplicate_index[2][FRAME_INDEX_OFFSET] = 1;
+        assert_eq!(
+            reconstruct_frames_v1(&duplicate_index, DEPLOYMENT_ID),
+            Err(Error::DuplicateIndex)
+        );
+
+        let mut no_start = valid_multi[1..].to_vec();
+        no_start[0][FRAME_INDEX_OFFSET] = 1;
+        assert_eq!(
+            reconstruct_frames_v1(&no_start, DEPLOYMENT_ID),
+            Err(Error::NoStart)
+        );
+
+        let mut foreign_chunk = valid_multi.clone();
+        let other = encode_frames_v1(DEPLOYMENT_ID, &patterned_payload(944)).unwrap();
+        foreign_chunk[1] = other[1];
+        assert_eq!(
+            reconstruct_frames_v1(&foreign_chunk, DEPLOYMENT_ID),
+            Err(Error::DigestMismatch)
+        );
+    }
+
+    #[test]
+    fn arbitrary_frame_permutations_reconstruct_exact_payload() {
+        let payload = patterned_payload(5_555);
+        let frames = encode_frames_v1(DEPLOYMENT_ID, &payload).unwrap();
+        assert!(frames.len() > 3);
+
+        let mut reverse = frames.clone();
+        reverse.reverse();
+        assert_eq!(
+            reconstruct_frames_v1(&reverse, DEPLOYMENT_ID).unwrap(),
+            payload
+        );
+
+        let mut rotation = frames.clone();
+        rotation.rotate_left(3);
+        assert_eq!(
+            reconstruct_frames_v1(&rotation, DEPLOYMENT_ID).unwrap(),
+            payload
+        );
+
+        let mut shuffled = frames;
+        shuffled.sort_by_key(|frame| (frame[FRAME_INDEX_OFFSET].wrapping_mul(11)) % 17);
+        assert_eq!(
+            reconstruct_frames_v1(&shuffled, DEPLOYMENT_ID).unwrap(),
+            payload
+        );
     }
 
     #[test]
@@ -405,11 +576,70 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .find(|vector| vector["id"] == "payload-16125")
+            .find(|vector| vector["id"] == "payload-16093")
             .unwrap();
         let frames = expected_frames(vector);
         let payload = reconstruct_frames_v1(&frames, DEPLOYMENT_ID).unwrap();
         assert_eq!(payload.len(), constants::MAX_PAYLOAD_LEN);
         assert_eq!(payload, patterned_payload(constants::MAX_PAYLOAD_LEN));
+    }
+
+    #[test]
+    #[ignore = "explicit deterministic normative carrier-vector regeneration"]
+    fn regenerate_carrier_vectors() {
+        let lengths = [1, 438, 439, 943, 944, constants::MAX_PAYLOAD_LEN];
+        let vectors = lengths
+            .into_iter()
+            .map(|payload_length| {
+                let payload = patterned_payload(payload_length);
+                let frames = encode_frames_v1(DEPLOYMENT_ID, &payload).unwrap();
+                serde_json::json!({
+                    "id": format!("payload-{payload_length}"),
+                    "requirement_ids": ["P-CARRIER-002", "P-CARRIER-003"],
+                    "payload_length": payload_length,
+                    "payload_hex": if payload_length == constants::MAX_PAYLOAD_LEN {
+                        serde_json::Value::Null
+                    } else {
+                        serde_json::Value::String(hex::encode(&payload))
+                    },
+                    "payload_digest_hex": hex::encode(payload_digest(&payload).unwrap()),
+                    "expected_frame_count": frames.len(),
+                    "frame_hex": frames.iter().map(hex::encode).collect::<Vec<_>>(),
+                })
+            })
+            .collect::<Vec<_>>();
+        let fixture = serde_json::json!({
+            "status": "FROZEN_COMPLETE",
+            "requirement_ids": ["P-CARRIER-002", "P-CARRIER-003"],
+            "deployment_id_hex": hex::encode(DEPLOYMENT_ID),
+            "frame_size": 512,
+            "frame_index_offset": FRAME_INDEX_OFFSET,
+            "start_header": constants::START_FRAME_HEADER,
+            "start_chunk_cap": constants::START_CHUNK_CAP,
+            "cont_header": constants::CONT_FRAME_HEADER,
+            "cont_chunk_cap": constants::CONT_CHUNK_CAP,
+            "max_frames": constants::MAX_FRAMES,
+            "max_payload_len": constants::MAX_PAYLOAD_LEN,
+            "permutation_cases": [{
+                "id": "payload-944-shuffled",
+                "payload_length": 944,
+                "frame_order": [2, 0, 1]
+            }],
+            "negative_cases": [
+                {"id": "duplicate-index", "expected_error": "DuplicateIndex"},
+                {"id": "missing-index", "expected_error": "MissingIndex"},
+                {"id": "out-of-range-index", "expected_error": "IndexOutOfRange"}
+            ],
+            "vectors": vectors,
+        });
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test-vectors/carrier.json"
+        );
+        std::fs::write(
+            path,
+            format!("{}\n", serde_json::to_string_pretty(&fixture).unwrap()),
+        )
+        .unwrap();
     }
 }

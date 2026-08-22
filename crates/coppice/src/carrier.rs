@@ -101,66 +101,22 @@ fn decode_v1_memos_for(
     memos: impl IntoIterator<Item = [u8; 512]>,
     deployment_id: [u8; 32],
 ) -> Result<Operation, V1CarrierError> {
-    let mut frames = Vec::new();
-    let mut saw_cont_before_start = false;
-    let mut declared_frame_count = None;
-    let mut complete = false;
-
-    for memo in memos {
-        if !carrier_v1::is_v1_frame(&memo) {
-            if declared_frame_count.is_some() && !complete {
-                return Err(V1CarrierError::Malformed);
-            }
-            continue;
-        }
-
-        if declared_frame_count.is_none() {
-            match memo[5] {
-                carrier_v1::CONT_FRAME_TYPE => {
-                    saw_cont_before_start = true;
-                }
-                carrier_v1::START_FRAME_TYPE => {
-                    let (frame_count, _) = match carrier_v1::start_metadata(&memo, deployment_id) {
-                        Ok(metadata) => metadata,
-                        Err(carrier_v1::Error::WrongDeployment) => {
-                            return Err(V1CarrierError::NotFound);
-                        }
-                        Err(_) => return Err(V1CarrierError::Malformed),
-                    };
-                    if saw_cont_before_start {
-                        return Err(V1CarrierError::Malformed);
-                    }
-                    frames.push(memo);
-                    declared_frame_count = Some(frame_count);
-                    complete = frame_count == 1;
-                }
-                _ => return Err(V1CarrierError::Malformed),
-            }
-            continue;
-        }
-
-        if complete {
-            return Err(V1CarrierError::Malformed);
-        }
-        if memo[5] != carrier_v1::CONT_FRAME_TYPE {
-            return Err(V1CarrierError::Malformed);
-        }
-        frames.push(memo);
-        let Some(frame_count) = declared_frame_count else {
-            return Err(V1CarrierError::Malformed);
-        };
-        complete = frames.len() == frame_count;
-    }
-
-    let Some(frame_count) = declared_frame_count else {
+    // Ironwood Action order is deliberately irrelevant. The transaction
+    // builder may randomize action positions; indexed reconstruction below is
+    // the sole carrier-order authority.
+    let frames = memos
+        .into_iter()
+        .filter(carrier_v1::is_v1_frame)
+        .collect::<Vec<_>>();
+    if frames.is_empty() {
         return Err(V1CarrierError::NotFound);
-    };
-    if !complete || frames.len() != frame_count {
-        return Err(V1CarrierError::Malformed);
     }
 
-    let payload = carrier_v1::reconstruct_frames_v1(&frames, deployment_id)
-        .map_err(|_| V1CarrierError::Malformed)?;
+    let payload = match carrier_v1::reconstruct_frames_v1(&frames, deployment_id) {
+        Ok(payload) => payload,
+        Err(carrier_v1::Error::WrongDeployment) => return Err(V1CarrierError::NotFound),
+        Err(_) => return Err(V1CarrierError::Malformed),
+    };
     envelope::decode_operation(&payload).map_err(|_| V1CarrierError::Malformed)
 }
 
@@ -171,7 +127,7 @@ mod tests {
     const DEPLOYMENT_ID: [u8; 32] = [0x11; 32];
 
     #[test]
-    fn v1_decrypted_memo_ordering_is_strict() {
+    fn v1_decrypted_memo_reconstruction_is_index_ordered() {
         let payload = envelope::encode_operation(&Operation::Commit {
             commitment: [0x22; 32],
         })
@@ -190,13 +146,25 @@ mod tests {
             Err(V1CarrierError::NotFound)
         );
 
-        let multi_payload = vec![0x44; 440];
+        let multi_payload = envelope::encode_operation(&Operation::Reveal {
+            name: "shuffled".to_owned(),
+            owner_pk: [1; 32],
+            bond_tag: [2; 32],
+            bond_anchor_height: 100,
+            bond_anchor: [3; 32],
+            bond_proof: vec![4; 4_960],
+            address: vec![5; crate::constants::MAX_ADDRESS_LEN],
+            secret: [6; 32],
+        })
+        .unwrap();
         let multi = carrier_v1::encode_frames_v1(DEPLOYMENT_ID, &multi_payload).unwrap();
-        let mut cont_first = multi.clone();
-        cont_first.swap(0, 1);
+        assert_eq!(multi.len(), 12);
+        let mut builder_shuffled = multi.clone();
+        builder_shuffled.rotate_left(5);
+        builder_shuffled.swap(1, 8);
         assert_eq!(
-            decode_v1_memos_for(cont_first, DEPLOYMENT_ID),
-            Err(V1CarrierError::Malformed)
+            decode_v1_memos_for(builder_shuffled, DEPLOYMENT_ID),
+            envelope::decode_operation(&multi_payload).map_err(|_| V1CarrierError::Malformed)
         );
         let mut extra = multi.clone();
         extra.push(multi[1]);

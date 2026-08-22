@@ -627,6 +627,11 @@ No production dependency from `coppice` core to SQLite is required.
 - default owner-key derivation for software spending accounts;
 - integration-level tests.
 
+The Orchard/Ironwood builder may randomize Action positions. Wallet carrier
+construction MUST NOT rely on output insertion order to preserve frame order.
+It may add rendezvous outputs in any builder order; canonical v1 reconstruction
+uses each memo's explicit `frame_index`.
+
 It SHOULD depend on librustzcash public traits rather than directly on `zcash_client_sqlite` where practical.
 
 Historical Ironwood witness retrieval is a required proving capability. Because

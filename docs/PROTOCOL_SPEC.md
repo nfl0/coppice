@@ -1666,12 +1666,28 @@ Immediately after the magic is a one-byte frame type:
 0x01 = CONT
 ```
 
-All frames of one Coppice operation MUST occur in the same Zcash transaction.
-Their order is the canonical ascending Ironwood Action index of rendezvous
-outputs that decrypt under the deployment's public rendezvous IVK.
+The exact v1 transport constants are:
 
-There is exactly one START frame. It is the first Coppice frame for that
-transaction and carries all operation-level metadata.
+```text
+frame size          = 512 bytes
+magic               = "CPV1"
+START type          = 0x00
+CONT type           = 0x01
+frame_index         = u8
+valid frame indices = 0..31
+START index         = 0
+MAX_FRAMES          = 32
+```
+
+Immediately after the frame type is a one-byte `frame_index`.
+
+All frames of one Coppice operation MUST occur in the same Zcash transaction.
+Rendezvous outputs MAY occur in any Ironwood Action order. Canonical carrier
+order is reconstructed exclusively by ascending `frame_index`; transaction
+builders MAY freely randomize Action positions.
+
+There is exactly one START frame. It has `frame_index = 0` and carries all
+operation-level metadata.
 
 ### START frame
 
@@ -1679,24 +1695,25 @@ transaction and carries all operation-level metadata.
 zip302_arbitrary_u8(0xFF) ||
 magic[4]("CPV1") ||
 frame_type_u8(0x00) ||
+frame_index_u8(0x00) ||
 deployment_id[32] ||
 frame_count_u8 ||
 payload_length_u16 ||
 payload_digest[32] ||
-start_chunk[0..439] ||
+start_chunk[0..438] ||
 zero_padding
 ```
 
 START header size:
 
 ```text
-1 + 4 + 1 + 32 + 1 + 2 + 32 = 73 bytes
+1 + 4 + 1 + 1 + 32 + 1 + 2 + 32 = 74 bytes
 ```
 
 START chunk capacity:
 
 ```text
-512 - 73 = 439 bytes
+512 - 74 = 438 bytes
 ```
 
 `payload_digest` is:
@@ -1711,45 +1728,45 @@ H("CoppicePayloadV1", payload)
 zip302_arbitrary_u8(0xFF) ||
 magic[4]("CPV1") ||
 frame_type_u8(0x01) ||
-continuation_chunk[0..506] ||
+frame_index_u8(1..31) ||
+continuation_chunk[0..505] ||
 zero_padding
 ```
 
 CONT header size:
 
 ```text
-1 + 4 + 1 = 6 bytes
+1 + 4 + 1 + 1 = 7 bytes
 ```
 
 CONT chunk capacity:
 
 ```text
-512 - 6 = 506 bytes
+512 - 7 = 505 bytes
 ```
 
-Continuation frames carry no frame index. Canonical Ironwood Action order is
-the frame order, so repeating an index would only add bytes and another
-malleable representation.
+CONT frames have indices `1..=31`. Index `0` is reserved for START. No frame
+index may be greater than or equal to `MAX_FRAMES`.
 
 Define:
 
 ```text
-START_CHUNK_CAP = 439
-CONT_CHUNK_CAP  = 506
+START_CHUNK_CAP = 438
+CONT_CHUNK_CAP  = 505
 MAX_FRAMES      = 32
 
 MAX_PAYLOAD_LEN =
     START_CHUNK_CAP +
     (MAX_FRAMES - 1) * CONT_CHUNK_CAP
-  = 16_125 bytes
+  = 16_093 bytes
 ```
 
 For a payload of length `L > 0`, the required frame count is:
 
 ```text
 required_frames(L) =
-    1                                      if L <= 439
-    1 + ceil((L - 439) / 506)              otherwise
+    1                                      if L <= 438
+    1 + ceil((L - 438) / 505)              otherwise
 ```
 
 `frame_count` MUST equal `required_frames(payload_length)`. Non-final chunks
@@ -1762,7 +1779,11 @@ The decoder MUST operate on the raw 512-byte memo array. It MUST NOT use an API
 that strips trailing zero bytes before frame parsing because binary payload data
 may legitimately end in `0x00`.
 
-No transport nonce exists.
+No transport nonce exists. Reconstruction is scoped to rendezvous frames from
+one Zcash transaction; frames from different transactions are never merged.
+The START payload length and payload digest authenticate the indexed
+reconstruction within that transaction, so no cross-transaction nonce is
+needed.
 
 No txid grinding exists.
 
@@ -1790,27 +1811,29 @@ rather than silently changing this frame format.
 ## P-CARRIER-003 — Frame validation
 
 For a transaction whose compact Ironwood data indicates one or more outputs
-decryptable under the deployment rendezvous IVK, the full transaction is parsed
-in canonical Ironwood Action order.
+decryptable under the deployment rendezvous IVK, all matching full-transaction
+frames are parsed independently and reordered by `frame_index`.
 
 A valid Coppice carrier for this deployment requires:
 
-- the first Coppice frame to be a START frame;
 - exactly one START frame;
+- START to have `frame_index = 0`;
+- every CONT to have `1 <= frame_index < 32`;
 - `deployment_id` in START to equal this deployment;
 - `1 <= frame_count <= 32`;
 - `0 < payload_length <= MAX_PAYLOAD_LEN`;
 - `frame_count == required_frames(payload_length)`;
-- exactly `frame_count - 1` CONT frames after START;
+- exactly one frame for every index in `0..frame_count`;
+- no duplicate, missing, or out-of-range frame index;
+- no supplied index greater than or equal to `frame_count`;
 - every Coppice frame to begin with `0xFF || "CPV1"`;
 - no second START frame;
-- no unexpected rendezvous-decryptable output interleaved into the carrier;
 - every non-final chunk to use its complete canonical capacity;
 - every byte after the final canonical chunk in each memo to be zero;
 - concatenated payload length to equal `payload_length`;
 - `H("CoppicePayloadV1", payload)` to equal `payload_digest`.
 
-If the first recognized START frame has a different `deployment_id`, the
+If the recognized START frame has a different `deployment_id`, the
 transaction is not a carrier for this deployment and is ignored by this
 deployment's operation decoder.
 
@@ -2071,11 +2094,11 @@ Protocol constants:
 MAX_NAME_LEN          = 63
 MAX_ADDRESS_LEN       = 512
 MAX_FRAMES            = 32
-START_FRAME_HEADER    = 73
-START_CHUNK_CAP       = 439
-CONT_FRAME_HEADER     = 6
-CONT_CHUNK_CAP        = 506
-MAX_PAYLOAD_LEN       = 16_125
+START_FRAME_HEADER    = 74
+START_CHUNK_CAP       = 438
+CONT_FRAME_HEADER     = 7
+CONT_CHUNK_CAP        = 505
+MAX_PAYLOAD_LEN       = 16_093
 MAX_BOND_PROOF_LEN    = 8_192
 MAX_TRANSACTION_LEN   = 2_000_000
 ```

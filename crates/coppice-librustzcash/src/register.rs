@@ -33,7 +33,7 @@ use crate::{
     resolve_canonical_ironwood_witness, select_fresh_bond_note,
 };
 
-/// Exact canonical operation bytes and action-ordered v1 memo frames.
+/// Exact canonical operation bytes and index-ordered v1 memo frames.
 ///
 /// This intentionally has no `Debug`: REVEAL bytes contain the registration
 /// secret before publication.
@@ -884,6 +884,33 @@ mod tests {
             )
             .unwrap(),
             prepared.carrier().payload()
+        );
+    }
+
+    #[test]
+    fn prepared_reveal_carrier_survives_builder_action_shuffle() {
+        let reducer = reducer();
+        let operation = Operation::Reveal {
+            name: "builder-shuffle".to_owned(),
+            owner_pk: owner(),
+            bond_tag: [2; 32],
+            bond_anchor_height: reducer.tip().height,
+            bond_anchor: [3; 32],
+            bond_proof: vec![4; 4_960],
+            address: vec![5; coppice::constants::MAX_ADDRESS_LEN],
+            secret: [6; 32],
+        };
+        let prepared = prepare_carrier(&reducer, &operation).unwrap();
+        assert_eq!(prepared.frames().len(), 12);
+
+        // Orchard/Ironwood builders randomize Action positions. Output
+        // insertion order therefore cannot be the carrier ordering rule.
+        let mut action_order = prepared.frames().to_vec();
+        action_order.rotate_left(7);
+        action_order.swap(1, 9);
+        assert_eq!(
+            carrier_v1::reconstruct_frames_v1(&action_order, reducer.deployment_id()).unwrap(),
+            prepared.payload()
         );
     }
 

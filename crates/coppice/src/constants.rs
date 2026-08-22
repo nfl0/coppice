@@ -38,11 +38,11 @@ pub const MAX_NAME_LEN: usize = 63;
 pub const MAX_FRAMES: u8 = 32;
 pub const MAX_ADDRESS_LEN: usize = 512;
 pub const MAX_BOND_PROOF_LEN: usize = 8_192;
-pub const START_FRAME_HEADER: usize = 73;
-pub const START_CHUNK_CAP: usize = 439;
-pub const CONT_FRAME_HEADER: usize = 6;
-pub const CONT_CHUNK_CAP: usize = 506;
-pub const MAX_PAYLOAD_LEN: usize = 16_125;
+pub const START_FRAME_HEADER: usize = 74;
+pub const START_CHUNK_CAP: usize = 438;
+pub const CONT_FRAME_HEADER: usize = 7;
+pub const CONT_CHUNK_CAP: usize = 505;
+pub const MAX_PAYLOAD_LEN: usize = 16_093;
 /// Zcash transactions are bounded by the consensus block-size limit. Applying
 /// the same limit before parsing prevents caller-controlled allocation spikes.
 pub const MAX_TRANSACTION_LEN: usize = 2_000_000;

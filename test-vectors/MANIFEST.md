@@ -25,6 +25,10 @@ reorg.json
 coppice_bond_v1.json
 ```
 
+`carrier.json` freezes the indexed CPV1 transport: one-byte frame indices,
+438/505-byte chunk capacities, permutation-independent reconstruction, and the
+16,093-byte maximum payload.
+
 Every vector entry SHOULD contain:
 
 ```json
