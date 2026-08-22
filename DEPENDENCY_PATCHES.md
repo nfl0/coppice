@@ -1,14 +1,14 @@
 # Coppice dependency patches
 
-Coppice currently uses two narrowly scoped, non-consensus library changes. They are application
-integration dependencies, not changes to the Zcash protocol or transaction validity rules.
+Coppice currently uses one narrowly scoped, non-consensus Orchard library change. It is an
+application integration dependency, not a change to the Zcash protocol or transaction validity
+rules.
 
 ## Summary
 
 | Library | Coppice dependency | Location | Consensus behavior changed? |
 | --- | --- | --- | --- |
 | Orchard 0.15.3 | Reusable constrained primitives and the POC BondCircuit | `vendor/orchard` | No |
-| librustzcash | Pre-I/O-finalization PCZT extension point | [`nfl0/librustzcash@2c2fca32bc`](https://github.com/nfl0/librustzcash/commit/2c2fca32bc7a143f32817b7be374bb820331584e) | No |
 
 ## Orchard 0.15.3
 
@@ -35,56 +35,24 @@ Longer term, the preferable split is for Orchard to expose generic reusable Acti
 gadgets while the Coppice-specific BondCircuit remains entirely in the `coppice` crate. Until such
 an API exists, wallets that build the current Coppice crate use this pinned Orchard copy.
 
-## librustzcash PCZT lifecycle hook
+## librustzcash
 
-The wallet-layer function `zcash_client_backend::data_api::wallet::create_pczt_from_proposal`
-normally constructs a PCZT and immediately runs `IoFinalizer`. For Ironwood padding actions,
-`IoFinalizer` creates spend authorization signatures and consumes their temporary dummy signing
-keys. Coppice must select its memo-dependent txid before any authorization is generated; changing
-the memo afterward changes the shielded sighash and invalidates those signatures.
-
-The fork is based exactly on upstream librustzcash revision
-[`6c07e5f329`](https://github.com/zcash/librustzcash/commit/6c07e5f3297febf469e5cc8d0b91321e0767cdd7).
-Commit [`2c2fca32bc`](https://github.com/nfl0/librustzcash/commit/2c2fca32bc7a143f32817b7be374bb820331584e)
-changes only `zcash_client_backend/src/data_api/wallet.rs`:
-
-- adds `create_pczt_from_proposal_with_io_finalizer`, which accepts a wallet-layer callback after
-  effecting-data construction and before I/O finalization;
-- keeps `create_pczt_from_proposal` as the existing convenience API, delegating through the new
-  function with the original `IoFinalizer::finalize_io` behavior.
-
-`coppice-cli` uses the hook for this lifecycle:
-
-```text
-construct effecting data
--> grind encrypted Coppice memos and txid
--> finalize I/O once
--> prove once
--> sign once
--> extract and broadcast
-```
-
-This is an additive wallet API. It does not modify transaction serialization, sighash definitions,
-proof systems, consensus validation, or the behavior of existing callers. Because Cargo treats Git
-sources as distinct dependency sources, `coppice-cli` pins the related librustzcash workspace
-crates to the same fork revision even though only `zcash_client_backend` contains a code change.
-
-The rendez-vous receiver design does not remove this hook: recipient selection and public memo
-decryption are independent of selecting memo-dependent effecting data before authorization. The
-standalone `coppice` protocol crate does not itself patch librustzcash with this commit; the
-patch is needed by wallet transaction construction in `coppice-cli` and by another wallet that
-wants to create ground Coppice carriers through the same high-level proposal API.
+Coppice no longer requires a librustzcash fork. Every carrier is an ordinary payment to the fixed
+public rendez-vous receiver with its memo set during normal transaction construction. Replayers
+trial-decrypt compact Ironwood actions with the public rendez-vous UIVK and fetch full transactions
+only when that succeeds. The superseded txid-prefix grinder and its pre-I/O-finalization wallet hook
+are not part of the protocol.
 
 ## Integration consequence
 
-The current Vizor/POC integration must pin both dependencies. This is library composability and
-maintenance friction, but it is not a consensus fork:
+Wallet integrations currently need only the Orchard gadget patch for BondProof construction and
+verification:
 
 ```text
 modified Zcash consensus rules: no
 modified transaction formats:   no
 modified Orchard proof validity: no
-wallet/library API patches:      yes, two
+wallet/library API patches:      yes, one
 ```
 
-These pins should remain exact and documented until equivalent public upstream APIs exist.
+This pin should remain exact and documented until equivalent public Orchard APIs exist.

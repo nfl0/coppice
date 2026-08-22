@@ -12,7 +12,7 @@ use orchard::tree::MerkleHashOrchard;
 use serde::{Deserialize, Serialize};
 use zcash_primitives::transaction::TxId;
 
-const LOCAL_STATE_VERSION: u8 = 5;
+const LOCAL_STATE_VERSION: u8 = 6;
 pub type IronwoodTree = CommitmentTree<MerkleHashOrchard, 32>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -69,7 +69,6 @@ struct LocalWalletState {
     activation_height: u32,
     last_height: Option<u32>,
     fixture_context: [u8; 32],
-    tag_bits: u8,
     names: CoppiceState,
     spent: SpentTagTree,
     #[serde(default)]
@@ -98,21 +97,11 @@ impl IncrementalWallet {
     /// deployment from the authenticated pre-activation Ironwood frontier.
     pub fn testnet_v0(fixture_context: [u8; 32], ironwood_tree: IronwoodTree) -> Self {
         let config = crate::config::TESTNET_V0;
-        Self::new_with_ironwood_tree(
-            config.activation_height,
-            fixture_context,
-            config.tag_bits,
-            ironwood_tree,
-        )
+        Self::new_with_ironwood_tree(config.activation_height, fixture_context, ironwood_tree)
     }
 
-    pub fn new(activation_height: u32, fixture_context: [u8; 32], tag_bits: u8) -> Self {
-        Self::new_with_ironwood_tree(
-            activation_height,
-            fixture_context,
-            tag_bits,
-            IronwoodTree::empty(),
-        )
+    pub fn new(activation_height: u32, fixture_context: [u8; 32]) -> Self {
+        Self::new_with_ironwood_tree(activation_height, fixture_context, IronwoodTree::empty())
     }
 
     /// Selects the fixed public bulletin rendez-vous for this deployment.
@@ -125,10 +114,9 @@ impl IncrementalWallet {
     pub fn new_with_ironwood_tree(
         activation_height: u32,
         fixture_context: [u8; 32],
-        tag_bits: u8,
         ironwood_tree: IronwoodTree,
     ) -> Self {
-        let mut state = ReplayState::new(tag_bits);
+        let mut state = ReplayState::new();
         state.accept_bond_anchor(ironwood_tree.root().to_bytes());
         Self {
             state,
@@ -183,13 +171,22 @@ impl IncrementalWallet {
             )
             .map_err(|_| IncrementalError::InvalidTransaction)?
             .txid();
+            let candidate_transaction = crate::carrier::transaction_has_bulletin_output(
+                &zcash_primitives::transaction::Transaction::read(
+                    tx.as_slice(),
+                    zcash_protocol::consensus::BranchId::Nu6_3,
+                )
+                .map_err(|_| IncrementalError::InvalidTransaction)?,
+                next_state.rendezvous,
+            )
+            .map_err(|_| IncrementalError::InvalidTransaction)?
+            .then(|| tx.clone());
             journal.push(JournalTx {
                 tx_index: index as u32,
                 txid: txid.into(),
                 nullifiers: result.effects.nullifiers,
                 commitments: result.effects.commitments,
-                candidate_transaction: crate::is_coppice_candidate(&txid, next_state.tag_bits)
-                    .then(|| tx.clone()),
+                candidate_transaction,
             });
             outcomes.push(result.outcome);
         }
@@ -252,12 +249,9 @@ impl IncrementalWallet {
                     .map_err(|_| IncrementalError::InvalidTransaction)?;
             }
             Self::append_commitments(&mut next_tree, &tx.commitments)?;
-            if !crate::is_coppice_candidate(&tx.txid, next_state.tag_bits) {
+            let Some(raw) = tx.candidate_transaction.as_deref() else {
                 outcomes.push(ReplayOutcome::NotCandidate);
                 continue;
-            }
-            let Some(raw) = tx.candidate_transaction.as_deref() else {
-                return Err(IncrementalError::InvalidTransaction);
             };
             let parsed = zcash_primitives::transaction::Transaction::read(
                 raw,
@@ -360,7 +354,6 @@ impl IncrementalWallet {
         let mut rebuilt = Self::new_with_ironwood_tree(
             self.activation_height,
             self.fixture_context,
-            self.state.tag_bits,
             self.initial_ironwood_tree.clone(),
         );
         for anchor in &self.initial_bond_anchors {
@@ -419,7 +412,6 @@ impl IncrementalWallet {
             activation_height: self.activation_height,
             last_height: self.last_height,
             fixture_context: self.fixture_context,
-            tag_bits: self.state.tag_bits,
             names: self.state.names.clone(),
             spent: self.state.spent.clone(),
             accepted_bond_anchors: self.state.accepted_bond_anchors().clone(),
@@ -436,8 +428,6 @@ impl IncrementalWallet {
         let saved: LocalWalletState =
             serde_json::from_slice(bytes).map_err(|_| IncrementalError::InvalidLocalState)?;
         if saved.version != LOCAL_STATE_VERSION
-            || saved.tag_bits == 0
-            || saved.tag_bits > 16
             || saved.names.names.iter().any(|(name, record)| {
                 !crate::envelope::valid_name(name)
                     || crate::owner::parse_owner_key(record.owner_pk).is_err()
@@ -473,7 +463,7 @@ impl IncrementalWallet {
         }
         Ok(Self {
             state: {
-                let mut state = ReplayState::new(saved.tag_bits);
+                let mut state = ReplayState::new();
                 state.names = saved.names;
                 state.spent = saved.spent;
                 for anchor in saved.accepted_bond_anchors {
@@ -616,23 +606,17 @@ mod tests {
         if let Operation::Release { signature: s, .. } = &mut release_alice {
             *s = signature;
         }
-        let commit_alice = carrier::build_coppice_transaction(
-            &Operation::Commit {
-                commitment: alice_commitment,
-            },
-            5,
-        )
+        let commit_alice = carrier::build_coppice_transaction(&Operation::Commit {
+            commitment: alice_commitment,
+        })
         .unwrap();
-        let commit_bob = carrier::build_coppice_transaction(
-            &Operation::Commit {
-                commitment: bob_commitment,
-            },
-            5,
-        )
+        let commit_bob = carrier::build_coppice_transaction(&Operation::Commit {
+            commitment: bob_commitment,
+        })
         .unwrap();
-        let alice = carrier::build_coppice_transaction(&reveal_alice, 5).unwrap();
-        let bob = carrier::build_coppice_transaction(&reveal_bob, 5).unwrap();
-        let release = carrier::build_coppice_transaction(&release_alice, 5).unwrap();
+        let alice = carrier::build_coppice_transaction(&reveal_alice).unwrap();
+        let bob = carrier::build_coppice_transaction(&reveal_bob).unwrap();
+        let release = carrier::build_coppice_transaction(&release_alice).unwrap();
         let blocks = [
             vec![serialized(&commit_alice.tx), serialized(&commit_bob.tx)],
             vec![serialized(&alice.tx), serialized(&bob.tx)],
@@ -640,7 +624,7 @@ mod tests {
         ];
         let context: [u8; 32] = Sha256::digest(b"CoppiceIncrementalFixtureV0").into();
 
-        let mut full = IncrementalWallet::new(100, context, 5);
+        let mut full = IncrementalWallet::new(100, context);
         full.seed_prior_nullifiers([[7; 32]]).unwrap();
         full.accept_bond_anchor(alice_bond.anchor);
         full.accept_bond_anchor(bob_bond.anchor);
@@ -648,7 +632,7 @@ mod tests {
             full.process_block(100 + offset as u32, block).unwrap();
         }
 
-        let mut interrupted = IncrementalWallet::new(100, context, 5);
+        let mut interrupted = IncrementalWallet::new(100, context);
         interrupted.seed_prior_nullifiers([[7; 32]]).unwrap();
         interrupted.accept_bond_anchor(alice_bond.anchor);
         interrupted.accept_bond_anchor(bob_bond.anchor);
@@ -676,7 +660,7 @@ mod tests {
         let mut reorged = IncrementalWallet::load_local(&full.save_local().unwrap()).unwrap();
         reorged.rewind_to(101).unwrap();
         reorged.process_block(102, &[]).unwrap();
-        let mut clean = IncrementalWallet::new(100, context, 5);
+        let mut clean = IncrementalWallet::new(100, context);
         clean.seed_prior_nullifiers([[7; 32]]).unwrap();
         clean.accept_bond_anchor(alice_bond.anchor);
         clean.accept_bond_anchor(bob_bond.anchor);
@@ -704,7 +688,7 @@ mod tests {
 
     #[test]
     fn compact_block_failures_are_atomic_and_order_is_canonical() {
-        let mut wallet = IncrementalWallet::new(10, [0; 32], 12);
+        let mut wallet = IncrementalWallet::new(10, [0; 32]);
         let initial = wallet.state.spent.root();
         let invalid = CompactReplayTx {
             tx_index: 0,
@@ -741,7 +725,7 @@ mod tests {
             Err(IncrementalError::NonCanonicalOrder)
         );
 
-        let mut chain = IncrementalWallet::new(10, [0; 32], 12);
+        let mut chain = IncrementalWallet::new(10, [0; 32]);
         chain
             .process_compact_block_with_chain(10, [1; 32], [0; 32], &[])
             .unwrap();
@@ -760,10 +744,10 @@ mod tests {
 
     #[test]
     fn corrupted_local_state_is_rejected() {
-        let wallet = IncrementalWallet::new(10, [0; 32], 12);
+        let wallet = IncrementalWallet::new(10, [0; 32]);
         let encoded = wallet.save_local().unwrap();
         let mut value: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
-        value["tag_bits"] = 0.into();
+        value["version"] = 0.into();
         assert!(matches!(
             IncrementalWallet::load_local(&serde_json::to_vec(&value).unwrap()),
             Err(IncrementalError::InvalidLocalState)

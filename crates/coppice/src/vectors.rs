@@ -144,7 +144,7 @@ pub fn generate(real_nf: [u8; 32]) -> String {
     let absent = spent.prove_unspent(tag);
     spent.insert_spent_tag(tag);
     let present = spent.prove_spent(tag);
-    let mut replay = ReplayState::new(constants::DEFAULT_TEST_TAG_BITS);
+    let mut replay = ReplayState::new();
     replay.names.names = names.clone();
     replay.spent = spent.clone();
     let context = ChainContext {

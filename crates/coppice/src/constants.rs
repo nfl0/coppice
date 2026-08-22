@@ -8,8 +8,6 @@ pub const TESTNET_IRONWOOD_ACTIVATION_HEIGHT: u32 = 4_134_000;
 /// Local-only Z3 regtest deployment. This is independent from Testnet V0.
 pub const REGTEST_V0_ACTIVATION_HEIGHT: u32 = 10;
 pub const REGTEST_IRONWOOD_ACTIVATION_HEIGHT: u32 = 2;
-/// POC discovery width chosen for fast local transaction construction.
-pub const REGTEST_TAG_BITS: u8 = 8;
 /// Public incoming capability used by the historical Testnet V0 tooling.
 pub const TESTNET_RENDEZVOUS_IVK: [u8; 64] = [
     60, 110, 200, 22, 89, 123, 10, 179, 86, 236, 86, 74, 9, 74, 180, 100, 154, 119, 14, 20, 91,
@@ -42,8 +40,6 @@ pub const MAX_PAYLOAD_LEN: usize = 16 * 1024;
 /// Zcash transactions are bounded by the consensus block-size limit. Applying
 /// the same limit before parsing prevents caller-controlled allocation spikes.
 pub const MAX_TRANSACTION_BYTES: usize = 2_000_000;
-/// POC parameter, not a frozen production choice.
-pub const DEFAULT_TEST_TAG_BITS: u8 = 12;
 pub const NAME_ID_DOMAIN: &[u8] = b"CoppiceName";
 pub const NAME_RECORD_DOMAIN: &[u8] = b"CoppiceRecordV1";
 pub const OWNER_SIGNATURE_DOMAIN: &[u8] = b"CoppiceOwnerSigV0";

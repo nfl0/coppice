@@ -8,8 +8,8 @@
 
 Coppice is a cryptographically self-verifying Zcash namespace, built from private bond proofs, public nullifier liveness, and deterministic state derivation.
 
-Wallets independently derive name state from ordered Ironwood effects and txid-tagged bulletin
-carriers in Zcash history.
+Wallets independently derive name state from ordered Ironwood effects and public-rendez-vous
+bulletin carriers in Zcash history.
 
 ## Core design
 
@@ -18,8 +18,9 @@ carriers in Zcash history.
   hidden.
 - **Public liveness.** When the bonded note is spent, Zcash publishes its nullifier. Coppice derives
   the matching `bond_tag` and automatically marks the name inactive.
-- **Deterministic replay.** Wallets process Ironwood effects from the activation height, fetch full
-  transactions only for txid-tagged candidates, decrypt public bulletin memos, and derive the same
+- **Deterministic replay.** Wallets process Ironwood effects from the activation height, detect the
+  public rendez-vous with compact-action trial decryption, fetch only matching full transactions,
+  decrypt their bulletin memos, and derive the same
   authenticated `NameTree` and `SpentTagTree`.
 - **Local verification.** Resolution comes from locally derived state; a resolver never accepts a
   bond tag or registry answer as an external authority.

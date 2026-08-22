@@ -24,8 +24,8 @@ rewind derived state. On a predecessor mismatch, the wallet rewinds to a common 
 replays the replacement branch; a mismatching block is never partially applied.
 
 Compact synchronization supplies each transaction ID and every Ironwood `nullifier` and `cmx`.
-Only transactions whose IDs match the Coppice prefix require full transaction retrieval for memo
-decryption.
+Only transactions with a compact Ironwood output decryptable by the public rendez-vous UIVK
+require full transaction retrieval for memo decryption.
 
 ## Constants and names
 
@@ -34,9 +34,8 @@ The protocol identifier is `COPPICE_POC_V2`; the frozen test-network domain byte
 actual network, and must not be changed for Testnet V0. Testnet V0 activates at height `4288414`;
 Ironwood nullifier accumulation starts at testnet NU6.3 height `4134000`.
 Names contain 1 through 63 ASCII bytes from `[a-z0-9-]`, with neither first nor last byte `-`.
-`name_id = H("CoppiceName" || canonical_name_bytes)`. The 12-bit default candidate tag is a POC
-test parameter, not a production parameter. Payloads are at most 16384 bytes and frame count is
-1 through 32.
+`name_id = H("CoppiceName" || canonical_name_bytes)`. Payloads are at most 16384 bytes and frame
+count is 1 through 32.
 
 ## Owner and record encoding
 
@@ -113,11 +112,14 @@ exactly `0..count-1` with no duplicate; concatenated length and SHA-256 must mat
 complete operation is permitted. Zero sets produce `CandidateNoOperation`; malformed, ambiguous,
 or multiple sets are a deterministic no-op.
 
-## Candidate tag
+## Compact discovery
 
-Interpret the canonical 32-byte `TxId` encoding from byte zero. The candidate tag is the first
-`tag_bits` most-significant bits, in network byte order. V0 POC uses an all-zero tag and permits
-1 through 16 bits. Untagged transactions are never memo-decrypted.
+For every compact Ironwood Action, trial-decrypt the 52-byte compact note ciphertext with the
+deployment's public rendez-vous Orchard IVK under the Ironwood note-encryption domain. Fetch the
+full transaction if any Action decrypts. Full replay decrypts every Action with the same IVK and
+reconstructs its memo frames. Transactions without a rendez-vous output are `NotCandidate`; a
+fetched rendez-vous transaction with no valid operation is `CandidateNoOperation` or a typed
+rejection as specified above.
 
 ## Registration commitment
 
@@ -195,7 +197,8 @@ the NameTree algorithm with domains `CoppiceSpentEmptyV0`, `CoppiceSpentLeafV0`,
 
 Blocks are processed by ascending height and transactions by ascending `tx_index`. For each
 transaction: parse canonical bytes; extract every Ironwood `cmx` and nullifier; insert every spent
-tag; test the txid candidate prefix; decrypt/reconstruct at most one operation; then apply it.
+tag; use compact UIVK trial decryption to select full transactions; decrypt/reconstruct at most one
+operation; then apply it.
 Consequently, a nullifier in a transaction is visible before an operation in the same transaction.
 Wallet integration records authenticated Ironwood roots before replaying reveals or transfers that
 may refer to them. A REVEAL or TRANSFER_WITH_NEW_BOND referring to an unknown root produces

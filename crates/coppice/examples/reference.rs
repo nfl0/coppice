@@ -1,5 +1,5 @@
 use coppice::{
-    DEFAULT_TAG_BITS, bond, carrier,
+    bond, carrier,
     envelope::Operation,
     owner::{OwnerSigningKey, owner_key_bytes, sign_operation},
     replay::{ChainContext, ReplayState, process_serialized_transaction},
@@ -18,7 +18,7 @@ fn serialized(tx: &zcash_primitives::transaction::Transaction) -> Vec<u8> {
     bytes
 }
 
-fn carrier_demo(bits: u8) {
+fn carrier_demo() {
     let (owner_pk, _) = owner();
     let operation = Operation::Reveal {
         name: "frames".into(),
@@ -29,7 +29,7 @@ fn carrier_demo(bits: u8) {
         address: vec![0x55; 900],
         secret: [9; 32],
     };
-    let built = carrier::build_coppice_transaction(&operation, bits).expect("carrier");
+    let built = carrier::build_coppice_transaction(&operation).expect("carrier");
     let raw = serialized(&built.tx);
     let parsed = zcash_primitives::transaction::Transaction::read(
         raw.as_slice(),
@@ -38,10 +38,8 @@ fn carrier_demo(bits: u8) {
     .expect("parse transaction");
     let decoded = carrier::decode_bulletin(&parsed).expect("decrypt bulletin");
     println!(
-        "txid: {}\ntag bits: {}\nattempts: {}\nactions: {}\nbytes: {}\nframes: {}\nround trip: {}",
+        "txid: {}\nactions: {}\nbytes: {}\nframes: {}\nround trip: {}",
         built.txid,
-        bits,
-        built.attempts,
         parsed.ironwood_bundle().map_or(0, |b| b.actions().len()),
         raw.len(),
         built.frame_count,
@@ -101,13 +99,13 @@ fn replay_demo() {
     if let Operation::Release { signature, .. } = &mut release {
         *signature = release_signature;
     }
-    let mut state = ReplayState::new(6);
+    let mut state = ReplayState::new();
     state.accept_bond_anchor(bond.anchor);
     for (index, operation) in [Operation::Commit { commitment }, reveal, update, release]
         .iter()
         .enumerate()
     {
-        let built = carrier::build_coppice_transaction(operation, 6).expect("carrier");
+        let built = carrier::build_coppice_transaction(operation).expect("carrier");
         let result = process_serialized_transaction(
             &mut state,
             100 + index as u32,
@@ -167,21 +165,11 @@ fn vectors(write: bool) {
 fn main() {
     let args = std::env::args().collect::<Vec<_>>();
     match args.get(1).map(String::as_str) {
-        Some("carrier-demo") => carrier_demo(DEFAULT_TAG_BITS as u8),
-        Some("grind") => {
-            let bits = args
-                .windows(2)
-                .find(|pair| pair[0] == "--bits")
-                .and_then(|pair| pair[1].parse().ok())
-                .unwrap_or(DEFAULT_TAG_BITS as u8);
-            carrier_demo(bits);
-        }
+        Some("carrier-demo") => carrier_demo(),
         Some("replay-demo") => replay_demo(),
         Some("bond-demo") => bond_demo(),
         Some("print-test-vectors") => vectors(false),
         Some("write-test-vectors") => vectors(true),
-        _ => eprintln!(
-            "usage: carrier-demo | grind --bits N | replay-demo | bond-demo | print-test-vectors"
-        ),
+        _ => eprintln!("usage: carrier-demo | replay-demo | bond-demo | print-test-vectors"),
     }
 }

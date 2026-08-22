@@ -28,9 +28,9 @@ Zcash chain from Coppice activation height
         v
 compact sync data (txid + Ironwood effects)
         |
-        +-- txid does not match Coppice tag --> continue
+        +-- no output decrypts with public rendez-vous UIVK --> continue
         |
-        `-- txid matches Coppice tag
+        `-- rendez-vous output detected
                 |
                 v
           fetch full transaction
@@ -97,29 +97,11 @@ The current bond tag is derived using a Pasta/Halo2-native Poseidon construction
 ## Transport
 
 Coppice operations are carried inside ordinary encrypted Zcash memos sent to a deployment-specific,
-fixed public rendez-vous Unified Address. Wallets fetch txid-tagged transactions and decrypt the
-bulletin outputs with the matching public Unified Incoming Viewing Key; the UIVK contains no
-spending authority. The local Z3 values are documented in `README.md`.
+fixed public rendez-vous Unified Address. Wallets trial-decrypt compact Ironwood outputs with the
+matching public Unified Incoming Viewing Key and fetch only matching full transactions; the UIVK
+contains no spending authority. The local Z3 values are documented in `README.md`.
 
-Large operations are split across multiple memo frames. A txid-prefix tag allows wallets to identify candidate Coppice transactions without trial-decrypting every shielded output.
-
-The implementation has demonstrated pre-authorization txid grinding:
-
-```text
-construct fixed transaction effects
-        |
-vary only transport nonce / memo encryption
-        |
-find desired txid prefix
-        |
-prove once
-        |
-sign once
-        |
-finalize
-```
-
-No Halo2 proof generation or transaction signing is performed inside the grinding loop.
+Large operations are split across multiple memo frames. No txid tag or grinding step is used.
 
 ## Derived state
 
@@ -177,9 +159,7 @@ coppice/
 
 Wallet-specific UI, Flutter/FFI bindings, and networking integrations should live outside the core protocol crate.
 
-The real PCZT pre-authorization grinding regression now lives directly in
-`crates/coppice/tests/preauth_grind.rs`. Reference demos and deterministic vector tooling are
-available without a separate harness crate:
+Reference demos and deterministic vector tooling are available without a separate harness crate:
 
 ```bash
 cargo run -p coppice --example reference -- carrier-demo
@@ -384,13 +364,13 @@ To print newly replayed local activity, run:
 ```
 
 The watcher polls only Zebra's block height. For each new block it invokes the existing Rust
-`coppice-cli coppice watch --once` path, which performs candidate detection, transaction fetch,
+`coppice-cli coppice watch --once` path, which performs rendez-vous detection, transaction fetch,
 memo decoding, and canonical replay through Zaino. It prints COMMIT, REGISTER (successful REVEAL),
 UPDATE, RELEASE, rejected
-candidates, and observed bond spends with height and txid. Use `--once` for a single catch-up pass.
+carriers, and observed bond spends with height and txid. Use `--once` for a single catch-up pass.
 
 This is disposable developer infrastructure. Do not use its keys, activation height, reduced
-8-bit local discovery tag, or chain as public protocol parameters.
+or chain as public protocol parameters.
 
 ## License
 

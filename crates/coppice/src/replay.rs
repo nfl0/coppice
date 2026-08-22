@@ -1,5 +1,4 @@
 use crate::{
-    DEFAULT_TAG_BITS,
     envelope::Operation,
     ironwood::{self, IronwoodEffects},
     spent::SpentTagTree,
@@ -43,7 +42,6 @@ pub enum SerializedReplayError {
 pub struct ReplayState {
     pub names: CoppiceState,
     pub spent: SpentTagTree,
-    pub tag_bits: u8,
     pub rendezvous: crate::config::Rendezvous,
     accepted_bond_anchors: BTreeSet<[u8; 32]>,
 }
@@ -53,11 +51,10 @@ pub struct ChainContext {
     pub fixture_block_id: [u8; 32],
 }
 impl ReplayState {
-    pub fn new(tag_bits: u8) -> Self {
+    pub fn new() -> Self {
         Self {
             names: CoppiceState::default(),
             spent: SpentTagTree::default(),
-            tag_bits,
             rendezvous: crate::config::TESTNET_V0.rendezvous,
             accepted_bond_anchors: BTreeSet::new(),
         }
@@ -106,20 +103,6 @@ pub fn process_transaction(
     }
     s.spent = next_spent;
     let spent_root_before_operation = s.spent.root();
-    let bits = if s.tag_bits == 0 {
-        DEFAULT_TAG_BITS as u8
-    } else {
-        s.tag_bits
-    };
-    if !crate::is_coppice_candidate(&tx.txid(), bits) {
-        return ReplayResult {
-            effects,
-            spent_root_before_operation,
-            operation: None,
-            transition: None,
-            outcome: ReplayOutcome::NotCandidate,
-        };
-    }
     match crate::carrier::decode_bulletin_for(tx, s.rendezvous) {
         Ok(op) => {
             let bond_anchor = match &op {
@@ -209,9 +192,9 @@ mod tests {
         let op = Operation::Commit {
             commitment: [3; 32],
         };
-        let built = carrier::build_coppice_transaction(&op, 8).unwrap();
+        let built = carrier::build_coppice_transaction(&op).unwrap();
         let tag = spent_tag(&built.input_nullifier).unwrap();
-        let mut state = ReplayState::new(8);
+        let mut state = ReplayState::new();
         let before = state.spent.prove_unspent(tag);
         assert!(SpentTagTree::verify_unspent(
             state.spent.root(),
@@ -342,31 +325,25 @@ mod tests {
             secret: bob_secret,
         };
         let txs = [
-            carrier::build_coppice_transaction(&Operation::Commit { commitment }, 6).unwrap(),
-            carrier::build_coppice_transaction(&invalid_proof, 6).unwrap(),
-            carrier::build_coppice_transaction(
-                &Operation::Commit {
-                    commitment: mismatched_commitment,
-                },
-                6,
-            )
+            carrier::build_coppice_transaction(&Operation::Commit { commitment }).unwrap(),
+            carrier::build_coppice_transaction(&invalid_proof).unwrap(),
+            carrier::build_coppice_transaction(&Operation::Commit {
+                commitment: mismatched_commitment,
+            })
             .unwrap(),
-            carrier::build_coppice_transaction(&mismatched_tag, 6).unwrap(),
-            carrier::build_coppice_transaction(&reveal, 6).unwrap(),
-            carrier::build_coppice_transaction(&update, 6).unwrap(),
-            carrier::build_coppice_payload(&[0xff], 6).unwrap(),
-            carrier::build_coppice_transaction(
-                &Operation::Commit {
-                    commitment: bob_commitment,
-                },
-                6,
-            )
+            carrier::build_coppice_transaction(&mismatched_tag).unwrap(),
+            carrier::build_coppice_transaction(&reveal).unwrap(),
+            carrier::build_coppice_transaction(&update).unwrap(),
+            carrier::build_coppice_payload(&[0xff]).unwrap(),
+            carrier::build_coppice_transaction(&Operation::Commit {
+                commitment: bob_commitment,
+            })
             .unwrap(),
-            carrier::build_coppice_transaction(&bob, 6).unwrap(),
-            carrier::build_coppice_transaction(&release, 6).unwrap(),
+            carrier::build_coppice_transaction(&bob).unwrap(),
+            carrier::build_coppice_transaction(&release).unwrap(),
         ];
         let bytes = txs.iter().map(|x| serialized(&x.tx)).collect::<Vec<_>>();
-        let mut strict = ReplayState::new(6);
+        let mut strict = ReplayState::new();
         let empty_root = strict.names.state_root();
         assert_eq!(
             process_serialized_transaction(&mut strict, 99, 0, &bytes[4])
@@ -378,11 +355,11 @@ mod tests {
         let mut trailing = bytes[1].clone();
         trailing.push(0);
         assert!(matches!(
-            process_serialized_transaction(&mut ReplayState::new(6), 99, 0, &trailing),
+            process_serialized_transaction(&mut ReplayState::new(), 99, 0, &trailing),
             Err(SerializedReplayError::InvalidTransaction)
         ));
         let run = || {
-            let mut s = ReplayState::new(6);
+            let mut s = ReplayState::new();
             s.accept_bond_anchor(alice_bond.anchor);
             s.accept_bond_anchor(bob_bond.anchor);
             let outcomes = bytes
