@@ -195,3 +195,32 @@ pub fn verify_operation(key_bytes: [u8; 32], op: &Operation, previous: &NameReco
     };
     key.verify(&msg, &Signature::from(bytes)).is_ok()
 }
+
+#[cfg(test)]
+mod owner_key_vectors {
+    use super::*;
+    use pasta_curves::{
+        group::ff::{Field, FromUniformBytes, PrimeField},
+        pallas,
+    };
+
+    #[test]
+    fn p_owner_002() {
+        let okm: [u8; 64] = hex::decode(
+            "b87731ccf994444da3e317119939a2f18b2b4194cf173100e0ce29e9427f1a7d4bdf647147191c462954d0439e80e86cc06b25bf4117f95842779fdae22eab81",
+        )
+        .unwrap()
+        .try_into()
+        .unwrap();
+        let scalar = pallas::Scalar::from_uniform_bytes(&okm);
+        assert!(!bool::from(scalar.is_zero()));
+        let scalar_bytes = scalar.to_repr();
+        let signing_key = OwnerSigningKey::try_from(scalar_bytes).unwrap();
+        let verification_key = owner_key_bytes(&(&signing_key).into());
+        println!("expected_pallas_scalar_hex = {}", hex::encode(scalar_bytes));
+        println!(
+            "expected_redpallas_verification_key_hex = {}",
+            hex::encode(verification_key)
+        );
+    }
+}
