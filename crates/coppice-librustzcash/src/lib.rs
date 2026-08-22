@@ -11,6 +11,7 @@ mod locking;
 mod pending;
 mod selection;
 mod source;
+mod witness;
 
 pub use guard::{
     CoppiceProtectionMode, HostCanonicalTipSource, SpendGuardError, WalletCanonicalTip,
@@ -34,6 +35,13 @@ pub use pending::{
 pub use selection::{FreshnessEligibility, SelectedBondNote, select_bond_note};
 pub use source::{
     InputSourceIronwoodNoteSource, IronwoodNoteConversionError, IronwoodNoteSourceError,
+};
+pub use witness::{
+    AnchorContext, BondFreshnessContext, FreshnessContextError, IronwoodWitness,
+    IronwoodWitnessSource, ResolveWitnessError, WalletCommitmentTreesIronwoodWitnessSource,
+    WalletIronwoodWitnessError, anchor_for_registration, choose_current_anchor,
+    freshness_for_canonical_commit, freshness_for_next_block_commit,
+    resolve_canonical_ironwood_witness, select_fresh_bond_note,
 };
 
 /// The exact pinned librustzcash lock-owner type used by this adapter.

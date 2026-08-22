@@ -13,10 +13,11 @@ workspace = true
 [dependencies]
 coppice.workspace = true
 orchard.workspace = true
+incrementalmerkletree.workspace = true
+shardtree.workspace = true
 zcash_client_backend = { workspace = true, features = ["orchard"] }
 zcash_keys = { workspace = true, features = ["orchard", "sapling", "std"] }
 zcash_protocol.workspace = true
 
 [dev-dependencies]
-incrementalmerkletree.workspace = true
 zip32.workspace = true
