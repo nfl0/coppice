@@ -10,6 +10,7 @@ mod chain;
 mod guard;
 mod inventory;
 mod locking;
+mod operations;
 mod pending;
 mod reconcile;
 mod register;
@@ -30,6 +31,11 @@ pub use locking::{
     CoppiceLockBackend, DesiredLockSetError, OutputLockBackendError, OutputLockStoreBridge,
     ReconciliationError, ReconciliationReport, WalletCoppiceLockBackend, WalletCoppiceLockError,
     desired_lock_tags, lock_owner_for_bond, reconcile_locks,
+};
+pub use operations::{
+    BreakBondError, BreakBondPlan, OwnerAuthority, OwnerOperationError, PaymentResolutionError,
+    PreparedOwnerOperation, VerifiedDestination, prepare_break_bond, prepare_release,
+    prepare_update, resolve_for_payment,
 };
 pub use pending::{
     PendingRegistration, PendingRegistrationCollection, PendingRegistrationCollectionError,
