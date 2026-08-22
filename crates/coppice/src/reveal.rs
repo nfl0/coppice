@@ -56,7 +56,11 @@ impl From<V1BondVerifierError> for RevealValidationError {
     }
 }
 
-pub(crate) fn canonical_v1_address(
+/// Validates and returns the canonical v1 Unified Address bytes for a deployment.
+///
+/// This is shared with wallet adapters so they can validate pending local
+/// registration metadata using the same address rule as REVEAL validation.
+pub fn canonical_v1_address(
     bytes: &[u8],
     deployment: &DeploymentParameters,
 ) -> Result<Vec<u8>, RevealValidationError> {
