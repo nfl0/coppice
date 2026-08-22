@@ -1814,6 +1814,16 @@ v1 implementation is complete only when:
 - requirement coverage has no unexplained gap;
 - `cargo fmt`, `cargo clippy`, and `cargo test` pass.
 
+Concrete wallets persist the reducer snapshot separately from secret-bearing
+local registration intents. Pending intents MUST be reconstructed through the
+canonical `PendingRegistration` constructor on load and the local file MUST be
+treated as private wallet material. After normal wallet scanning, canonical
+chain reconciliation updates the reducer first and then refreshes cached
+canonical COMMIT heights. Before every ordinary proposal, the same concrete
+wallet backend MUST reconcile active and pending Coppice output locks at the
+next-block target height; the ordinary locked-input exclusion policy then keeps
+those notes out of fee selection.
+
 
 ## I-905 — Specification readiness
 

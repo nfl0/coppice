@@ -335,6 +335,7 @@ dependencies = [
  "rand_chacha",
  "rand_core",
  "sapling-crypto",
+ "serde",
  "serde_json",
  "shardtree",
  "zcash_address",

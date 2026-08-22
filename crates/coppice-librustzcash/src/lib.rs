@@ -39,8 +39,8 @@ pub use operations::{
 };
 pub use pending::{
     PendingRegistration, PendingRegistrationCollection, PendingRegistrationCollectionError,
-    PendingRegistrationTransitionError, PendingRegistrationValidationError,
-    pending_attempt_expired, pending_commit_expired,
+    PendingRegistrationPersistenceError, PendingRegistrationTransitionError,
+    PendingRegistrationValidationError, pending_attempt_expired, pending_commit_expired,
 };
 pub use reconcile::{
     CanonicalBlockSource, CanonicalTip, ReconcileError, ReconcileKind, ReconcileOutcome,

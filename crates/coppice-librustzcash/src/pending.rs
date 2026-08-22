@@ -1,5 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use serde::{Deserialize, Serialize};
+
 use coppice::{
     config::{DeploymentEncodingError, DeploymentParameters, DeploymentValidationError},
     envelope,
@@ -158,6 +160,37 @@ pub enum PendingRegistrationCollectionError {
     Transition(PendingRegistrationTransitionError),
 }
 
+pub const PENDING_REGISTRATION_FORMAT_VERSION: u32 = 1;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PendingRegistrationPersistenceError {
+    Encoding,
+    UnsupportedFormat,
+    DeploymentMismatch,
+    InvalidRegistration(PendingRegistrationValidationError),
+    DuplicateCommitment,
+    InvalidTransition(PendingRegistrationTransitionError),
+}
+
+#[derive(Serialize, Deserialize)]
+struct StoredPendingRegistration {
+    name: String,
+    address: Vec<u8>,
+    owner_pk: [u8; 32],
+    bond_tag: [u8; 32],
+    secret: [u8; 32],
+    commitment: [u8; 32],
+    commit_txid: Option<[u8; 32]>,
+    commit_height: Option<u32>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct StoredPendingCollection {
+    format_version: u32,
+    deployment_id: [u8; 32],
+    registrations: Vec<StoredPendingRegistration>,
+}
+
 /// In-memory wallet-local pending registration intents.
 ///
 /// This is deliberately distinct from the protocol reducer's global
@@ -206,6 +239,87 @@ impl PendingRegistrationCollection {
 
     pub fn iter_pending_bond_tags(&self) -> impl Iterator<Item = [u8; 32]> {
         self.pending_bond_tags().into_iter()
+    }
+
+    /// Iterates public semantic commitment identifiers without exposing the
+    /// secret-bearing pending values.
+    pub fn commitments(&self) -> impl Iterator<Item = [u8; 32]> + '_ {
+        self.by_commitment.keys().copied()
+    }
+
+    /// Serializes secret-bearing pending intents for trusted local wallet
+    /// storage. Callers must not log or expose these bytes.
+    pub fn save_local(
+        &self,
+        deployment: &DeploymentParameters,
+    ) -> Result<Vec<u8>, PendingRegistrationPersistenceError> {
+        let deployment_id = deployment
+            .validate()
+            .map_err(|_| PendingRegistrationPersistenceError::DeploymentMismatch)?;
+        let registrations = self
+            .by_commitment
+            .values()
+            .map(|pending| StoredPendingRegistration {
+                name: pending.name.clone(),
+                address: pending.address.clone(),
+                owner_pk: pending.owner_pk,
+                bond_tag: pending.bond_tag,
+                secret: pending.secret,
+                commitment: pending.commitment,
+                commit_txid: pending.commit_txid,
+                commit_height: pending.commit_height,
+            })
+            .collect();
+        serde_json::to_vec(&StoredPendingCollection {
+            format_version: PENDING_REGISTRATION_FORMAT_VERSION,
+            deployment_id,
+            registrations,
+        })
+        .map_err(|_| PendingRegistrationPersistenceError::Encoding)
+    }
+
+    /// Loads pending intents by reconstructing each entry through the same
+    /// canonical constructor used for newly-created registrations.
+    pub fn load_local(
+        deployment: &DeploymentParameters,
+        bytes: &[u8],
+    ) -> Result<Self, PendingRegistrationPersistenceError> {
+        let deployment_id = deployment
+            .validate()
+            .map_err(|_| PendingRegistrationPersistenceError::DeploymentMismatch)?;
+        let stored: StoredPendingCollection = serde_json::from_slice(bytes)
+            .map_err(|_| PendingRegistrationPersistenceError::Encoding)?;
+        if stored.format_version != PENDING_REGISTRATION_FORMAT_VERSION {
+            return Err(PendingRegistrationPersistenceError::UnsupportedFormat);
+        }
+        if stored.deployment_id != deployment_id {
+            return Err(PendingRegistrationPersistenceError::DeploymentMismatch);
+        }
+        let mut collection = Self::new();
+        for stored in stored.registrations {
+            let mut pending = PendingRegistration::new(
+                deployment,
+                stored.name,
+                stored.address,
+                stored.owner_pk,
+                stored.bond_tag,
+                stored.secret,
+                stored.commitment,
+            )
+            .map_err(PendingRegistrationPersistenceError::InvalidRegistration)?;
+            if let Some(txid) = stored.commit_txid {
+                pending
+                    .record_commit_txid(txid)
+                    .map_err(PendingRegistrationPersistenceError::InvalidTransition)?;
+            }
+            if let Some(height) = stored.commit_height {
+                pending.observe_canonical_commit_height(height);
+            }
+            collection
+                .insert(pending)
+                .map_err(|_| PendingRegistrationPersistenceError::DuplicateCommitment)?;
+        }
+        Ok(collection)
     }
 
     pub fn mark_commit_broadcast(
@@ -409,5 +523,26 @@ mod tests {
             pending_commit_expired(u32::MAX, 1, u32::MAX),
             Err(PendingTimingError::HeightOverflow)
         );
+    }
+
+    #[test]
+    fn secret_pending_collection_round_trips_through_validated_local_format() {
+        let deployment = deployment();
+        let mut collection = PendingRegistrationCollection::new();
+        let mut entry = pending();
+        entry.record_commit_txid([7; 32]).unwrap();
+        entry.observe_canonical_commit_height(11);
+        collection.insert(entry).unwrap();
+
+        let bytes = collection.save_local(&deployment).unwrap();
+        let restored = PendingRegistrationCollection::load_local(&deployment, &bytes).unwrap();
+        assert!(restored == collection);
+
+        let mut wrong = deployment.clone();
+        wrong.network_id.push(1);
+        assert!(matches!(
+            PendingRegistrationCollection::load_local(&wrong, &bytes),
+            Err(PendingRegistrationPersistenceError::DeploymentMismatch)
+        ));
     }
 }
