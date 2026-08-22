@@ -19,6 +19,7 @@ pub mod recent_spent;
 pub mod record;
 pub mod registration;
 pub mod replay;
+pub mod reveal;
 pub mod spent;
 pub mod state;
 pub mod state_root;

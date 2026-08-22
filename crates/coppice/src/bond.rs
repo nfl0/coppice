@@ -1,12 +1,12 @@
 //! First non-recursive private BondCircuit POC, composed from the Orchard Action constraints.
 use crate::{
     bond_tag::{derive_v1_bond_tag, v1_bond_tag_domain_field},
-    config::{DeploymentParameters, Rendezvous},
+    config::{DeploymentEncodingError, DeploymentParameters, Rendezvous},
     constants, crypto,
     spent::{domain_field, native_hash, spent_tag},
 };
 use halo2_proofs::{
-    plonk::{SingleVerifier, create_proof, keygen_pk, keygen_vk, verify_proof},
+    plonk::{SingleVerifier, VerifyingKey, create_proof, keygen_pk, keygen_vk, verify_proof},
     poly::commitment::Params,
     transcript::{Blake2bRead, Blake2bWrite, Challenge255},
 };
@@ -94,6 +94,10 @@ const V1_PROTOCOL_DOMAIN: &str = "CoppiceProtoV1";
 const V1_REGISTRATION_DOMAIN: &str = "CoppiceRegV1";
 const V1_CONTEXT_DOMAIN: &str = "CoppiceCtxV1";
 const V1_OWNER_DOMAIN: &str = "CoppiceOwnerV1";
+pub const V1_BOND_VK_ID: [u8; 32] = [
+    0xa1, 0x60, 0x74, 0xcf, 0xad, 0xab, 0xc4, 0xc2, 0x4b, 0xf5, 0x87, 0x32, 0x38, 0x9a, 0x4f, 0x2d,
+    0x57, 0x4e, 0x25, 0xc4, 0x3f, 0x16, 0x92, 0x39, 0xec, 0x21, 0xda, 0x85, 0x2f, 0x5f, 0x7a, 0xdc,
+];
 const COPPICE_PUBLIC_INPUT_NAMES: [&str; 7] = [
     "anchor",
     "minimum_value",
@@ -105,13 +109,15 @@ const COPPICE_PUBLIC_INPUT_NAMES: [&str; 7] = [
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum V1BindingError {
+pub enum V1BindingError {
     AddressTooLong,
     Hash(crypto::Error),
+    Deployment(DeploymentEncodingError),
+    InvalidPublicInput,
 }
 
-fn v1_protocol_binding() -> pallas::Base {
-    binding_32(V1_PROTOCOL_DOMAIN.as_bytes(), dedicated_v1_deployment_id())
+pub fn v1_protocol_binding(deployment_id: [u8; 32]) -> pallas::Base {
+    binding_32(V1_PROTOCOL_DOMAIN.as_bytes(), deployment_id)
 }
 
 fn dedicated_v1_deployment_id() -> [u8; 32] {
@@ -203,15 +209,113 @@ fn v1_registration_digest(name: &str, address: &[u8]) -> Result<[u8; 32], V1Bind
     crypto::hash(V1_REGISTRATION_DOMAIN, &preimage).map_err(V1BindingError::Hash)
 }
 
-fn v1_context_binding(name: &str, address: &[u8]) -> Result<pallas::Base, V1BindingError> {
+pub fn v1_context_binding(name: &str, address: &[u8]) -> Result<pallas::Base, V1BindingError> {
     Ok(binding_32(
         V1_CONTEXT_DOMAIN.as_bytes(),
         v1_registration_digest(name, address)?,
     ))
 }
 
-fn v1_owner_binding(owner_pk: [u8; 32]) -> pallas::Base {
+pub fn v1_owner_binding(owner_pk: [u8; 32]) -> pallas::Base {
     binding_32(V1_OWNER_DOMAIN.as_bytes(), owner_pk)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct V1BondPublicInputs {
+    values: [pallas::Base; 7],
+}
+
+impl V1BondPublicInputs {
+    pub fn from_runtime_facts(
+        deployment: &DeploymentParameters,
+        anchor: [u8; 32],
+        position_floor: u32,
+        name: &str,
+        canonical_address: &[u8],
+        owner_pk: [u8; 32],
+        bond_tag: [u8; 32],
+    ) -> Result<Self, V1BindingError> {
+        let anchor = Option::<pallas::Base>::from(pallas::Base::from_repr(anchor))
+            .ok_or(V1BindingError::InvalidPublicInput)?;
+        let bond_tag = Option::<pallas::Base>::from(pallas::Base::from_repr(bond_tag))
+            .ok_or(V1BindingError::InvalidPublicInput)?;
+        let deployment_id = deployment
+            .deployment_id()
+            .map_err(V1BindingError::Deployment)?;
+        Ok(Self {
+            values: [
+                anchor,
+                pallas::Base::from(deployment.minimum_bond_value),
+                pallas::Base::from(u64::from(position_floor)),
+                v1_protocol_binding(deployment_id),
+                v1_context_binding(name, canonical_address)?,
+                v1_owner_binding(owner_pk),
+                bond_tag,
+            ],
+        })
+    }
+
+    pub fn from_canonical_encodings(encodings: [[u8; 32]; 7]) -> Result<Self, V1BindingError> {
+        let mut values = [pallas::Base::zero(); 7];
+        for (output, encoding) in values.iter_mut().zip(encodings) {
+            *output = Option::<pallas::Base>::from(pallas::Base::from_repr(encoding))
+                .ok_or(V1BindingError::InvalidPublicInput)?;
+        }
+        Ok(Self { values })
+    }
+
+    fn as_slice(&self) -> &[pallas::Base] {
+        &self.values
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum V1BondVerifierError {
+    KeyConstruction,
+    VerifierIdentityMismatch,
+}
+
+pub struct V1BondVerifier {
+    params: Params<vesta::Affine>,
+    verifying_key: VerifyingKey<vesta::Affine>,
+    verifier_id: [u8; 32],
+}
+
+impl V1BondVerifier {
+    pub fn new() -> Result<Self, V1BondVerifierError> {
+        let params = Params::<vesta::Affine>::new(COPPICE_BOND_K);
+        let circuit = CoppiceBondCircuit::verifier_only(v1_bond_tag_domain_field());
+        let verifying_key =
+            keygen_vk(&params, &circuit).map_err(|_| V1BondVerifierError::KeyConstruction)?;
+        let artifact = format!("{:?}", verifying_key.pinned()).into_bytes();
+        let verifier_id: [u8; 32] = blake2b_simd::Params::new()
+            .hash_length(32)
+            .personal(b"CoppiceBondV1")
+            .hash(&artifact)
+            .as_bytes()
+            .try_into()
+            .expect("32-byte verifier identity");
+        if verifier_id != V1_BOND_VK_ID {
+            return Err(V1BondVerifierError::VerifierIdentityMismatch);
+        }
+        Ok(Self {
+            params,
+            verifying_key,
+            verifier_id,
+        })
+    }
+
+    pub fn k(&self) -> u32 {
+        COPPICE_BOND_K
+    }
+
+    pub fn verifier_id(&self) -> [u8; 32] {
+        self.verifier_id
+    }
+
+    pub fn verify_v1_bond_proof(&self, proof: &[u8], inputs: &V1BondPublicInputs) -> bool {
+        verify(&self.params, &self.verifying_key, proof, inputs.as_slice())
+    }
 }
 
 pub fn context_binding(name: &str, address: &[u8]) -> pallas::Base {
@@ -397,7 +501,7 @@ fn minimal_fixture(
     let anchor = merkle_path.root(cmx);
     let nf = note.nullifier(&full_viewing_key);
     let spend = SpendInfo::new(full_viewing_key, note, merkle_path)?;
-    let protocol = v1_protocol_binding();
+    let protocol = v1_protocol_binding(dedicated_v1_deployment_id());
     let context = v1_context_binding(name, address).ok()?;
     let owner = v1_owner_binding(owner_pk);
     let circuit = CoppiceBondCircuit::from_spend(
@@ -841,11 +945,11 @@ mod tests {
     fn v1_protocol_binding_uses_deployment_vector_id() {
         assert_eq!(dedicated_v1_deployment_id(), deployment_vector_id());
         assert_eq!(
-            v1_protocol_binding(),
+            v1_protocol_binding(deployment_vector_id()),
             binding_32(V1_PROTOCOL_DOMAIN.as_bytes(), deployment_vector_id())
         );
         assert_eq!(
-            hex::encode(v1_protocol_binding().to_repr()),
+            hex::encode(v1_protocol_binding(deployment_vector_id()).to_repr()),
             "c1f0f1ef06f5ffd8a21edcb859d46fbb55b653022a66a6d01ee4945c2cf0ae1f"
         );
         let owner = crate::owner::owner_key_bytes(
@@ -1241,6 +1345,46 @@ mod tests {
             "d9e24e9de209f3256b4e3b7d0c681211792677bd3a6398bf6079cc2c581c0af3"
         );
         assert_eq!(frozen["proof_length"], 4_960);
+    }
+
+    #[test]
+    fn runtime_v1_verifier_accepts_frozen_vector_and_rejects_bad_proofs() {
+        let frozen: serde_json::Value =
+            serde_json::from_str(include_str!("../../../test-vectors/coppice_bond_v1.json"))
+                .unwrap();
+        let encodings: [[u8; 32]; 7] = frozen["public_inputs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|input| {
+                hex::decode(input["value"].as_str().unwrap())
+                    .unwrap()
+                    .try_into()
+                    .unwrap()
+            })
+            .collect::<Vec<_>>()
+            .try_into()
+            .unwrap();
+        let inputs = V1BondPublicInputs::from_canonical_encodings(encodings).unwrap();
+        let proof = hex::decode(frozen["accepted_proof"].as_str().unwrap()).unwrap();
+        let verifier = V1BondVerifier::new().unwrap();
+        assert_eq!(verifier.k(), 11);
+        assert_eq!(verifier.verifier_id(), V1_BOND_VK_ID);
+        assert!(verifier.verify_v1_bond_proof(&proof, &inputs));
+
+        let mut mutated = encodings;
+        let value = Option::<pallas::Base>::from(pallas::Base::from_repr(mutated[6])).unwrap()
+            + pallas::Base::one();
+        mutated[6] = value.to_repr();
+        let mutated = V1BondPublicInputs::from_canonical_encodings(mutated).unwrap();
+        assert!(!verifier.verify_v1_bond_proof(&proof, &mutated));
+
+        let mut truncated = proof.clone();
+        truncated.pop();
+        assert!(!verifier.verify_v1_bond_proof(&truncated, &inputs));
+        let mut corrupted = proof;
+        corrupted[0] ^= 1;
+        assert!(!verifier.verify_v1_bond_proof(&corrupted, &inputs));
     }
 
     #[test]

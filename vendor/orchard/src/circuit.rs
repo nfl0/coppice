@@ -1394,6 +1394,31 @@ pub mod coppice_bond {
     }
 
     impl CoppiceBondCircuit {
+        /// Constructs the canonical witness-free circuit used for verifier-key generation.
+        pub fn verifier_only(bond_domain: pallas::Base) -> Self {
+            Self {
+                path: Value::unknown(),
+                pos: Value::unknown(),
+                g_d: Value::unknown(),
+                pk_d: Value::unknown(),
+                value: Value::unknown(),
+                rho: Value::unknown(),
+                psi: Value::unknown(),
+                rcm: Value::unknown(),
+                cm: Value::unknown(),
+                ask: Value::unknown(),
+                ak: Value::unknown(),
+                nk: Value::unknown(),
+                rivk: Value::unknown(),
+                minimum_value: 0,
+                protocol_binding: Value::unknown(),
+                context_binding: Value::unknown(),
+                owner_binding: Value::unknown(),
+                position_floor: Value::unknown(),
+                bond_domain,
+            }
+        }
+
         #[allow(clippy::too_many_arguments)]
         pub fn from_spend(
             spend: SpendInfo,
