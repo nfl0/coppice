@@ -5,6 +5,7 @@
 //! wallet facts and its lock backend is an explicit seam for a later concrete
 //! wallet implementation.
 
+mod bond_prover;
 mod guard;
 mod inventory;
 mod locking;
@@ -44,5 +45,6 @@ pub use witness::{
     resolve_canonical_ironwood_witness, select_fresh_bond_note,
 };
 
+pub use bond_prover::{WalletBondPrivateMaterial, WalletBondProverError, prove_selected_bond};
 /// The exact pinned librustzcash lock-owner type used by this adapter.
 pub use zcash_client_backend::wallet::LockOwner;

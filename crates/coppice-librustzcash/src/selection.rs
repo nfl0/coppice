@@ -8,6 +8,7 @@ pub struct SelectedBondNote {
     pub output_id: crate::IronwoodOutputId,
     pub value_zat: u64,
     pub bond_tag: [u8; 32],
+    pub position: u32,
 }
 
 /// Registration-specific freshness supplied by the future witness/chain
@@ -52,6 +53,9 @@ pub fn select_bond_note(
             && freshness.accepts(note)
             && !note.locked
     }) {
+        let Some(position) = note.position else {
+            continue;
+        };
         let bond_tag = derive_v1_bond_tag(&note.nullifier).map_err(|source| {
             InventoryError::NonCanonicalNullifier {
                 output_id: note.output_id,
@@ -62,6 +66,7 @@ pub fn select_bond_note(
             output_id: note.output_id,
             value_zat: note.value_zat,
             bond_tag,
+            position,
         };
         if selected
             .map(|current| {
@@ -226,5 +231,6 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(selected.output_id, at_floor.output_id);
+        assert_eq!(selected.position, 7);
     }
 }

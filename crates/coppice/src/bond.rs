@@ -6,7 +6,9 @@ use crate::{
     spent::{domain_field, native_hash, spent_tag},
 };
 use halo2_proofs::{
-    plonk::{SingleVerifier, VerifyingKey, create_proof, keygen_pk, keygen_vk, verify_proof},
+    plonk::{
+        ProvingKey, SingleVerifier, VerifyingKey, create_proof, keygen_pk, keygen_vk, verify_proof,
+    },
     poly::commitment::Params,
     transcript::{Blake2bRead, Blake2bWrite, Challenge255},
 };
@@ -44,6 +46,17 @@ pub const FIXTURE_MINIMUM: u64 = constants::MINIMUM_BOND_VALUE;
 /// Private wallet material needed to prove a registration bond. Wallets obtain
 /// the note and Merkle path from their ordinary Ironwood wallet state.
 pub struct RegistrationBondWitness {
+    pub note: Note,
+    pub full_viewing_key: FullViewingKey,
+    pub spend_authorizing_key: SpendAuthorizingKey,
+    pub merkle_path: MerklePath,
+}
+
+/// Private wallet material for the dedicated Coppice v1 proof relation.
+///
+/// This intentionally has no `Debug` implementation because it contains spend
+/// authorization material.
+pub struct V1BondWitness {
     pub note: Note,
     pub full_viewing_key: FullViewingKey,
     pub spend_authorizing_key: SpendAuthorizingKey,
@@ -267,6 +280,11 @@ impl V1BondPublicInputs {
     fn as_slice(&self) -> &[pallas::Base] {
         &self.values
     }
+
+    /// Returns the canonical public field encodings in protocol order.
+    pub fn canonical_encodings(&self) -> [[u8; 32]; 7] {
+        self.values.map(|value| value.to_repr())
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -281,23 +299,29 @@ pub struct V1BondVerifier {
     verifier_id: [u8; 32],
 }
 
+fn v1_key_material()
+-> Result<(Params<vesta::Affine>, VerifyingKey<vesta::Affine>, [u8; 32]), V1BondVerifierError> {
+    let params = Params::<vesta::Affine>::new(COPPICE_BOND_K);
+    let circuit = CoppiceBondCircuit::verifier_only(v1_bond_tag_domain_field());
+    let verifying_key =
+        keygen_vk(&params, &circuit).map_err(|_| V1BondVerifierError::KeyConstruction)?;
+    let artifact = format!("{:?}", verifying_key.pinned()).into_bytes();
+    let verifier_id: [u8; 32] = blake2b_simd::Params::new()
+        .hash_length(32)
+        .personal(b"CoppiceBondV1")
+        .hash(&artifact)
+        .as_bytes()
+        .try_into()
+        .expect("32-byte verifier identity");
+    if verifier_id != V1_BOND_VK_ID {
+        return Err(V1BondVerifierError::VerifierIdentityMismatch);
+    }
+    Ok((params, verifying_key, verifier_id))
+}
+
 impl V1BondVerifier {
     pub fn new() -> Result<Self, V1BondVerifierError> {
-        let params = Params::<vesta::Affine>::new(COPPICE_BOND_K);
-        let circuit = CoppiceBondCircuit::verifier_only(v1_bond_tag_domain_field());
-        let verifying_key =
-            keygen_vk(&params, &circuit).map_err(|_| V1BondVerifierError::KeyConstruction)?;
-        let artifact = format!("{:?}", verifying_key.pinned()).into_bytes();
-        let verifier_id: [u8; 32] = blake2b_simd::Params::new()
-            .hash_length(32)
-            .personal(b"CoppiceBondV1")
-            .hash(&artifact)
-            .as_bytes()
-            .try_into()
-            .expect("32-byte verifier identity");
-        if verifier_id != V1_BOND_VK_ID {
-            return Err(V1BondVerifierError::VerifierIdentityMismatch);
-        }
+        let (params, verifying_key, verifier_id) = v1_key_material()?;
         Ok(Self {
             params,
             verifying_key,
@@ -315,6 +339,171 @@ impl V1BondVerifier {
 
     pub fn verify_v1_bond_proof(&self, proof: &[u8], inputs: &V1BondPublicInputs) -> bool {
         verify(&self.params, &self.verifying_key, proof, inputs.as_slice())
+    }
+}
+
+/// Public output of dedicated v1 bond proving. No private note or key material
+/// is retained here.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct V1BondProof {
+    pub proof: Vec<u8>,
+    pub anchor: [u8; 32],
+    pub bond_tag: [u8; 32],
+    pub position: u32,
+    pub position_floor: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum V1BondProverError {
+    InvalidDeployment,
+    InvalidName,
+    InvalidAddress,
+    InvalidOwnerKey,
+    KeyConstruction,
+    VerifierIdentityMismatch,
+    FullViewingKeyMismatch,
+    SpendAuthorityMismatch,
+    BondTagMismatch,
+    ValueBelowMinimum,
+    PositionBelowFloor,
+    AnchorMismatch,
+    InvalidPublicInputs,
+    ProvingFailed,
+    SelfVerificationFailed,
+    ProofTooLarge { size: usize, maximum: usize },
+}
+
+pub struct V1BondProver {
+    params: Params<vesta::Affine>,
+    proving_key: ProvingKey<vesta::Affine>,
+    verifier_id: [u8; 32],
+}
+
+impl V1BondProver {
+    pub fn new() -> Result<Self, V1BondProverError> {
+        let (params, verifying_key, verifier_id) =
+            v1_key_material().map_err(|error| match error {
+                V1BondVerifierError::KeyConstruction => V1BondProverError::KeyConstruction,
+                V1BondVerifierError::VerifierIdentityMismatch => {
+                    V1BondProverError::VerifierIdentityMismatch
+                }
+            })?;
+        let circuit = CoppiceBondCircuit::verifier_only(v1_bond_tag_domain_field());
+        let proving_key = keygen_pk(&params, verifying_key, &circuit)
+            .map_err(|_| V1BondProverError::KeyConstruction)?;
+        Ok(Self {
+            params,
+            proving_key,
+            verifier_id,
+        })
+    }
+
+    pub fn k(&self) -> u32 {
+        COPPICE_BOND_K
+    }
+
+    pub fn verifier_id(&self) -> [u8; 32] {
+        self.verifier_id
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn prove_v1_bond<R: RngCore + CryptoRng>(
+        &self,
+        witness: V1BondWitness,
+        deployment: &DeploymentParameters,
+        name: &str,
+        canonical_address: &[u8],
+        owner_pk: [u8; 32],
+        expected_bond_tag: [u8; 32],
+        expected_anchor: [u8; 32],
+        position_floor: u32,
+        rng: R,
+    ) -> Result<V1BondProof, V1BondProverError> {
+        deployment
+            .validate()
+            .map_err(|_| V1BondProverError::InvalidDeployment)?;
+        if !crate::envelope::valid_name(name) {
+            return Err(V1BondProverError::InvalidName);
+        }
+        let canonical_address = crate::reveal::canonical_v1_address(canonical_address, deployment)
+            .map_err(|_| V1BondProverError::InvalidAddress)?;
+        let owner_key = crate::owner::parse_owner_key(owner_pk)
+            .map_err(|_| V1BondProverError::InvalidOwnerKey)?;
+        if owner_key.is_identity() {
+            return Err(V1BondProverError::InvalidOwnerKey);
+        }
+
+        let V1BondWitness {
+            note,
+            full_viewing_key,
+            spend_authorizing_key,
+            merkle_path,
+        } = witness;
+        let note_value = note.value().inner();
+        if note_value < deployment.minimum_bond_value {
+            return Err(V1BondProverError::ValueBelowMinimum);
+        }
+        let position = merkle_path.position();
+        if position < position_floor {
+            return Err(V1BondProverError::PositionBelowFloor);
+        }
+        let nf = note.nullifier(&full_viewing_key);
+        let derived_tag = derive_v1_bond_tag(&nf.to_bytes())
+            .map_err(|_| V1BondProverError::InvalidPublicInputs)?;
+        if derived_tag != expected_bond_tag {
+            return Err(V1BondProverError::BondTagMismatch);
+        }
+        let cmx = orchard::note::ExtractedNoteCommitment::from(note.commitment());
+        if merkle_path.root(cmx).to_bytes() != expected_anchor {
+            return Err(V1BondProverError::AnchorMismatch);
+        }
+        let expected_ak: orchard::keys::SpendValidatingKey = (&spend_authorizing_key).into();
+        let note_ak: orchard::keys::SpendValidatingKey = full_viewing_key.clone().into();
+        let spend = SpendInfo::new(full_viewing_key, note, merkle_path)
+            .ok_or(V1BondProverError::FullViewingKeyMismatch)?;
+        if expected_ak != note_ak {
+            return Err(V1BondProverError::SpendAuthorityMismatch);
+        }
+        let public_inputs = V1BondPublicInputs::from_runtime_facts(
+            deployment,
+            expected_anchor,
+            position_floor,
+            name,
+            &canonical_address,
+            owner_pk,
+            expected_bond_tag,
+        )
+        .map_err(|_| V1BondProverError::InvalidPublicInputs)?;
+        let values = public_inputs.as_slice();
+        let circuit = CoppiceBondCircuit::from_spend(
+            spend,
+            spend_authorizing_key,
+            deployment.minimum_bond_value,
+            values[3],
+            values[4],
+            values[5],
+            position_floor,
+            v1_bond_tag_domain_field(),
+        )
+        .ok_or(V1BondProverError::SpendAuthorityMismatch)?;
+        let proof = prove_with_rng(&self.params, &self.proving_key, circuit, values, rng)
+            .map_err(|_| V1BondProverError::ProvingFailed)?;
+        if proof.len() > constants::MAX_BOND_PROOF_LEN {
+            return Err(V1BondProverError::ProofTooLarge {
+                size: proof.len(),
+                maximum: constants::MAX_BOND_PROOF_LEN,
+            });
+        }
+        if !verify(&self.params, self.proving_key.get_vk(), &proof, values) {
+            return Err(V1BondProverError::SelfVerificationFailed);
+        }
+        Ok(V1BondProof {
+            proof,
+            anchor: expected_anchor,
+            bond_tag: expected_bond_tag,
+            position,
+            position_floor,
+        })
     }
 }
 
@@ -933,6 +1122,47 @@ mod tests {
             .unwrap()
     }
 
+    fn fixture_deployment() -> DeploymentParameters {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../test-vectors/deployment.json")).unwrap();
+        let input = &fixture["input"];
+        DeploymentParameters {
+            network_id: hex::decode(input["network_id_hex"].as_str().unwrap()).unwrap(),
+            address_network: zcash_protocol::consensus::NetworkType::Regtest,
+            activation_height: input["activation_height"].as_u64().unwrap() as u32,
+            minimum_bond_value: input["minimum_bond_value"].as_u64().unwrap(),
+            commit_ttl_blocks: input["commit_ttl_blocks"].as_u64().unwrap() as u32,
+            reuse_delay_blocks: input["reuse_delay_blocks"].as_u64().unwrap() as u32,
+            bond_note_max_age_blocks: input["bond_note_max_age_blocks"].as_u64().unwrap() as u32,
+            rendezvous: Rendezvous {
+                orchard_ivk: hex::decode(input["rendezvous_ivk_hex"].as_str().unwrap())
+                    .unwrap()
+                    .try_into()
+                    .unwrap(),
+                orchard_receiver: hex::decode(input["rendezvous_receiver_hex"].as_str().unwrap())
+                    .unwrap()
+                    .try_into()
+                    .unwrap(),
+            },
+        }
+    }
+
+    fn v1_witness_facts(witness: &RegistrationBondWitness) -> ([u8; 32], [u8; 32]) {
+        let tag = derive_v1_bond_tag(&witness.note.nullifier(&witness.full_viewing_key).to_bytes())
+            .unwrap();
+        let cmx = orchard::note::ExtractedNoteCommitment::from(witness.note.commitment());
+        (tag, witness.merkle_path.root(cmx).to_bytes())
+    }
+
+    fn into_v1_witness(witness: RegistrationBondWitness) -> V1BondWitness {
+        V1BondWitness {
+            note: witness.note,
+            full_viewing_key: witness.full_viewing_key,
+            spend_authorizing_key: witness.spend_authorizing_key,
+            merkle_path: witness.merkle_path,
+        }
+    }
+
     #[test]
     fn v1_binding_domains_are_exact() {
         assert_eq!(V1_PROTOCOL_DOMAIN, "CoppiceProtoV1");
@@ -1385,6 +1615,221 @@ mod tests {
         let mut corrupted = proof;
         corrupted[0] ^= 1;
         assert!(!verifier.verify_v1_bond_proof(&corrupted, &inputs));
+    }
+
+    #[test]
+    fn production_v1_prover_matches_frozen_statement_and_proof_shape() {
+        let frozen: serde_json::Value =
+            serde_json::from_str(include_str!("../../../test-vectors/coppice_bond_v1.json"))
+                .unwrap();
+        let deployment = fixture_deployment();
+        let address = dedicated_v1_fixture_address();
+        let owner = crate::owner::owner_key_bytes(
+            &(&crate::owner::OwnerSigningKey::try_from([1; 32]).unwrap()).into(),
+        );
+        let witness = fixture_witness(FIXTURE_VALUE, false, None, b"minimal-bond", 1).unwrap();
+        let (tag, anchor) = v1_witness_facts(&witness);
+        let inputs = V1BondPublicInputs::from_runtime_facts(
+            &deployment,
+            anchor,
+            1,
+            "bonded",
+            address.as_bytes(),
+            owner,
+            tag,
+        )
+        .unwrap();
+        let expected: [[u8; 32]; 7] = frozen["public_inputs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|input| {
+                hex::decode(input["value"].as_str().unwrap())
+                    .unwrap()
+                    .try_into()
+                    .unwrap()
+            })
+            .collect::<Vec<_>>()
+            .try_into()
+            .unwrap();
+        assert_eq!(inputs.canonical_encodings(), expected);
+
+        let prover = V1BondProver::new().unwrap();
+        assert_eq!(prover.k(), 11);
+        assert_eq!(prover.verifier_id(), V1_BOND_VK_ID);
+        let proof = prover
+            .prove_v1_bond(
+                into_v1_witness(witness),
+                &deployment,
+                "bonded",
+                address.as_bytes(),
+                owner,
+                tag,
+                anchor,
+                1,
+                ChaCha20Rng::from_seed([42; 32]),
+            )
+            .unwrap();
+        assert_eq!(proof.proof.len(), 4_960);
+        let verifier = V1BondVerifier::new().unwrap();
+        assert!(verifier.verify_v1_bond_proof(&proof.proof, &inputs));
+        for index in 0..7 {
+            let mut mutated = expected;
+            let value = Option::<pallas::Base>::from(pallas::Base::from_repr(mutated[index]))
+                .unwrap()
+                + pallas::Base::one();
+            mutated[index] = value.to_repr();
+            let mutated = V1BondPublicInputs::from_canonical_encodings(mutated).unwrap();
+            assert!(!verifier.verify_v1_bond_proof(&proof.proof, &mutated));
+        }
+        let frozen_proof = hex::decode(frozen["accepted_proof"].as_str().unwrap()).unwrap();
+        assert!(verifier.verify_v1_bond_proof(&frozen_proof, &inputs));
+    }
+
+    #[test]
+    fn production_v1_prover_rejects_invalid_facts_before_proving() {
+        let prover = V1BondProver::new().unwrap();
+        let deployment = fixture_deployment();
+        let address = dedicated_v1_fixture_address();
+        let owner = crate::owner::owner_key_bytes(
+            &(&crate::owner::OwnerSigningKey::try_from([1; 32]).unwrap()).into(),
+        );
+        let prove = |witness: RegistrationBondWitness,
+                     name: &str,
+                     address: &[u8],
+                     owner: [u8; 32],
+                     tag: [u8; 32],
+                     anchor: [u8; 32],
+                     floor: u32| {
+            prover.prove_v1_bond(
+                into_v1_witness(witness),
+                &deployment,
+                name,
+                address,
+                owner,
+                tag,
+                anchor,
+                floor,
+                ChaCha20Rng::from_seed([9; 32]),
+            )
+        };
+
+        let witness = fixture_witness(FIXTURE_VALUE, false, None, b"tag", 1).unwrap();
+        let (tag, anchor) = v1_witness_facts(&witness);
+        let mut wrong_tag = tag;
+        wrong_tag[0] ^= 1;
+        assert!(matches!(
+            prove(
+                witness,
+                "bonded",
+                address.as_bytes(),
+                owner,
+                wrong_tag,
+                anchor,
+                1
+            ),
+            Err(V1BondProverError::BondTagMismatch)
+        ));
+
+        let witness = fixture_witness(FIXTURE_VALUE, false, None, b"anchor", 1).unwrap();
+        let (tag, mut anchor) = v1_witness_facts(&witness);
+        anchor[0] ^= 1;
+        assert!(matches!(
+            prove(witness, "bonded", address.as_bytes(), owner, tag, anchor, 1),
+            Err(V1BondProverError::AnchorMismatch)
+        ));
+
+        let witness = fixture_witness(FIXTURE_MINIMUM - 1, false, None, b"value", 1).unwrap();
+        let (tag, anchor) = v1_witness_facts(&witness);
+        assert!(matches!(
+            prove(witness, "bonded", address.as_bytes(), owner, tag, anchor, 1),
+            Err(V1BondProverError::ValueBelowMinimum)
+        ));
+
+        let witness = fixture_witness(FIXTURE_VALUE, false, None, b"floor", 1).unwrap();
+        let (tag, anchor) = v1_witness_facts(&witness);
+        assert!(matches!(
+            prove(witness, "bonded", address.as_bytes(), owner, tag, anchor, 2),
+            Err(V1BondProverError::PositionBelowFloor)
+        ));
+
+        let other_sk = Option::<SpendingKey>::from(SpendingKey::from_bytes([8; 32])).unwrap();
+        let wrong_ask = SpendAuthorizingKey::from(&other_sk);
+        let witness =
+            fixture_witness(FIXTURE_VALUE, false, Some(wrong_ask), b"wrong-ask", 1).unwrap();
+        let (tag, anchor) = v1_witness_facts(&witness);
+        assert!(matches!(
+            prove(witness, "bonded", address.as_bytes(), owner, tag, anchor, 1),
+            Err(V1BondProverError::SpendAuthorityMismatch)
+        ));
+
+        let mut witness = fixture_witness(FIXTURE_VALUE, false, None, b"wrong-fvk", 1).unwrap();
+        witness.full_viewing_key = FullViewingKey::from(&other_sk);
+        let (tag, anchor) = v1_witness_facts(&witness);
+        assert!(matches!(
+            prove(witness, "bonded", address.as_bytes(), owner, tag, anchor, 1),
+            Err(V1BondProverError::FullViewingKeyMismatch)
+        ));
+
+        for (name, candidate_address, candidate_owner, expected) in [
+            (
+                "Invalid",
+                address.as_bytes(),
+                owner,
+                V1BondProverError::InvalidName,
+            ),
+            (
+                "bonded",
+                b"not-an-address".as_slice(),
+                owner,
+                V1BondProverError::InvalidAddress,
+            ),
+            (
+                "bonded",
+                address.as_bytes(),
+                [0; 32],
+                V1BondProverError::InvalidOwnerKey,
+            ),
+        ] {
+            let witness = fixture_witness(FIXTURE_VALUE, false, None, name.as_bytes(), 1).unwrap();
+            let (tag, anchor) = v1_witness_facts(&witness);
+            assert_eq!(
+                prove(
+                    witness,
+                    name,
+                    candidate_address,
+                    candidate_owner,
+                    tag,
+                    anchor,
+                    1
+                ),
+                Err(expected)
+            );
+        }
+
+        let mainnet_address = unified::Address::try_from_items(vec![unified::Receiver::Orchard(
+            deployment.rendezvous.orchard_receiver,
+        )])
+        .unwrap()
+        .encode(&zcash_protocol::consensus::NetworkType::Main);
+        let witness = fixture_witness(FIXTURE_VALUE, false, None, b"network", 1).unwrap();
+        let (tag, anchor) = v1_witness_facts(&witness);
+        assert!(matches!(
+            prove(
+                witness,
+                "bonded",
+                mainnet_address.as_bytes(),
+                owner,
+                tag,
+                anchor,
+                1
+            ),
+            Err(V1BondProverError::InvalidAddress)
+        ));
+
+        let witness = fixture_witness(FIXTURE_VALUE, false, None, b"equal", 1).unwrap();
+        let (tag, anchor) = v1_witness_facts(&witness);
+        assert!(prove(witness, "bonded", address.as_bytes(), owner, tag, anchor, 1).is_ok());
     }
 
     #[test]
