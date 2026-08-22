@@ -3,7 +3,7 @@
 //! This module performs no fork choice. [`CanonicalBlockSource`] exposes the
 //! history the host has already selected as canonical.
 
-use std::{collections::BTreeMap, fmt::Debug};
+use std::fmt::Debug;
 
 use coppice::reducer_v1::{ReplayTip, RewindError, V1Reducer};
 use zcash_client_backend::proto::compact_formats::CompactBlock;
@@ -81,29 +81,23 @@ fn block_identity(block: &CompactBlock, requested_height: u32) -> Option<Canonic
     (height == requested_height).then_some(CanonicalTip { height, block_hash })
 }
 
-fn checked_block<'a, C, F>(
+fn checked_block<C, F>(
     source: &mut C,
     height: u32,
-    cache: &'a mut BTreeMap<u32, CompactBlock>,
-) -> Result<&'a CompactBlock, ReconcileError<C::Error, F>>
+) -> Result<CompactBlock, ReconcileError<C::Error, F>>
 where
     C: CanonicalBlockSource,
     C::Error: Debug,
     F: Debug,
 {
-    if !cache.contains_key(&height) {
-        let block = source
-            .compact_block(height)
-            .map_err(ReconcileError::CanonicalBlockSource)?
-            .ok_or(ReconcileError::MissingCanonicalBlock { height })?;
-        block_identity(&block, height).ok_or(ReconcileError::InvalidCanonicalIdentity {
-            requested_height: height,
-        })?;
-        cache.insert(height, block);
-    }
-    cache
-        .get(&height)
-        .ok_or(ReconcileError::MissingCanonicalBlock { height })
+    let block = source
+        .compact_block(height)
+        .map_err(ReconcileError::CanonicalBlockSource)?
+        .ok_or(ReconcileError::MissingCanonicalBlock { height })?;
+    block_identity(&block, height).ok_or(ReconcileError::InvalidCanonicalIdentity {
+        requested_height: height,
+    })?;
+    Ok(block)
 }
 
 fn canonical_hash_at<C, F>(
@@ -111,7 +105,6 @@ fn canonical_hash_at<C, F>(
     observed_tip: CanonicalTip,
     activation_height: u32,
     height: u32,
-    cache: &mut BTreeMap<u32, CompactBlock>,
 ) -> Result<[u8; 32], ReconcileError<C::Error, F>>
 where
     C: CanonicalBlockSource,
@@ -127,14 +120,14 @@ where
     if height == activation_base {
         // Never request a pre-activation CompactBlock. The activation block's
         // predecessor identifies the host-selected activation base.
-        let block = checked_block::<C, F>(source, activation_height, cache)?;
+        let block = checked_block::<C, F>(source, activation_height)?;
         return block.prev_hash.as_slice().try_into().map_err(|_| {
             ReconcileError::InvalidCanonicalIdentity {
                 requested_height: activation_height,
             }
         });
     }
-    checked_block::<C, F>(source, height, cache)?
+    checked_block::<C, F>(source, height)?
         .hash
         .as_slice()
         .try_into()
@@ -179,15 +172,12 @@ where
     let activation_base = activation_height
         .checked_sub(1)
         .ok_or(ReconcileError::ArithmeticOverflow)?;
-    let mut cache = BTreeMap::new();
-
     let local_is_ancestor = if original_tip.height < observed_host_tip.height {
         canonical_hash_at::<C, F::Error>(
             canonical_source,
             observed_host_tip,
             activation_height,
             original_tip.height,
-            &mut cache,
         )? == original_tip.block_hash
     } else {
         false
@@ -208,7 +198,6 @@ where
                 observed_host_tip,
                 activation_height,
                 height,
-                &mut cache,
             )?;
             if local.block_hash == canonical_hash {
                 common = Some(local);
@@ -234,21 +223,23 @@ where
         .ok_or(ReconcileError::ArithmeticOverflow)?;
     if start <= observed_host_tip.height {
         for height in start..=observed_host_tip.height {
-            let block = checked_block::<C, F::Error>(canonical_source, height, &mut cache)?;
+            // Ownership is deliberately per iteration: after application this
+            // protobuf block is dropped before the next height is fetched.
+            let block = checked_block::<C, F::Error>(canonical_source, height)?;
             if height == observed_host_tip.height
-                && block_identity(block, height).map(|id| id.block_hash)
+                && block_identity(&block, height).map(|id| id.block_hash)
                     != Some(observed_host_tip.block_hash)
             {
                 return Err(ReconcileError::CanonicalHistoryChanged {
                     observed: observed_host_tip,
-                    current: block_identity(block, height).ok_or(
+                    current: block_identity(&block, height).ok_or(
                         ReconcileError::InvalidCanonicalIdentity {
                             requested_height: height,
                         },
                     )?,
                 });
             }
-            apply_compact_block(params, reducer, block, full_tx_source)
+            apply_compact_block(params, reducer, &block, full_tx_source)
                 .map_err(|error| ReconcileError::CompactBlockApply { height, error })?;
             blocks_applied = blocks_applied
                 .checked_add(1)
@@ -259,11 +250,28 @@ where
     let current_host_tip = canonical_source
         .canonical_tip()
         .map_err(ReconcileError::CanonicalBlockSource)?;
-    if current_host_tip != observed_host_tip {
+    if current_host_tip.height < observed_host_tip.height {
         return Err(ReconcileError::CanonicalHistoryChanged {
             observed: observed_host_tip,
             current: current_host_tip,
         });
+    }
+    if current_host_tip != observed_host_tip {
+        let current_observed_hash = canonical_hash_at::<C, F::Error>(
+            canonical_source,
+            current_host_tip,
+            activation_height,
+            observed_host_tip.height,
+        )?;
+        if current_observed_hash != observed_host_tip.block_hash {
+            return Err(ReconcileError::CanonicalHistoryChanged {
+                observed: observed_host_tip,
+                current: CanonicalTip {
+                    height: observed_host_tip.height,
+                    block_hash: current_observed_hash,
+                },
+            });
+        }
     }
 
     Ok(ReconcileOutcome {
@@ -439,6 +447,7 @@ mod tests {
         blocks: BTreeMap<u32, CompactBlock>,
         initial_tip: CanonicalTip,
         later_tip: Option<CanonicalTip>,
+        later_blocks: Option<BTreeMap<u32, CompactBlock>>,
         tip_calls: usize,
         block_calls: Vec<u32>,
         fail_at: Option<u32>,
@@ -450,6 +459,7 @@ mod tests {
                 blocks,
                 initial_tip: tip,
                 later_tip: None,
+                later_blocks: None,
                 tip_calls: 0,
                 block_calls: vec![],
                 fail_at: None,
@@ -475,7 +485,12 @@ mod tests {
             if self.fail_at == Some(height) {
                 return Err(SourceError::Failed(height));
             }
-            Ok(self.blocks.get(&height).cloned())
+            let blocks = if self.tip_calls >= 2 {
+                self.later_blocks.as_ref().unwrap_or(&self.blocks)
+            } else {
+                &self.blocks
+            };
+            Ok(blocks.get(&height).cloned())
         }
     }
 
@@ -549,7 +564,7 @@ mod tests {
             reconcile_canonical_chain(&params(), &mut reducer, &mut source, &mut full).unwrap();
         assert_eq!(outcome.kind, ReconcileKind::Forward);
         assert_eq!(outcome.blocks_applied, 3);
-        assert_eq!(source.block_calls, vec![1, 2, 3]);
+        assert_eq!(source.block_calls, vec![1, 1, 2, 3]);
         assert!(!source.block_calls.contains(&0));
         assert_eq!(reducer.tip().height, 3);
         assert_eq!(reducer.ironwood_frontier().size(), 3);
@@ -732,12 +747,44 @@ mod tests {
     }
 
     #[test]
-    fn host_tip_change_is_explicit_after_bounded_pass() {
+    fn benign_host_tip_advancement_keeps_the_completed_pass_successful() {
         let history = chain(&[(1, 1, 121)]);
         let mut reducer = new_reducer();
-        let mut source = Source::new(history, tip(1, 1));
+        let mut source = Source::new(history.clone(), tip(1, 1));
         source.later_tip = Some(tip(2, 2));
         let mut full = FullSource::default();
+        let outcome =
+            reconcile_canonical_chain(&params(), &mut reducer, &mut source, &mut full).unwrap();
+        assert_eq!(outcome.observed_host_tip, tip(1, 1));
+        assert_eq!(reducer.tip().height, 1);
+        assert!(!source.block_calls.contains(&2));
+    }
+
+    #[test]
+    fn observed_tip_reorg_and_host_rollback_are_explicit() {
+        let initial = chain(&[(1, 1, 122)]);
+        let replacement = chain(&[(1, 10, 123), (2, 20, 124)]);
+        let mut reducer = new_reducer();
+        let mut source = Source::new(initial, tip(1, 1));
+        source.later_tip = Some(tip(2, 20));
+        source.later_blocks = Some(replacement);
+        let mut full = FullSource::default();
+        assert!(matches!(
+            reconcile_canonical_chain(&params(), &mut reducer, &mut source, &mut full),
+            Err(ReconcileError::CanonicalHistoryChanged { .. })
+        ));
+        assert_eq!(
+            reducer.tip(),
+            ReplayTip {
+                height: 1,
+                block_hash: [1; 32]
+            }
+        );
+
+        let initial = chain(&[(1, 1, 125)]);
+        let mut reducer = new_reducer();
+        let mut source = Source::new(initial, tip(1, 1));
+        source.later_tip = Some(tip(0, 9));
         assert!(matches!(
             reconcile_canonical_chain(&params(), &mut reducer, &mut source, &mut full),
             Err(ReconcileError::CanonicalHistoryChanged { .. })
@@ -763,5 +810,97 @@ mod tests {
         ));
         assert_eq!(full.calls, 1);
         assert_eq!(reducer.tip().height, 0);
+    }
+
+    #[test]
+    fn long_forward_replay_fetches_and_applies_one_height_at_a_time() {
+        let mut history = BTreeMap::new();
+        let mut prev = [9; 32];
+        for height in 1..=200u32 {
+            let hash = height as u8;
+            history.insert(height, block(height, hash, prev, hash));
+            prev = [hash; 32];
+        }
+        let mut reducer = new_reducer();
+        let mut source = Source::new(history, tip(200, 200));
+        let mut full = FullSource::default();
+        let outcome =
+            reconcile_canonical_chain(&params(), &mut reducer, &mut source, &mut full).unwrap();
+        assert_eq!(outcome.blocks_applied, 200);
+        assert_eq!(reducer.ironwood_frontier().size(), 200);
+        // The activation block is intentionally refetched after base-identity
+        // discovery; every replay iteration then owns only its current block.
+        assert_eq!(source.block_calls.len(), 201);
+        assert_eq!(&source.block_calls[..3], &[1, 1, 2]);
+        assert_eq!(source.block_calls.last(), Some(&200));
+    }
+
+    #[test]
+    fn malformed_source_identity_errors_are_typed_and_panic_free() {
+        let mut full = FullSource::default();
+
+        let mut reducer = new_reducer();
+        let before = reducer.tip();
+        let mut missing = Source::new(BTreeMap::new(), tip(1, 1));
+        assert!(matches!(
+            reconcile_canonical_chain(&params(), &mut reducer, &mut missing, &mut full),
+            Err(ReconcileError::MissingCanonicalBlock { height: 1 })
+        ));
+        assert_eq!(reducer.tip(), before);
+
+        let mut wrong_height_blocks = chain(&[(1, 1, 161)]);
+        wrong_height_blocks.get_mut(&1).unwrap().height = 2;
+        let mut wrong_height = Source::new(wrong_height_blocks, tip(1, 1));
+        assert!(matches!(
+            reconcile_canonical_chain(&params(), &mut reducer, &mut wrong_height, &mut full),
+            Err(ReconcileError::InvalidCanonicalIdentity {
+                requested_height: 1
+            })
+        ));
+
+        let mut bad_hash_blocks = chain(&[(1, 1, 162)]);
+        bad_hash_blocks.get_mut(&1).unwrap().hash = vec![0; 31];
+        let mut bad_hash = Source::new(bad_hash_blocks, tip(1, 1));
+        assert!(matches!(
+            reconcile_canonical_chain(&params(), &mut reducer, &mut bad_hash, &mut full),
+            Err(ReconcileError::InvalidCanonicalIdentity {
+                requested_height: 1
+            })
+        ));
+
+        let mut bad_prev_blocks = chain(&[(1, 1, 163)]);
+        bad_prev_blocks.get_mut(&1).unwrap().prev_hash = vec![0; 31];
+        let mut bad_prev = Source::new(bad_prev_blocks, tip(1, 1));
+        assert!(matches!(
+            reconcile_canonical_chain(&params(), &mut reducer, &mut bad_prev, &mut full),
+            Err(ReconcileError::InvalidCanonicalIdentity {
+                requested_height: 1
+            })
+        ));
+        assert_eq!(reducer.tip(), before);
+        assert_eq!(full.calls, 0);
+    }
+
+    #[test]
+    fn missing_block_after_rewind_keeps_canonical_progress() {
+        let old = chain(&[(1, 1, 171), (2, 2, 172), (3, 3, 173)]);
+        let mut replacement = chain(&[(1, 1, 171), (2, 12, 182), (3, 13, 183), (4, 14, 184)]);
+        replacement.remove(&4);
+        let mut reducer = new_reducer();
+        apply_history(&mut reducer, &old);
+        let mut source = Source::new(replacement, tip(4, 14));
+        let mut full = FullSource::default();
+        assert!(matches!(
+            reconcile_canonical_chain(&params(), &mut reducer, &mut source, &mut full),
+            Err(ReconcileError::MissingCanonicalBlock { height: 4 })
+        ));
+        assert_eq!(
+            reducer.tip(),
+            ReplayTip {
+                height: 3,
+                block_hash: [13; 32]
+            }
+        );
+        assert_eq!(reducer.retained_tip_at(2).unwrap().block_hash, [12; 32]);
     }
 }

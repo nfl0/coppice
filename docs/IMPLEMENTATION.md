@@ -645,6 +645,10 @@ a deeper divergence requires rebuild. Replay starts no earlier than activation,
 is resumable, and is block-atomic rather than one range transaction. Once a
 known-stale suffix has been rewound, a later failure leaves the reducer at the
 last successfully applied canonical block and never restores that stale suffix.
+Historical replay holds only the currently validated CompactBlock, not the full
+catch-up range. A pass targets the canonical tip observed at its start. Normal
+extension beyond that tip does not invalidate success when the observed tip is
+still canonical; a later invocation catches up the newly arrived suffix.
 
 The Orchard/Ironwood builder may randomize Action positions. Wallet carrier
 construction MUST NOT rely on output insertion order to preserve frame order.
