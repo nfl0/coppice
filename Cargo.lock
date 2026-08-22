@@ -329,8 +329,12 @@ name = "coppice-librustzcash"
 version = "0.1.0"
 dependencies = [
  "coppice",
+ "incrementalmerkletree",
+ "orchard",
  "zcash_client_backend",
+ "zcash_keys",
  "zcash_protocol",
+ "zip32",
 ]
 
 [[package]]
@@ -2003,6 +2007,7 @@ dependencies = [
  "memuse",
  "nonempty",
  "orchard",
+ "pasta_curves",
  "percent-encoding",
  "prost",
  "rand_core",

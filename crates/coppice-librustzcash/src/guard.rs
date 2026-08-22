@@ -297,7 +297,6 @@ mod tests {
             position: Some(u32::from(id)),
             locked: false,
             spendable: true,
-            freshness_eligible: true,
         }
     }
 

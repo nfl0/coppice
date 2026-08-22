@@ -10,6 +10,7 @@ mod inventory;
 mod locking;
 mod pending;
 mod selection;
+mod source;
 
 pub use guard::{
     CoppiceProtectionMode, HostCanonicalTipSource, SpendGuardError, WalletCanonicalTip,
@@ -30,7 +31,10 @@ pub use pending::{
     PendingRegistrationTransitionError, PendingRegistrationValidationError,
     pending_attempt_expired, pending_commit_expired,
 };
-pub use selection::{SelectedBondNote, select_bond_note};
+pub use selection::{FreshnessEligibility, SelectedBondNote, select_bond_note};
+pub use source::{
+    InputSourceIronwoodNoteSource, IronwoodNoteConversionError, IronwoodNoteSourceError,
+};
 
 /// The exact pinned librustzcash lock-owner type used by this adapter.
 pub use zcash_client_backend::wallet::LockOwner;

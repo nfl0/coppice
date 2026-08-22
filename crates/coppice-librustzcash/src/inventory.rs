@@ -61,9 +61,11 @@ pub enum IronwoodViewingCapability {
 /// `LockedInputPolicy::Exclude` is suitable for ordinary input selection, but
 /// is not sufficient for reconstructing Coppice reservations: reconciliation
 /// must see outputs that are already locked. The concrete implementation also
-/// supplies the account, target height, note decryption/nullifier derivation,
-/// and any wallet-specific freshness checks needed to build
-/// [`OwnedIronwoodNote`] values.
+/// supplies the account, target height, and note decryption/nullifier
+/// derivation needed to build [`OwnedIronwoodNote`] values. Registration
+/// freshness is deliberately not part of this inventory boundary; it depends
+/// on the prospective COMMIT context and is supplied to bond-note selection
+/// separately.
 ///
 /// [`InputSource`]: zcash_client_backend::data_api::InputSource
 pub trait OwnedIronwoodNoteSource {
@@ -95,8 +97,6 @@ pub struct OwnedIronwoodNote {
     pub locked: bool,
     /// Whether the host wallet considers the note spendable for a new use.
     pub spendable: bool,
-    /// Explicit witness/chain freshness supplied by a later wallet adapter.
-    pub freshness_eligible: bool,
 }
 
 /// An owned live canonical Coppice bond reconstructed from a note.
@@ -196,7 +196,6 @@ mod tests {
             position: Some(u32::from(id)),
             locked: true,
             spendable: false,
-            freshness_eligible: false,
         }
     }
 
