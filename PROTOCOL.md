@@ -96,7 +96,10 @@ The current bond tag is derived using a Pasta/Halo2-native Poseidon construction
 
 ## Transport
 
-Coppice operations are carried inside ordinary encrypted Zcash memos sent to a deterministic public bulletin receiver.
+Coppice operations are carried inside ordinary encrypted Zcash memos sent to a deployment-specific,
+fixed public rendez-vous Unified Address. Wallets fetch txid-tagged transactions and decrypt the
+bulletin outputs with the matching public Unified Incoming Viewing Key; the UIVK contains no
+spending authority. The local Z3 values are documented in `README.md`.
 
 Large operations are split across multiple memo frames. A txid-prefix tag allows wallets to identify candidate Coppice transactions without trial-decrypting every shielded output.
 

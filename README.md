@@ -30,11 +30,30 @@ carriers in Zcash history.
 `RELEASE` makes it available again; and `TRANSFER_WITH_NEW_BOND` changes ownership while replacing
 the bond. A transfer to the same owner is the canonical rebond operation.
 
-## Status
+## Mainnet Rendez-vous
 
-Experimental reference implementation. The protocol has been exercised with real Zcash
-v6/Ironwood transactions and testnet/regtest tooling, but it is not production software and has
-not received an independent security audit.
+Reserved documentation values only; the current software does not enable a mainnet deployment.
+
+UA:
+`u1nmegh3lae9f2gpunxk2vjmdwcwdjhn2f253qa0dh7y3906qhwqyfwg045lmdldzyg6vaf6gwecn96pzpw7j9eeqca0n7x42z4cwnc5tt`
+UIVK:
+`uivk160lqkxdtmf23gnxanr7glczmvpuyuv737mxxm6770qgrflxmqmz63g5puuexyhwrju5l5jhkrwlumn4krgkmgttuydy5yzhs6ufq6d5yhqu2p2hv6txrhepxp7z93m2f9wsq6jlnms`
+Birthday:
+`TBD at mainnet launch`
+
+## Regtest Rendez-vous
+
+The local Z3 deployment uses a distinct public incoming capability. The strings use the Zcash
+test-network encoding because regtest shares its address network type.
+
+UA:
+`utest124v8xy3mvghl0pnkf46js346xczxqyrzv8dpzqw7f0qtjhq9vgads26eq5e37rjacy58688mymhhltysn8tfgv6m6q3yhxstcyqp3hzv`
+UIVK:
+`uivktest1v89jt8yz8r8wvh0l8x8pkh0cs8ylx9ruer7har0vxstj5xlj9xg43c49tugzcw70yumnfjgedcj6rxads6v430h3my0hhlzkngfhrensvjcfpp5379mlqvpfuel5re4h23zscvkk97`
+
+Every regtest Coppice carrier sends its zero-valued bulletin outputs to this UA. Every replayer
+uses the corresponding public UIVK; neither value grants spending authority.
+
 
 ## Documentation
 

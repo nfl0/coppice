@@ -101,6 +101,12 @@ padding after the declared chunk is all zero. Grinding changes only the transpor
 resulting encrypted memo bytes. It never changes the logical payload, operation ID, payload hash,
 or chunk bytes.
 
+Each deployment fixes one public rendez-vous Unified Address and its matching Unified Incoming
+Viewing Key. Every bulletin output targets the Orchard receiver in that address, and every replayer
+decrypts candidate outputs with the Orchard component of that public UIVK. The rendez-vous key has
+incoming viewing capability only and carries no ownership authority. Mainnet values in `README.md`
+are documentation-only; local Z3 regtest uses the separately documented regtest pair.
+
 All decryptable bulletin frames in one transaction are collected and may appear in any Action
 order. They must agree on operation ID, count, payload length, and payload hash; indexes must be
 exactly `0..count-1` with no duplicate; concatenated length and SHA-256 must match. Exactly one

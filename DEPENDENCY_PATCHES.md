@@ -69,7 +69,9 @@ proof systems, consensus validation, or the behavior of existing callers. Becaus
 sources as distinct dependency sources, `coppice-cli` pins the related librustzcash workspace
 crates to the same fork revision even though only `zcash_client_backend` contains a code change.
 
-The standalone `coppice` protocol crate does not itself patch librustzcash with this commit; the
+The rendez-vous receiver design does not remove this hook: recipient selection and public memo
+decryption are independent of selecting memo-dependent effecting data before authorization. The
+standalone `coppice` protocol crate does not itself patch librustzcash with this commit; the
 patch is needed by wallet transaction construction in `coppice-cli` and by another wallet that
 wants to create ground Coppice carriers through the same high-level proposal API.
 

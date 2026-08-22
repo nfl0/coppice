@@ -115,6 +115,11 @@ impl IncrementalWallet {
         )
     }
 
+    /// Selects the fixed public bulletin rendez-vous for this deployment.
+    pub fn set_rendezvous(&mut self, rendezvous: crate::config::Rendezvous) {
+        self.state.set_rendezvous(rendezvous);
+    }
+
     /// Starts replay from a wallet-authenticated Ironwood frontier at the end
     /// of the block immediately preceding `activation_height`.
     pub fn new_with_ironwood_tree(

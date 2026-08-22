@@ -44,6 +44,7 @@ pub struct ReplayState {
     pub names: CoppiceState,
     pub spent: SpentTagTree,
     pub tag_bits: u8,
+    pub rendezvous: crate::config::Rendezvous,
     accepted_bond_anchors: BTreeSet<[u8; 32]>,
 }
 #[derive(Clone, Debug)]
@@ -57,8 +58,12 @@ impl ReplayState {
             names: CoppiceState::default(),
             spent: SpentTagTree::default(),
             tag_bits,
+            rendezvous: crate::config::TESTNET_V0.rendezvous,
             accepted_bond_anchors: BTreeSet::new(),
         }
+    }
+    pub fn set_rendezvous(&mut self, rendezvous: crate::config::Rendezvous) {
+        self.rendezvous = rendezvous;
     }
     /// Records an Ironwood root independently derived from authenticated chain
     /// history. REGISTER proofs are accepted only against roots in this set.
@@ -115,7 +120,7 @@ pub fn process_transaction(
             outcome: ReplayOutcome::NotCandidate,
         };
     }
-    match crate::carrier::decode_bulletin(tx) {
+    match crate::carrier::decode_bulletin_for(tx, s.rendezvous) {
         Ok(op) => {
             let bond_anchor = match &op {
                 Operation::Reveal { bond_anchor, .. } => Some(bond_anchor),

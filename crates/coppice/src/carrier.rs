@@ -1,6 +1,7 @@
 //! Real (but self-contained) Ironwood carrier construction for the POC.
 use crate::{
     DEFAULT_TAG_BITS,
+    config::Rendezvous,
     envelope::{self, Operation},
 };
 use incrementalmerkletree::Retention;
@@ -83,13 +84,15 @@ fn network() -> zcash_protocol::local_consensus::LocalNetwork {
         nu7: None,
     }
 }
-/// Deterministic, test-only public bulletin IVK. Its notes carry no authority.
-pub fn bulletin_ivk() -> IncomingViewingKey {
-    FullViewingKey::from(&SpendingKey::from_bytes([0x42; 32]).unwrap()).to_ivk(Scope::External)
+/// Returns the deployment's public incoming capability. It contains no spending authority.
+pub fn bulletin_ivk(rendezvous: Rendezvous) -> Result<IncomingViewingKey, Error> {
+    Option::from(IncomingViewingKey::from_bytes(&rendezvous.orchard_ivk)).ok_or(Error::Build)
 }
-pub fn bulletin_address() -> orchard::Address {
-    FullViewingKey::from(&SpendingKey::from_bytes([0x42; 32]).unwrap())
-        .address_at(0u32, Scope::External)
+pub fn bulletin_address(rendezvous: Rendezvous) -> Result<orchard::Address, Error> {
+    Option::from(orchard::Address::from_raw_address_bytes(
+        &rendezvous.orchard_receiver,
+    ))
+    .ok_or(Error::Build)
 }
 fn effects_id(p: Pczt) -> Result<TxId, Error> {
     let e = p.into_effects().map_err(|_| Error::Pczt)?;
@@ -127,19 +130,36 @@ fn candidate(
 /// Builds a real V6 Ironwood transaction. The input note is a POC fixture; it is cryptographically
 /// valid and spends through the normal PCZT flow, but is not a funded chain/regtest wallet note.
 pub fn build_coppice_transaction(op: &Operation, tag_bits: u8) -> Result<BuiltCoppiceTx, Error> {
+    build_coppice_transaction_for(op, tag_bits, crate::config::TESTNET_V0.rendezvous)
+}
+
+pub fn build_coppice_transaction_for(
+    op: &Operation,
+    tag_bits: u8,
+    rendezvous: Rendezvous,
+) -> Result<BuiltCoppiceTx, Error> {
     let payload = envelope::encode_operation(op).map_err(|_| Error::Envelope)?;
-    build_coppice_payload(&payload, tag_bits)
+    build_coppice_payload_for(&payload, tag_bits, rendezvous)
 }
 
 /// Adds Coppice memo frames to pre-authorization Ironwood bulletin outputs in an existing PCZT.
 /// The returned PCZT is still unproved and unsigned.
 pub fn grind_existing_pczt(base: Pczt, op: &Operation, tag_bits: u8) -> Result<GroundPczt, Error> {
+    grind_existing_pczt_for(base, op, tag_bits, crate::config::TESTNET_V0.rendezvous)
+}
+
+pub fn grind_existing_pczt_for(
+    base: Pczt,
+    op: &Operation,
+    tag_bits: u8,
+    rendezvous: Rendezvous,
+) -> Result<GroundPczt, Error> {
     if tag_bits == 0 || tag_bits > 16 {
         return Err(Error::Grind);
     }
     let payload = envelope::encode_operation(op).map_err(|_| Error::Envelope)?;
     let frames = envelope::frames(&payload, 0, 400).map_err(|_| Error::Envelope)?;
-    let recipient = bulletin_address().to_raw_address_bytes();
+    let recipient = bulletin_address(rendezvous)?.to_raw_address_bytes();
     let indexes = base
         .ironwood()
         .actions()
@@ -188,8 +208,17 @@ pub fn grind_serialized_pczt(
     op: &Operation,
     tag_bits: u8,
 ) -> Result<GroundPcztBytes, Error> {
+    grind_serialized_pczt_for(encoded, op, tag_bits, crate::config::TESTNET_V0.rendezvous)
+}
+
+pub fn grind_serialized_pczt_for(
+    encoded: &[u8],
+    op: &Operation,
+    tag_bits: u8,
+    rendezvous: Rendezvous,
+) -> Result<GroundPcztBytes, Error> {
     let base = Pczt::parse(encoded).map_err(|_| Error::Pczt)?;
-    let ground = grind_existing_pczt(base, op, tag_bits)?;
+    let ground = grind_existing_pczt_for(base, op, tag_bits, rendezvous)?;
     Ok(GroundPcztBytes {
         bytes: ground.pczt.serialize().map_err(|_| Error::Pczt)?,
         txid: ground.txid,
@@ -200,6 +229,14 @@ pub fn grind_serialized_pczt(
 
 /// Constructs a valid carrier around arbitrary logical bytes for adversarial scanner fixtures.
 pub fn build_coppice_payload(payload: &[u8], tag_bits: u8) -> Result<BuiltCoppiceTx, Error> {
+    build_coppice_payload_for(payload, tag_bits, crate::config::TESTNET_V0.rendezvous)
+}
+
+pub fn build_coppice_payload_for(
+    payload: &[u8],
+    tag_bits: u8,
+    rendezvous: Rendezvous,
+) -> Result<BuiltCoppiceTx, Error> {
     if tag_bits == 0 || tag_bits > 16 {
         return Err(Error::Grind);
     }
@@ -278,7 +315,7 @@ pub fn build_coppice_payload(payload: &[u8], tag_bits: u8) -> Result<BuiltCoppic
     for _ in &frames {
         b.add_ironwood_output::<zip317::FeeRule>(
             None,
-            bulletin_address(),
+            bulletin_address(rendezvous)?,
             Zatoshis::const_from_u64(BULLETIN_VALUE),
             MemoBytes::empty(),
         )
@@ -385,13 +422,17 @@ pub fn build_coppice_payload(payload: &[u8], tag_bits: u8) -> Result<BuiltCoppic
     })
 }
 pub fn decode_bulletin(tx: &Transaction) -> Result<Operation, Error> {
+    decode_bulletin_for(tx, crate::config::TESTNET_V0.rendezvous)
+}
+
+pub fn decode_bulletin_for(tx: &Transaction, rendezvous: Rendezvous) -> Result<Operation, Error> {
     let b = tx.ironwood_bundle().ok_or(Error::NotFound)?;
+    let ivk = bulletin_ivk(rendezvous)?.prepare();
     let mut frames = Vec::new();
     let mut saw_coppice = false;
     for action in b.actions() {
         let domain = IronwoodDomain::for_action(action);
-        if let Some((_, _, memo)) = try_note_decryption(&domain, &bulletin_ivk().prepare(), action)
-        {
+        if let Some((_, _, memo)) = try_note_decryption(&domain, &ivk, action) {
             if memo.starts_with(crate::DOMAIN) {
                 saw_coppice = true;
                 frames.push(envelope::frame_from_memo(&memo).map_err(|_| Error::Envelope)?);
@@ -423,7 +464,8 @@ mod tests {
             address: b"UA_A".to_vec(),
             secret: [9; 32],
         };
-        let built = build_coppice_transaction(&op, 8).unwrap();
+        let rendezvous = crate::config::REGTEST_V0.rendezvous;
+        let built = build_coppice_transaction_for(&op, 8, rendezvous).unwrap();
         assert!(crate::is_coppice_candidate(&built.txid, 8));
         let mut bytes = Vec::new();
         built.tx.write(&mut bytes).unwrap();
@@ -431,7 +473,11 @@ mod tests {
             Transaction::read(bytes.as_slice(), zcash_protocol::consensus::BranchId::Nu6_3)
                 .unwrap();
         assert_eq!(parsed.txid(), built.txid);
-        assert_eq!(decode_bulletin(&parsed).unwrap(), op);
+        assert_eq!(decode_bulletin_for(&parsed, rendezvous).unwrap(), op);
+        assert!(matches!(
+            decode_bulletin_for(&parsed, crate::config::TESTNET_V0.rendezvous),
+            Err(Error::NotFound)
+        ));
         let effects = crate::ironwood::extract_ironwood_effects(&parsed);
         assert!(!effects.commitments.is_empty());
         assert_eq!(effects.commitments.len(), effects.nullifiers.len());
