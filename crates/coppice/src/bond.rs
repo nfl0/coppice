@@ -1,6 +1,7 @@
 //! First non-recursive private BondCircuit POC, composed from the Orchard Action constraints.
 use crate::{
-    constants,
+    config::{DeploymentParameters, Rendezvous},
+    constants, crypto,
     spent::{domain_field, native_hash, spent_tag},
 };
 use halo2_proofs::{
@@ -86,6 +87,114 @@ fn binding_32(domain: &[u8], bytes: [u8; 32]) -> pallas::Base {
     .hash([lo, hi]);
     native_hash(domain, pair).expect("fixed short domain")
 }
+
+const V1_PROTOCOL_DOMAIN: &str = "CoppiceProtoV1";
+const V1_REGISTRATION_DOMAIN: &str = "CoppiceRegV1";
+const V1_CONTEXT_DOMAIN: &str = "CoppiceCtxV1";
+const V1_OWNER_DOMAIN: &str = "CoppiceOwnerV1";
+const COPPICE_PUBLIC_INPUT_NAMES: [&str; 7] = [
+    "anchor",
+    "minimum_value",
+    "position_floor",
+    "protocol_binding",
+    "context_binding",
+    "owner_binding",
+    "bond_tag",
+];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum V1BindingError {
+    AddressTooLong,
+    Hash(crypto::Error),
+}
+
+fn v1_protocol_binding() -> pallas::Base {
+    binding_32(V1_PROTOCOL_DOMAIN.as_bytes(), dedicated_v1_deployment_id())
+}
+
+fn dedicated_v1_deployment_id() -> [u8; 32] {
+    static DEPLOYMENT_ID: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
+    *DEPLOYMENT_ID.get_or_init(|| {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../test-vectors/deployment.json"))
+                .expect("deployment fixture JSON");
+        let input = &fixture["input"];
+        let parameters = DeploymentParameters {
+            network_id: hex::decode(input["network_id_hex"].as_str().unwrap()).unwrap(),
+            address_network: match input["network_type"].as_str().unwrap() {
+                "Main" => zcash_protocol::consensus::NetworkType::Main,
+                "Test" => zcash_protocol::consensus::NetworkType::Test,
+                "Regtest" => zcash_protocol::consensus::NetworkType::Regtest,
+                other => panic!("unknown network type {other}"),
+            },
+            activation_height: input["activation_height"]
+                .as_u64()
+                .unwrap()
+                .try_into()
+                .unwrap(),
+            minimum_bond_value: input["minimum_bond_value"].as_u64().unwrap(),
+            commit_ttl_blocks: input["commit_ttl_blocks"]
+                .as_u64()
+                .unwrap()
+                .try_into()
+                .unwrap(),
+            reuse_delay_blocks: input["reuse_delay_blocks"]
+                .as_u64()
+                .unwrap()
+                .try_into()
+                .unwrap(),
+            bond_note_max_age_blocks: input["bond_note_max_age_blocks"]
+                .as_u64()
+                .unwrap()
+                .try_into()
+                .unwrap(),
+            rendezvous: Rendezvous {
+                orchard_ivk: hex::decode(input["rendezvous_ivk_hex"].as_str().unwrap())
+                    .unwrap()
+                    .try_into()
+                    .unwrap(),
+                orchard_receiver: hex::decode(input["rendezvous_receiver_hex"].as_str().unwrap())
+                    .unwrap()
+                    .try_into()
+                    .unwrap(),
+            },
+        };
+        let expected: [u8; 32] =
+            hex::decode(fixture["expected_deployment_id_hex"].as_str().unwrap())
+                .unwrap()
+                .try_into()
+                .unwrap();
+        let computed = parameters.deployment_id().expect("deployment fixture ID");
+        assert_eq!(computed, expected, "deployment fixture ID");
+        computed
+    })
+}
+
+fn v1_registration_preimage(name: &str, address: &[u8]) -> Result<Vec<u8>, V1BindingError> {
+    let address_len = u16::try_from(address.len()).map_err(|_| V1BindingError::AddressTooLong)?;
+    let mut preimage = Vec::with_capacity(32 + 2 + address.len());
+    preimage.extend_from_slice(&crate::owner::name_id(name));
+    preimage.extend_from_slice(&address_len.to_be_bytes());
+    preimage.extend_from_slice(address);
+    Ok(preimage)
+}
+
+fn v1_registration_digest(name: &str, address: &[u8]) -> Result<[u8; 32], V1BindingError> {
+    let preimage = v1_registration_preimage(name, address)?;
+    crypto::hash(V1_REGISTRATION_DOMAIN, &preimage).map_err(V1BindingError::Hash)
+}
+
+fn v1_context_binding(name: &str, address: &[u8]) -> Result<pallas::Base, V1BindingError> {
+    Ok(binding_32(
+        V1_CONTEXT_DOMAIN.as_bytes(),
+        v1_registration_digest(name, address)?,
+    ))
+}
+
+fn v1_owner_binding(owner_pk: [u8; 32]) -> pallas::Base {
+    binding_32(V1_OWNER_DOMAIN.as_bytes(), owner_pk)
+}
+
 pub fn context_binding(name: &str, address: &[u8]) -> pallas::Base {
     let mut preimage = constants::BOND_REGISTRATION_DOMAIN.to_vec();
     preimage.extend_from_slice(&crate::owner::name_id(name));
@@ -269,9 +378,9 @@ fn minimal_fixture(
     let anchor = merkle_path.root(cmx);
     let nf = note.nullifier(&full_viewing_key);
     let spend = SpendInfo::new(full_viewing_key, note, merkle_path)?;
-    let protocol = protocol_binding();
-    let context = context_binding(name, address);
-    let owner = owner_binding(owner_pk);
+    let protocol = v1_protocol_binding();
+    let context = v1_context_binding(name, address).ok()?;
+    let owner = v1_owner_binding(owner_pk);
     let circuit = CoppiceBondCircuit::from_spend(
         spend,
         spend_authorizing_key,
@@ -354,16 +463,6 @@ pub fn generate_coppice_bond_vectors(
 ) -> Result<(String, String), String> {
     const PROOF_RNG_SEED: [u8; 32] = [42; 32];
     const FIXTURE_POSITION: u32 = 1;
-    const PUBLIC_INPUT_NAMES: [&str; 7] = [
-        "anchor",
-        "minimum_value",
-        "position_floor",
-        "protocol_binding",
-        "context_binding",
-        "owner_binding",
-        "bond_tag",
-    ];
-
     let owner = crate::owner::owner_key_bytes(
         &(&crate::owner::OwnerSigningKey::try_from([1; 32]).map_err(|_| "owner key")?).into(),
     );
@@ -396,7 +495,7 @@ pub fn generate_coppice_bond_vectors(
         return Err("generated proof rejected".into());
     }
 
-    let failed_public_input_mutations = PUBLIC_INPUT_NAMES
+    let failed_public_input_mutations = COPPICE_PUBLIC_INPUT_NAMES
         .iter()
         .enumerate()
         .map(|(index, name)| {
@@ -461,7 +560,7 @@ pub fn generate_coppice_bond_vectors(
         commitment_scheme: "Halo2 IPA/Vesta",
         transcript: "Blake2bWrite/Blake2bRead with Challenge255",
         proof_rng: "ChaCha20Rng::from_seed([42; 32])",
-        public_inputs: PUBLIC_INPUT_NAMES
+        public_inputs: COPPICE_PUBLIC_INPUT_NAMES
             .iter()
             .zip(&instance)
             .map(|(name, value)| PublicInputVector {
@@ -699,6 +798,101 @@ pub(crate) fn test_registration_bond(name: &str, address: &[u8]) -> &'static Bon
 mod tests {
     use super::*;
     use halo2_proofs::plonk::ConstraintSystem;
+
+    fn deployment_vector_id() -> [u8; 32] {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../test-vectors/deployment.json")).unwrap();
+        hex::decode(fixture["expected_deployment_id_hex"].as_str().unwrap())
+            .unwrap()
+            .try_into()
+            .unwrap()
+    }
+
+    #[test]
+    fn v1_binding_domains_are_exact() {
+        assert_eq!(V1_PROTOCOL_DOMAIN, "CoppiceProtoV1");
+        assert_eq!(V1_REGISTRATION_DOMAIN, "CoppiceRegV1");
+        assert_eq!(V1_CONTEXT_DOMAIN, "CoppiceCtxV1");
+        assert_eq!(V1_OWNER_DOMAIN, "CoppiceOwnerV1");
+    }
+
+    #[test]
+    fn v1_protocol_binding_uses_deployment_vector_id() {
+        assert_eq!(dedicated_v1_deployment_id(), deployment_vector_id());
+        assert_eq!(
+            v1_protocol_binding(),
+            binding_32(V1_PROTOCOL_DOMAIN.as_bytes(), deployment_vector_id())
+        );
+        assert_eq!(
+            hex::encode(v1_protocol_binding().to_repr()),
+            "c1f0f1ef06f5ffd8a21edcb859d46fbb55b653022a66a6d01ee4945c2cf0ae1f"
+        );
+        assert_eq!(
+            hex::encode(v1_context_binding("bonded", b"UA_BOND").unwrap().to_repr()),
+            "387c5a48d6d89f417de832512cd15bd08167624b956afeec4a193115f7789c27"
+        );
+        let owner = crate::owner::owner_key_bytes(
+            &(&crate::owner::OwnerSigningKey::try_from([1; 32]).unwrap()).into(),
+        );
+        assert_eq!(
+            hex::encode(v1_owner_binding(owner).to_repr()),
+            "9a89a45a3c07244e3b42f6058bdaccab77b438946c4826783e7f35955b89b514"
+        );
+    }
+
+    #[test]
+    fn v1_registration_digest_uses_u16_address_length() {
+        let name = "bonded";
+        let address = b"UA_BOND";
+        let preimage = v1_registration_preimage(name, address).unwrap();
+        let mut expected_preimage = crate::owner::name_id(name).to_vec();
+        expected_preimage.extend_from_slice(&(address.len() as u16).to_be_bytes());
+        expected_preimage.extend_from_slice(address);
+        assert_eq!(preimage, expected_preimage);
+        assert_eq!(
+            v1_registration_digest(name, address).unwrap(),
+            crypto::hash(V1_REGISTRATION_DOMAIN, &expected_preimage).unwrap()
+        );
+        let too_long = vec![0; u16::MAX as usize + 1];
+        assert_eq!(
+            v1_registration_preimage(name, &too_long),
+            Err(V1BindingError::AddressTooLong)
+        );
+    }
+
+    #[test]
+    fn dedicated_circuit_has_frozen_public_input_order() {
+        assert_eq!(
+            COPPICE_PUBLIC_INPUT_NAMES,
+            [
+                "anchor",
+                "minimum_value",
+                "position_floor",
+                "protocol_binding",
+                "context_binding",
+                "owner_binding",
+                "bond_tag",
+            ]
+        );
+        let owner = crate::owner::owner_key_bytes(
+            &(&crate::owner::OwnerSigningKey::try_from([1; 32]).unwrap()).into(),
+        );
+        let (_, instance, _) = minimal_fixture(
+            FIXTURE_VALUE,
+            FIXTURE_MINIMUM,
+            1,
+            1,
+            false,
+            None,
+            "bonded",
+            b"minimal-bond",
+            owner,
+            b"UA_BOND",
+        )
+        .unwrap();
+        assert_eq!(instance.len(), COPPICE_PUBLIC_INPUT_NAMES.len());
+    }
+
     #[test]
     fn real_bond_circuit_positive_and_negative() {
         let owner = crate::owner::owner_key_bytes(
@@ -917,16 +1111,39 @@ mod tests {
         let tag_path = root.join("test-vectors/bond_tags.json");
         let expected_bond = std::fs::read_to_string(bond_path).expect("bond vector");
         let expected_tag = std::fs::read_to_string(tag_path).expect("tag vector");
-        let bond: serde_json::Value = serde_json::from_str(&expected_bond).unwrap();
+        let frozen_bond: serde_json::Value = serde_json::from_str(&expected_bond).unwrap();
         let tag: serde_json::Value = serde_json::from_str(&expected_tag).unwrap();
-        let source = bond["source_git_commit"].as_str().unwrap();
+        let source = frozen_bond["source_git_commit"].as_str().unwrap();
         let canonical_nullifier: [u8; 32] =
             hex::decode(tag["canonical_nullifier"].as_str().unwrap())
                 .unwrap()
                 .try_into()
                 .unwrap();
-        let (bond, tag) = generate_coppice_bond_vectors(source, canonical_nullifier).unwrap();
-        assert_eq!(bond, expected_bond);
+        let (generated_bond, tag) =
+            generate_coppice_bond_vectors(source, canonical_nullifier).unwrap();
+        let generated_bond_value: serde_json::Value =
+            serde_json::from_str(&generated_bond).unwrap();
+        let generated_public_inputs = generated_bond_value["public_inputs"].as_array().unwrap();
+        assert_eq!(
+            generated_public_inputs.len(),
+            COPPICE_PUBLIC_INPUT_NAMES.len()
+        );
+        for index in [3usize, 4, 5] {
+            println!(
+                "{}={}",
+                COPPICE_PUBLIC_INPUT_NAMES[index],
+                generated_public_inputs[index]["value"].as_str().unwrap()
+            );
+        }
+        assert_eq!(
+            generated_bond_value["verifier_artifact"],
+            frozen_bond["verifier_artifact"]
+        );
+        assert_eq!(
+            generated_bond_value["BOND_VK_ID"],
+            "d9e24e9de209f3256b4e3b7d0c681211792677bd3a6398bf6079cc2c581c0af3"
+        );
+        assert_eq!(generated_bond, expected_bond);
         assert_eq!(tag, expected_tag);
     }
 
