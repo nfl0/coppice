@@ -1,6 +1,6 @@
 # Coppice Protocol Specification
 
-**Status:** Draft / architecture frozen, one proof-artifact freeze gate remains  
+**Status:** Draft / v1 architecture and protocol artifacts frozen; implementation in progress
 **Protocol version:** 1  
 **Wire version:** 1  
 **Last architecture decision:** 2026-08-22

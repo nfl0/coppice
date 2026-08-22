@@ -11,6 +11,5 @@ pub mod owner;
 pub mod replay;
 pub mod spent;
 pub mod state;
-pub mod vectors;
 
 pub const DOMAIN: &[u8] = constants::PROTOCOL_ID;
