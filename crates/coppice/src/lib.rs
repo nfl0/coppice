@@ -15,6 +15,7 @@ pub mod legacy_state;
 pub mod name_tree;
 pub mod name_tree_v1;
 pub mod owner;
+pub mod owner_kdf;
 pub mod pending;
 pub mod recent_spent;
 pub mod record;
