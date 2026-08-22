@@ -1,27 +1,26 @@
 use std::{collections::BTreeSet, fmt::Debug};
 
+use zcash_client_backend::data_api::{OutputLockStore, locking::LockError};
 use zcash_client_backend::wallet::LockOwner;
+use zcash_client_backend::wallet::OutputRef;
 use zcash_protocol::consensus::BlockHeight;
 
 use crate::{
     InventoryError, IronwoodOutputId, IronwoodViewingCapability, OwnedBond, OwnedIronwoodNote,
-    PendingRegistrationCollection,
+    OwnedIronwoodNoteSource, PendingRegistrationCollection,
     inventory::{ClassifiedNote, classify_notes},
 };
 
 /// The smallest wallet-backend seam required by reconstructible Coppice locks.
 ///
 /// The concrete wallet implementation is responsible for making
-/// `owned_unspent_ironwood_notes` include already-locked outputs and for
-/// reporting the current owner on each output. The only mutation methods are
-/// Coppice-scoped; this trait has no operation for clearing arbitrary foreign
-/// locks.
+/// `owned_unspent_ironwood_notes` include already-locked outputs. The only
+/// mutation methods are Coppice-scoped; this trait has no operation for
+/// inspecting or clearing arbitrary foreign locks.
 pub trait CoppiceLockBackend {
     type Error: Debug;
 
     fn owned_unspent_ironwood_notes(&self) -> Result<Vec<OwnedIronwoodNote>, Self::Error>;
-
-    fn lock_owner(&self, output_id: &IronwoodOutputId) -> Result<Option<LockOwner>, Self::Error>;
 
     fn ensure_coppice_lock(
         &mut self,
@@ -43,6 +42,104 @@ pub trait CoppiceLockBackend {
 /// The bond tag is used directly; it is not hashed again.
 pub const fn lock_owner_for_bond(bond_tag: [u8; 32]) -> LockOwner {
     LockOwner::new(bond_tag)
+}
+
+/// Errors produced by the direct pinned-librustzcash lock-store bridge.
+#[derive(Debug)]
+pub enum OutputLockBackendError<NoteSourceError, StorageError> {
+    NoteSource(NoteSourceError),
+    LockConflict(OutputRef),
+    Storage(StorageError),
+    UnexpectedLockCount { output: OutputRef, count: usize },
+    UnknownLockFailure,
+}
+
+/// Composes a wallet-owned note source with the pinned public
+/// [`OutputLockStore`] API.
+///
+/// Inventory and lock storage are deliberately separate inputs: the pinned
+/// lock store owns lock mutations, not note enumeration. This bridge does not
+/// require `zcash_client_sqlite` and never calls
+/// [`OutputLockStore::clear_locked_outputs`].
+pub struct OutputLockStoreBridge<NoteSource, LockStore> {
+    note_source: NoteSource,
+    lock_store: LockStore,
+}
+
+impl<NoteSource, LockStore> OutputLockStoreBridge<NoteSource, LockStore> {
+    pub fn new(note_source: NoteSource, lock_store: LockStore) -> Self {
+        Self {
+            note_source,
+            lock_store,
+        }
+    }
+
+    pub fn note_source(&self) -> &NoteSource {
+        &self.note_source
+    }
+
+    pub fn lock_store(&self) -> &LockStore {
+        &self.lock_store
+    }
+
+    pub fn lock_store_mut(&mut self) -> &mut LockStore {
+        &mut self.lock_store
+    }
+
+    pub fn into_parts(self) -> (NoteSource, LockStore) {
+        (self.note_source, self.lock_store)
+    }
+}
+
+impl<NoteSource, LockStore> CoppiceLockBackend for OutputLockStoreBridge<NoteSource, LockStore>
+where
+    NoteSource: OwnedIronwoodNoteSource,
+    LockStore: OutputLockStore,
+{
+    type Error = OutputLockBackendError<NoteSource::Error, LockStore::Error>;
+
+    fn owned_unspent_ironwood_notes(&self) -> Result<Vec<OwnedIronwoodNote>, Self::Error> {
+        self.note_source
+            .owned_unspent_ironwood_notes()
+            .map_err(OutputLockBackendError::NoteSource)
+    }
+
+    fn ensure_coppice_lock(
+        &mut self,
+        output_id: &IronwoodOutputId,
+        bond_tag: [u8; 32],
+        expiry_height: BlockHeight,
+    ) -> Result<(), Self::Error> {
+        let output = output_id.as_output_ref();
+        let owner = lock_owner_for_bond(bond_tag);
+        match self
+            .lock_store
+            .lock_outputs(&[output], owner, expiry_height)
+        {
+            Ok(1) => Ok(()),
+            Ok(count) => Err(OutputLockBackendError::UnexpectedLockCount { output, count }),
+            Err(LockError::LockFailure(output)) => {
+                Err(OutputLockBackendError::LockConflict(output))
+            }
+            Err(LockError::Storage(error)) => Err(OutputLockBackendError::Storage(error)),
+            Err(_) => Err(OutputLockBackendError::UnknownLockFailure),
+        }
+    }
+
+    fn remove_coppice_lock(
+        &mut self,
+        output_id: &IronwoodOutputId,
+        bond_tag: [u8; 32],
+    ) -> Result<bool, Self::Error> {
+        let output = output_id.as_output_ref();
+        self.lock_store
+            .unlock_output(&output, lock_owner_for_bond(bond_tag))
+            .map_err(OutputLockBackendError::Storage)
+    }
+
+    fn max_lock_expiry_height(&self) -> BlockHeight {
+        BlockHeight::from_u32(u32::MAX)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -161,17 +258,11 @@ pub fn reconcile_locks<B: CoppiceLockBackend>(
                 .ensure_coppice_lock(&note.output_id, bond_tag, expiry_height)
                 .map_err(ReconciliationError::Backend)?;
             ensured_locks += 1;
-        } else {
-            let owner = backend
-                .lock_owner(&note.output_id)
-                .map_err(ReconciliationError::Backend)?;
-            if owner == Some(lock_owner_for_bond(bond_tag))
-                && backend
-                    .remove_coppice_lock(&note.output_id, bond_tag)
-                    .map_err(ReconciliationError::Backend)?
-            {
-                removed_locks += 1;
-            }
+        } else if backend
+            .remove_coppice_lock(&note.output_id, bond_tag)
+            .map_err(ReconciliationError::Backend)?
+        {
+            removed_locks += 1;
         }
     }
 
@@ -193,11 +284,17 @@ mod tests {
         owner::{OwnerSigningKey, owner_key_bytes},
         registration::registration_commitment,
     };
-    use zcash_client_backend::wallet::LockOwner;
+    use zcash_client_backend::{
+        data_api::{OutputLockStore, locking::LockError},
+        wallet::{LockOwner, OutputRef},
+    };
     use zcash_protocol::consensus::{BlockHeight, NetworkType};
 
     use super::*;
-    use crate::{IronwoodOutputId, PendingRegistration, PendingRegistrationCollection};
+    use crate::{
+        IronwoodOutputId, OwnedIronwoodNoteSource, PendingRegistration,
+        PendingRegistrationCollection,
+    };
 
     const ADDRESS: &[u8] = b"uregtest15zjdhgeu9vfwkrgxvxyuynkprgryyww0cl668tpj0ykhl7nvvh7v7ln89f0v8c36vwyffxglg24zh5d4622ela80w065cc28mv7gf423";
 
@@ -246,7 +343,6 @@ mod tests {
                 .find(|note| note.output_id == output_id)
             {
                 note.locked = lock.is_some();
-                note.lock_owner = lock.map(|lock| lock.owner);
             }
         }
     }
@@ -256,13 +352,6 @@ mod tests {
 
         fn owned_unspent_ironwood_notes(&self) -> Result<Vec<OwnedIronwoodNote>, Self::Error> {
             Ok(self.notes.clone())
-        }
-
-        fn lock_owner(
-            &self,
-            output_id: &IronwoodOutputId,
-        ) -> Result<Option<LockOwner>, Self::Error> {
-            Ok(self.locks.get(output_id).map(|lock| lock.owner))
         }
 
         fn ensure_coppice_lock(
@@ -319,7 +408,6 @@ mod tests {
             nullifier: [id; 32],
             position: Some(u32::from(id)),
             locked: false,
-            lock_owner: None,
             spendable: true,
             freshness_eligible: true,
         }
@@ -388,8 +476,8 @@ mod tests {
         .unwrap();
         assert_eq!(report.desired_tags, active);
         assert_eq!(
-            backend.lock_owner(&note(1).output_id).unwrap(),
-            Some(lock_owner_for_bond(tag(1)))
+            backend.locks[&note(1).output_id].owner,
+            lock_owner_for_bond(tag(1))
         );
         assert_eq!(
             backend.locks[&note(1).output_id].expiry,
@@ -410,8 +498,8 @@ mod tests {
         .unwrap();
         assert_eq!(report.desired_tags, BTreeSet::from([tag(2)]));
         assert_eq!(
-            backend.lock_owner(&note(2).output_id).unwrap(),
-            Some(lock_owner_for_bond(tag(2)))
+            backend.locks[&note(2).output_id].owner,
+            lock_owner_for_bond(tag(2))
         );
     }
 
@@ -444,7 +532,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(report.removed_locks, 1);
-        assert_eq!(backend.lock_owner(&output_id).unwrap(), None);
+        assert!(!backend.locks.contains_key(&output_id));
     }
 
     #[test]
@@ -459,7 +547,7 @@ mod tests {
             &mut backend,
         )
         .unwrap();
-        assert_eq!(backend.lock_owner(&output_id).unwrap(), Some(foreign));
+        assert_eq!(backend.locks[&output_id].owner, foreign);
     }
 
     #[test]
@@ -530,7 +618,7 @@ mod tests {
             &mut backend,
         )
         .unwrap();
-        assert_eq!(backend.lock_owner(&output_id).unwrap(), None);
+        assert!(!backend.locks.contains_key(&output_id));
 
         let mut backend =
             FakeBackend::new(vec![note(9)]).with_lock(output_id, lock_owner_for_bond(old_tag));
@@ -542,8 +630,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            backend.lock_owner(&output_id).unwrap(),
-            Some(lock_owner_for_bond(old_tag))
+            backend.locks[&output_id].owner,
+            lock_owner_for_bond(old_tag)
         );
     }
 
@@ -579,5 +667,260 @@ mod tests {
             ),
             Err(DesiredLockSetError::MissingPendingBond { bond_tag: tag(11) })
         );
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct FakeNoteSource {
+        notes: Vec<OwnedIronwoodNote>,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct FakeNoteSourceError;
+
+    impl OwnedIronwoodNoteSource for FakeNoteSource {
+        type Error = FakeNoteSourceError;
+
+        fn owned_unspent_ironwood_notes(&self) -> Result<Vec<OwnedIronwoodNote>, Self::Error> {
+            Ok(self.notes.clone())
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum FakeStoreError {
+        Storage,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct FakeOutputLockStore {
+        locks: BTreeMap<OutputRef, FakeLock>,
+        clear_calls: usize,
+        fail_storage: bool,
+    }
+
+    impl FakeOutputLockStore {
+        fn new() -> Self {
+            Self {
+                locks: BTreeMap::new(),
+                clear_calls: 0,
+                fail_storage: false,
+            }
+        }
+    }
+
+    impl OutputLockStore for FakeOutputLockStore {
+        type Error = FakeStoreError;
+        type AccountId = u8;
+
+        fn lock_outputs(
+            &mut self,
+            outputs: &[OutputRef],
+            owner: LockOwner,
+            lock_expiry_height: BlockHeight,
+        ) -> Result<usize, LockError<Self::Error>> {
+            if self.fail_storage {
+                return Err(LockError::Storage(FakeStoreError::Storage));
+            }
+            // Preflight all outputs so this fake preserves the pinned
+            // OutputLockStore atomicity guarantee.
+            if let Some(output) = outputs.iter().find(|output| {
+                self.locks
+                    .get(output)
+                    .is_some_and(|lock| lock.owner != owner)
+            }) {
+                return Err(LockError::LockFailure(*output));
+            }
+            for output in outputs {
+                self.locks.insert(
+                    *output,
+                    FakeLock {
+                        owner,
+                        expiry: lock_expiry_height,
+                    },
+                );
+            }
+            Ok(outputs.len())
+        }
+
+        fn unlock_output(
+            &mut self,
+            output: &OutputRef,
+            owner: LockOwner,
+        ) -> Result<bool, Self::Error> {
+            if self.fail_storage {
+                return Err(FakeStoreError::Storage);
+            }
+            let removable = self
+                .locks
+                .get(output)
+                .is_some_and(|lock| lock.owner == owner);
+            if removable {
+                self.locks.remove(output);
+            }
+            Ok(removable)
+        }
+
+        fn clear_locked_outputs(
+            &mut self,
+            _account: Self::AccountId,
+        ) -> Result<usize, Self::Error> {
+            self.clear_calls += 1;
+            let count = self.locks.len();
+            self.locks.clear();
+            Ok(count)
+        }
+
+        fn get_locked_outputs(
+            &self,
+            _account: Self::AccountId,
+        ) -> Result<Vec<OutputRef>, Self::Error> {
+            Ok(self.locks.keys().copied().collect())
+        }
+    }
+
+    #[test]
+    fn output_lock_store_bridge_uses_exact_ref_owner_and_max_expiry() {
+        let output_id = note(12).output_id;
+        let mut bridge = OutputLockStoreBridge::new(
+            FakeNoteSource {
+                notes: vec![note(12)],
+            },
+            FakeOutputLockStore::new(),
+        );
+        let expiry = bridge.max_lock_expiry_height();
+        CoppiceLockBackend::ensure_coppice_lock(&mut bridge, &output_id, tag(12), expiry).unwrap();
+
+        let output_ref = output_id.as_output_ref();
+        let lock = bridge.lock_store().locks.get(&output_ref).unwrap();
+        assert_eq!(lock.owner, LockOwner::new(tag(12)));
+        assert_eq!(lock.expiry, BlockHeight::from_u32(u32::MAX));
+        assert_eq!(
+            bridge.max_lock_expiry_height(),
+            BlockHeight::from_u32(u32::MAX)
+        );
+    }
+
+    #[test]
+    fn output_lock_store_bridge_maps_conflict_and_storage_errors() {
+        let output_id = note(13).output_id;
+        let output_ref = output_id.as_output_ref();
+        let mut store = FakeOutputLockStore::new();
+        store.locks.insert(
+            output_ref,
+            FakeLock {
+                owner: LockOwner::new([0xf3; 32]),
+                expiry: BlockHeight::from_u32(u32::MAX),
+            },
+        );
+        let mut bridge = OutputLockStoreBridge::new(
+            FakeNoteSource {
+                notes: vec![note(13)],
+            },
+            store,
+        );
+        assert!(matches!(
+            CoppiceLockBackend::ensure_coppice_lock(
+                &mut bridge,
+                &output_id,
+                tag(13),
+                BlockHeight::from_u32(u32::MAX),
+            ),
+            Err(OutputLockBackendError::LockConflict(output)) if output == output_ref
+        ));
+
+        let mut storage_bridge = OutputLockStoreBridge::new(
+            FakeNoteSource {
+                notes: vec![note(13)],
+            },
+            FakeOutputLockStore {
+                fail_storage: true,
+                ..FakeOutputLockStore::new()
+            },
+        );
+        assert!(matches!(
+            CoppiceLockBackend::ensure_coppice_lock(
+                &mut storage_bridge,
+                &output_id,
+                tag(13),
+                BlockHeight::from_u32(u32::MAX),
+            ),
+            Err(OutputLockBackendError::Storage(FakeStoreError::Storage))
+        ));
+    }
+
+    #[test]
+    fn output_lock_store_bridge_unlocks_only_exact_owner_and_false_is_harmless() {
+        let output_id = note(14).output_id;
+        let output_ref = output_id.as_output_ref();
+        let foreign = LockOwner::new([0xf4; 32]);
+        let mut store = FakeOutputLockStore::new();
+        store.locks.insert(
+            output_ref,
+            FakeLock {
+                owner: foreign,
+                expiry: BlockHeight::from_u32(u32::MAX),
+            },
+        );
+        let mut bridge = OutputLockStoreBridge::new(
+            FakeNoteSource {
+                notes: vec![note(14)],
+            },
+            store,
+        );
+
+        assert!(
+            !CoppiceLockBackend::remove_coppice_lock(&mut bridge, &output_id, tag(14),).unwrap()
+        );
+        assert_eq!(bridge.lock_store().locks[&output_ref].owner, foreign);
+
+        let mut own_bridge = OutputLockStoreBridge::new(
+            FakeNoteSource {
+                notes: vec![note(14)],
+            },
+            FakeOutputLockStore::new(),
+        );
+        CoppiceLockBackend::ensure_coppice_lock(
+            &mut own_bridge,
+            &output_id,
+            tag(14),
+            BlockHeight::from_u32(u32::MAX),
+        )
+        .unwrap();
+        assert!(
+            CoppiceLockBackend::remove_coppice_lock(&mut own_bridge, &output_id, tag(14),).unwrap()
+        );
+        assert!(
+            !CoppiceLockBackend::remove_coppice_lock(&mut own_bridge, &output_id, tag(14),)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn reconciliation_through_bridge_never_calls_generic_clear() {
+        let output_id = note(15).output_id;
+        let old_tag = tag(15);
+        let mut store = FakeOutputLockStore::new();
+        store.locks.insert(
+            output_id.as_output_ref(),
+            FakeLock {
+                owner: lock_owner_for_bond(old_tag),
+                expiry: BlockHeight::from_u32(u32::MAX),
+            },
+        );
+        let mut bridge = OutputLockStoreBridge::new(
+            FakeNoteSource {
+                notes: vec![note(15)],
+            },
+            store,
+        );
+        let report = reconcile_locks(
+            &BTreeSet::new(),
+            &empty_pending(),
+            IronwoodViewingCapability::FullViewing,
+            &mut bridge,
+        )
+        .unwrap();
+        assert_eq!(report.removed_locks, 1);
+        assert!(bridge.lock_store().locks.is_empty());
+        assert_eq!(bridge.lock_store().clear_calls, 0);
     }
 }

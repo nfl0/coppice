@@ -5,18 +5,25 @@
 //! wallet facts and its lock backend is an explicit seam for a later concrete
 //! wallet implementation.
 
+mod guard;
 mod inventory;
 mod locking;
 mod pending;
 mod selection;
 
+pub use guard::{
+    CoppiceProtectionMode, HostCanonicalTipSource, SpendGuardError, WalletCanonicalTip,
+    with_coppice_spend_guard,
+};
 pub use inventory::{
     InventoryError, IronwoodOutputId, IronwoodViewingCapability, OwnedBond, OwnedIronwoodNote,
-    active_canonical_bond_tags, active_canonical_bond_tags_from_state, classify_owned_bonds,
+    OwnedIronwoodNoteSource, active_canonical_bond_tags, active_canonical_bond_tags_from_state,
+    classify_owned_bonds,
 };
 pub use locking::{
-    CoppiceLockBackend, DesiredLockSetError, ReconciliationError, ReconciliationReport,
-    desired_lock_tags, lock_owner_for_bond, reconcile_locks,
+    CoppiceLockBackend, DesiredLockSetError, OutputLockBackendError, OutputLockStoreBridge,
+    ReconciliationError, ReconciliationReport, desired_lock_tags, lock_owner_for_bond,
+    reconcile_locks,
 };
 pub use pending::{
     PendingRegistration, PendingRegistrationCollection, PendingRegistrationCollectionError,

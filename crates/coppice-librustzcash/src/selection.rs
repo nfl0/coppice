@@ -55,7 +55,7 @@ pub fn select_bond_note(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{IronwoodOutputId, LockOwner};
+    use crate::IronwoodOutputId;
 
     fn note(
         id: u8,
@@ -70,7 +70,6 @@ mod tests {
             nullifier: [id; 32],
             position: Some(u32::from(id)),
             locked,
-            lock_owner: None,
             spendable,
             freshness_eligible,
         }
@@ -115,10 +114,8 @@ mod tests {
 
     #[test]
     fn excludes_foreign_and_existing_coppice_locks() {
-        let mut foreign = note(1, 10, true, true, true);
-        foreign.lock_owner = Some(LockOwner::new([0xf0; 32]));
-        let mut coppice = note(2, 11, true, true, true);
-        coppice.lock_owner = Some(LockOwner::new([0x02; 32]));
+        let foreign = note(1, 10, true, true, true);
+        let coppice = note(2, 11, true, true, true);
         assert_eq!(
             select_bond_note(&[foreign, coppice], 10, full_viewing()).unwrap(),
             None

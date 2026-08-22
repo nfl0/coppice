@@ -1,0 +1,654 @@
+use std::fmt::Debug;
+
+use coppice::reducer_v1::{ReplayTip, V1Reducer};
+
+use crate::{
+    CoppiceLockBackend, IronwoodViewingCapability, PendingRegistrationCollection,
+    ReconciliationError, ReconciliationReport, active_canonical_bond_tags, reconcile_locks,
+};
+
+/// The host wallet's selected canonical chain tip.
+///
+/// The hash is kept in canonical byte order. This type contains no display or
+/// UI representation of a block hash.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WalletCanonicalTip {
+    pub height: u32,
+    pub block_hash: [u8; 32],
+}
+
+impl From<ReplayTip> for WalletCanonicalTip {
+    fn from(tip: ReplayTip) -> Self {
+        Self {
+            height: tip.height,
+            block_hash: tip.block_hash,
+        }
+    }
+}
+
+/// Reads the host wallet's already-selected canonical tip.
+pub trait HostCanonicalTipSource {
+    type Error: Debug;
+
+    fn canonical_tip(&self) -> Result<WalletCanonicalTip, Self::Error>;
+}
+
+/// Runtime protection mode at the adapter boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CoppiceProtectionMode {
+    /// Full Coppice functionality and ordinary-send protection.
+    Enabled,
+    /// Management UI may be hidden, but ordinary-send protection remains on.
+    GuardOnly,
+    /// Coppice is not participating in this spend path.
+    Off,
+}
+
+impl CoppiceProtectionMode {
+    fn protects_spend(self) -> bool {
+        matches!(self, Self::Enabled | Self::GuardOnly)
+    }
+}
+
+/// Fail-closed errors from the protected proposal boundary.
+#[derive(Debug)]
+pub enum SpendGuardError<HostError, BackendError: Debug> {
+    HostTipUnavailable(HostError),
+    HeightMismatch {
+        host_height: u32,
+        coppice_height: u32,
+    },
+    BlockHashMismatch {
+        height: u32,
+        host_block_hash: [u8; 32],
+        coppice_block_hash: [u8; 32],
+    },
+    ReconciliationFailed(ReconciliationError<BackendError>),
+}
+
+/// Runs a proposal callback only after the protected Coppice preconditions
+/// have succeeded.
+///
+/// `Off` deliberately does not read the host tip, reducer state, or lock
+/// backend. `Enabled` and `GuardOnly` always perform exact tip comparison and
+/// a fresh lock reconciliation before invoking `proposal_fn`; this also repairs
+/// locks that were cleared by an external generic wallet recovery operation.
+pub fn with_coppice_spend_guard<Host, Backend, Proposal>(
+    mode: CoppiceProtectionMode,
+    host_tip_source: &Host,
+    reducer: &V1Reducer,
+    pending: &PendingRegistrationCollection,
+    capability: IronwoodViewingCapability,
+    lock_backend: &mut Backend,
+    proposal_fn: impl FnOnce() -> Proposal,
+) -> Result<(Proposal, Option<ReconciliationReport>), SpendGuardError<Host::Error, Backend::Error>>
+where
+    Host: HostCanonicalTipSource,
+    Backend: CoppiceLockBackend,
+{
+    if !mode.protects_spend() {
+        return Ok((proposal_fn(), None));
+    }
+
+    let host_tip = host_tip_source
+        .canonical_tip()
+        .map_err(SpendGuardError::HostTipUnavailable)?;
+    let coppice_tip = WalletCanonicalTip::from(reducer.tip());
+    if host_tip.height != coppice_tip.height {
+        return Err(SpendGuardError::HeightMismatch {
+            host_height: host_tip.height,
+            coppice_height: coppice_tip.height,
+        });
+    }
+    if host_tip.block_hash != coppice_tip.block_hash {
+        return Err(SpendGuardError::BlockHashMismatch {
+            height: host_tip.height,
+            host_block_hash: host_tip.block_hash,
+            coppice_block_hash: coppice_tip.block_hash,
+        });
+    }
+
+    let active_tags = active_canonical_bond_tags(reducer);
+    let report = reconcile_locks(&active_tags, pending, capability, lock_backend)
+        .map_err(SpendGuardError::ReconciliationFailed)?;
+    Ok((proposal_fn(), Some(report)))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use coppice::{
+        config::{DeploymentParameters, REGTEST_V0, Rendezvous},
+        constants::REGTEST_V0_ACTIVATION_HEIGHT,
+        owner::{OwnerSigningKey, owner_key_bytes},
+        reducer_v1::{ActivationCheckpoint, IronwoodFrontier, V1Reducer},
+        registration::registration_commitment,
+    };
+    use zcash_client_backend::wallet::LockOwner;
+    use zcash_protocol::consensus::{BlockHeight, NetworkType};
+
+    use super::*;
+    use crate::{
+        IronwoodOutputId, OwnedIronwoodNote, PendingRegistration, PendingRegistrationCollection,
+        lock_owner_for_bond,
+    };
+
+    const ADDRESS: &[u8] = b"uregtest15zjdhgeu9vfwkrgxvxyuynkprgryyww0cl668tpj0ykhl7nvvh7v7ln89f0v8c36vwyffxglg24zh5d4622ela80w065cc28mv7gf423";
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct FakeLock {
+        owner: LockOwner,
+        expiry: BlockHeight,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    enum BackendError {
+        ForeignLock,
+        Storage,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct FakeBackend {
+        notes: Vec<OwnedIronwoodNote>,
+        locks: BTreeMap<IronwoodOutputId, FakeLock>,
+        fail_inventory: bool,
+        fail_lock: bool,
+    }
+
+    impl FakeBackend {
+        fn new(notes: Vec<OwnedIronwoodNote>) -> Self {
+            Self {
+                notes,
+                locks: BTreeMap::new(),
+                fail_inventory: false,
+                fail_lock: false,
+            }
+        }
+
+        fn with_lock(mut self, output_id: IronwoodOutputId, owner: LockOwner) -> Self {
+            self.locks.insert(
+                output_id,
+                FakeLock {
+                    owner,
+                    expiry: BlockHeight::from_u32(123),
+                },
+            );
+            self
+        }
+    }
+
+    impl CoppiceLockBackend for FakeBackend {
+        type Error = BackendError;
+
+        fn owned_unspent_ironwood_notes(&self) -> Result<Vec<OwnedIronwoodNote>, Self::Error> {
+            if self.fail_inventory {
+                Err(BackendError::Storage)
+            } else {
+                Ok(self.notes.clone())
+            }
+        }
+
+        fn ensure_coppice_lock(
+            &mut self,
+            output_id: &IronwoodOutputId,
+            bond_tag: [u8; 32],
+            expiry_height: BlockHeight,
+        ) -> Result<(), Self::Error> {
+            if self.fail_lock {
+                return Err(BackendError::Storage);
+            }
+            let owner = lock_owner_for_bond(bond_tag);
+            if self
+                .locks
+                .get(output_id)
+                .is_some_and(|lock| lock.owner != owner)
+            {
+                return Err(BackendError::ForeignLock);
+            }
+            self.locks.insert(
+                *output_id,
+                FakeLock {
+                    owner,
+                    expiry: expiry_height,
+                },
+            );
+            Ok(())
+        }
+
+        fn remove_coppice_lock(
+            &mut self,
+            output_id: &IronwoodOutputId,
+            bond_tag: [u8; 32],
+        ) -> Result<bool, Self::Error> {
+            let owner = lock_owner_for_bond(bond_tag);
+            if self
+                .locks
+                .get(output_id)
+                .is_some_and(|lock| lock.owner == owner)
+            {
+                self.locks.remove(output_id);
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        }
+
+        fn max_lock_expiry_height(&self) -> BlockHeight {
+            BlockHeight::from_u32(u32::MAX)
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct HostError;
+
+    struct FakeHost {
+        result: Result<WalletCanonicalTip, HostError>,
+    }
+
+    impl HostCanonicalTipSource for FakeHost {
+        type Error = HostError;
+
+        fn canonical_tip(&self) -> Result<WalletCanonicalTip, Self::Error> {
+            self.result
+        }
+    }
+
+    fn deployment() -> DeploymentParameters {
+        DeploymentParameters {
+            network_id: REGTEST_V0.network_id.to_vec(),
+            address_network: NetworkType::Regtest,
+            activation_height: REGTEST_V0_ACTIVATION_HEIGHT,
+            minimum_bond_value: REGTEST_V0.minimum_bond_value,
+            commit_ttl_blocks: 20,
+            reuse_delay_blocks: 10,
+            bond_note_max_age_blocks: 100,
+            rendezvous: Rendezvous {
+                orchard_ivk: REGTEST_V0.rendezvous.orchard_ivk,
+                orchard_receiver: REGTEST_V0.rendezvous.orchard_receiver,
+            },
+        }
+    }
+
+    fn reducer() -> V1Reducer {
+        V1Reducer::new(
+            deployment(),
+            ActivationCheckpoint {
+                height: REGTEST_V0_ACTIVATION_HEIGHT - 1,
+                block_hash: [9; 32],
+                ironwood_frontier: IronwoodFrontier::empty(),
+                ironwood_tree_size: 0,
+            },
+        )
+        .unwrap()
+    }
+
+    fn matching_host(reducer: &V1Reducer) -> FakeHost {
+        FakeHost {
+            result: Ok(reducer.tip().into()),
+        }
+    }
+
+    fn note(id: u8) -> OwnedIronwoodNote {
+        OwnedIronwoodNote {
+            output_id: IronwoodOutputId::new([id; 32], u32::from(id)),
+            value_zat: 100,
+            nullifier: [id; 32],
+            position: Some(u32::from(id)),
+            locked: false,
+            spendable: true,
+            freshness_eligible: true,
+        }
+    }
+
+    fn pending_for(bond_tag: [u8; 32]) -> PendingRegistration {
+        let deployment = deployment();
+        let key = OwnerSigningKey::try_from([1; 32]).unwrap();
+        let owner_pk = owner_key_bytes(&(&key).into());
+        let secret = [0xa5; 32];
+        let commitment =
+            registration_commitment(&deployment, "alice", owner_pk, bond_tag, ADDRESS, secret)
+                .unwrap();
+        PendingRegistration::new(
+            &deployment,
+            "alice".to_owned(),
+            ADDRESS.to_vec(),
+            owner_pk,
+            bond_tag,
+            secret,
+            commitment,
+        )
+        .unwrap()
+    }
+
+    fn collection_with(pending: PendingRegistration) -> PendingRegistrationCollection {
+        let mut collection = PendingRegistrationCollection::new();
+        collection.insert(pending).unwrap();
+        collection
+    }
+
+    fn empty_pending() -> PendingRegistrationCollection {
+        PendingRegistrationCollection::new()
+    }
+
+    fn tag(id: u8) -> [u8; 32] {
+        coppice::bond_tag::derive_v1_bond_tag(&[id; 32]).unwrap()
+    }
+
+    fn run<Proposal>(
+        mode: CoppiceProtectionMode,
+        host: &FakeHost,
+        pending: &PendingRegistrationCollection,
+        backend: &mut FakeBackend,
+        proposal: impl FnOnce() -> Proposal,
+    ) -> Result<(Proposal, Option<ReconciliationReport>), SpendGuardError<HostError, BackendError>>
+    {
+        let reducer = reducer();
+        with_coppice_spend_guard(
+            mode,
+            host,
+            &reducer,
+            pending,
+            IronwoodViewingCapability::FullViewing,
+            backend,
+            proposal,
+        )
+    }
+
+    #[test]
+    fn host_tip_failure_does_not_call_proposal() {
+        let host = FakeHost {
+            result: Err(HostError),
+        };
+        let mut backend = FakeBackend::new(Vec::new());
+        let called = std::cell::Cell::new(0);
+        let result = run(
+            CoppiceProtectionMode::Enabled,
+            &host,
+            &empty_pending(),
+            &mut backend,
+            || {
+                called.set(called.get() + 1);
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(SpendGuardError::HostTipUnavailable(_))
+        ));
+        assert_eq!(called.get(), 0);
+    }
+
+    #[test]
+    fn height_mismatch_does_not_call_proposal() {
+        let reducer = reducer();
+        let host = FakeHost {
+            result: Ok(WalletCanonicalTip {
+                height: reducer.tip().height + 1,
+                block_hash: reducer.tip().block_hash,
+            }),
+        };
+        let mut backend = FakeBackend::new(Vec::new());
+        let called = std::cell::Cell::new(0);
+        let result = run(
+            CoppiceProtectionMode::Enabled,
+            &host,
+            &empty_pending(),
+            &mut backend,
+            || called.set(called.get() + 1),
+        );
+        assert!(matches!(
+            result,
+            Err(SpendGuardError::HeightMismatch { .. })
+        ));
+        assert_eq!(called.get(), 0);
+    }
+
+    #[test]
+    fn hash_mismatch_at_equal_height_does_not_call_proposal() {
+        let reducer = reducer();
+        let host = FakeHost {
+            result: Ok(WalletCanonicalTip {
+                height: reducer.tip().height,
+                block_hash: [8; 32],
+            }),
+        };
+        let mut backend = FakeBackend::new(Vec::new());
+        let called = std::cell::Cell::new(0);
+        let result = run(
+            CoppiceProtectionMode::Enabled,
+            &host,
+            &empty_pending(),
+            &mut backend,
+            || called.set(called.get() + 1),
+        );
+        assert!(matches!(
+            result,
+            Err(SpendGuardError::BlockHashMismatch { .. })
+        ));
+        assert_eq!(called.get(), 0);
+    }
+
+    #[test]
+    fn exact_tip_and_reconciliation_call_proposal_once() {
+        let reducer = reducer();
+        let host = matching_host(&reducer);
+        let mut backend = FakeBackend::new(Vec::new());
+        let called = std::cell::Cell::new(0);
+        let result = run(
+            CoppiceProtectionMode::Enabled,
+            &host,
+            &empty_pending(),
+            &mut backend,
+            || {
+                called.set(called.get() + 1);
+                42
+            },
+        )
+        .unwrap();
+        assert_eq!(called.get(), 1);
+        assert_eq!(result.0, 42);
+        assert!(result.1.is_some());
+    }
+
+    #[test]
+    fn guard_only_has_the_same_proposal_gate_as_enabled() {
+        let reducer = reducer();
+        let host = FakeHost {
+            result: Ok(WalletCanonicalTip {
+                height: reducer.tip().height,
+                block_hash: [8; 32],
+            }),
+        };
+        let mut backend = FakeBackend::new(Vec::new());
+        let called = std::cell::Cell::new(0);
+        let result = run(
+            CoppiceProtectionMode::GuardOnly,
+            &host,
+            &empty_pending(),
+            &mut backend,
+            || called.set(called.get() + 1),
+        );
+        assert!(matches!(
+            result,
+            Err(SpendGuardError::BlockHashMismatch { .. })
+        ));
+        assert_eq!(called.get(), 0);
+    }
+
+    #[test]
+    fn off_bypasses_tip_and_reconciliation() {
+        let host = FakeHost {
+            result: Err(HostError),
+        };
+        let mut backend = FakeBackend {
+            notes: Vec::new(),
+            locks: BTreeMap::new(),
+            fail_inventory: true,
+            fail_lock: true,
+        };
+        let called = std::cell::Cell::new(0);
+        let result = run(
+            CoppiceProtectionMode::Off,
+            &host,
+            &empty_pending(),
+            &mut backend,
+            || {
+                called.set(called.get() + 1);
+                7
+            },
+        )
+        .unwrap();
+        assert_eq!(called.get(), 1);
+        assert_eq!(result, (7, None));
+    }
+
+    #[test]
+    fn incoming_only_fails_closed_before_proposal() {
+        let reducer = reducer();
+        let host = matching_host(&reducer);
+        let mut backend = FakeBackend::new(Vec::new());
+        let called = std::cell::Cell::new(0);
+        let result = with_coppice_spend_guard(
+            CoppiceProtectionMode::Enabled,
+            &host,
+            &reducer,
+            &empty_pending(),
+            IronwoodViewingCapability::IncomingOnly,
+            &mut backend,
+            || called.set(called.get() + 1),
+        );
+        assert!(matches!(
+            result,
+            Err(SpendGuardError::ReconciliationFailed(
+                ReconciliationError::Inventory(_)
+            ))
+        ));
+        assert_eq!(called.get(), 0);
+    }
+
+    #[test]
+    fn missing_pending_note_fails_closed_before_proposal() {
+        let reducer = reducer();
+        let host = matching_host(&reducer);
+        let pending = collection_with(pending_for(tag(1)));
+        let mut backend = FakeBackend::new(Vec::new());
+        let called = std::cell::Cell::new(0);
+        let result = with_coppice_spend_guard(
+            CoppiceProtectionMode::Enabled,
+            &host,
+            &reducer,
+            &pending,
+            IronwoodViewingCapability::FullViewing,
+            &mut backend,
+            || called.set(called.get() + 1),
+        );
+        assert!(matches!(
+            result,
+            Err(SpendGuardError::ReconciliationFailed(
+                ReconciliationError::MissingPendingBond { .. }
+            ))
+        ));
+        assert_eq!(called.get(), 0);
+    }
+
+    #[test]
+    fn generic_backend_failure_fails_closed_before_proposal() {
+        let reducer = reducer();
+        let host = matching_host(&reducer);
+        let mut backend = FakeBackend {
+            notes: Vec::new(),
+            locks: BTreeMap::new(),
+            fail_inventory: true,
+            fail_lock: false,
+        };
+        let called = std::cell::Cell::new(0);
+        let result = run(
+            CoppiceProtectionMode::Enabled,
+            &host,
+            &empty_pending(),
+            &mut backend,
+            || called.set(called.get() + 1),
+        );
+        assert!(matches!(
+            result,
+            Err(SpendGuardError::ReconciliationFailed(
+                ReconciliationError::Backend(BackendError::Storage)
+            ))
+        ));
+        assert_eq!(called.get(), 0);
+    }
+
+    #[test]
+    fn foreign_lock_conflict_fails_closed_and_preserves_foreign_lock() {
+        let reducer = reducer();
+        let host = matching_host(&reducer);
+        let bond_tag = tag(2);
+        let output_id = note(2).output_id;
+        let foreign = LockOwner::new([0xf2; 32]);
+        let pending = collection_with(pending_for(bond_tag));
+        let mut backend = FakeBackend::new(vec![note(2)]).with_lock(output_id, foreign);
+        let before = backend.clone();
+        let called = std::cell::Cell::new(0);
+        let result = with_coppice_spend_guard(
+            CoppiceProtectionMode::Enabled,
+            &host,
+            &reducer,
+            &pending,
+            IronwoodViewingCapability::FullViewing,
+            &mut backend,
+            || called.set(called.get() + 1),
+        );
+        assert!(matches!(
+            result,
+            Err(SpendGuardError::ReconciliationFailed(
+                ReconciliationError::Backend(BackendError::ForeignLock)
+            ))
+        ));
+        assert_eq!(called.get(), 0);
+        assert_eq!(backend, before);
+    }
+
+    #[test]
+    fn protected_guard_repairs_an_externally_cleared_lock_before_proposal() {
+        let reducer = reducer();
+        let host = matching_host(&reducer);
+        let bond_tag = tag(3);
+        let output_id = note(3).output_id;
+        let pending = collection_with(pending_for(bond_tag));
+        let mut backend = FakeBackend::new(vec![note(3)]);
+        with_coppice_spend_guard(
+            CoppiceProtectionMode::Enabled,
+            &host,
+            &reducer,
+            &pending,
+            IronwoodViewingCapability::FullViewing,
+            &mut backend,
+            || (),
+        )
+        .unwrap();
+        assert_eq!(
+            backend.locks[&output_id].owner,
+            lock_owner_for_bond(bond_tag)
+        );
+
+        backend.locks.clear();
+        let called = std::cell::Cell::new(0);
+        with_coppice_spend_guard(
+            CoppiceProtectionMode::GuardOnly,
+            &host,
+            &reducer,
+            &pending,
+            IronwoodViewingCapability::FullViewing,
+            &mut backend,
+            || {
+                called.set(called.get() + 1);
+            },
+        )
+        .unwrap();
+        assert_eq!(called.get(), 1);
+        assert_eq!(
+            backend.locks[&output_id].owner,
+            lock_owner_for_bond(bond_tag)
+        );
+    }
+}

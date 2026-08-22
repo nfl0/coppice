@@ -1,11 +1,11 @@
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, fmt::Debug};
 
 use coppice::{
     bond_tag::{BondTagError, derive_v1_bond_tag},
     reducer_v1::V1Reducer,
     state::CoppiceState,
 };
-use zcash_client_backend::wallet::{LockOwner, OutputRef};
+use zcash_client_backend::wallet::OutputRef;
 use zcash_protocol::{PoolType, TxId};
 
 /// An ephemeral Ironwood output identity used by adapter operations.
@@ -54,6 +54,24 @@ pub enum IronwoodViewingCapability {
     IncomingOnly,
 }
 
+/// Supplies wallet-owned, unspent Ironwood notes to the adapter.
+///
+/// A concrete implementation over the pinned librustzcash [`InputSource`]
+/// must enumerate with `LockFilter::Unfiltered`. The default
+/// `LockedInputPolicy::Exclude` is suitable for ordinary input selection, but
+/// is not sufficient for reconstructing Coppice reservations: reconciliation
+/// must see outputs that are already locked. The concrete implementation also
+/// supplies the account, target height, note decryption/nullifier derivation,
+/// and any wallet-specific freshness checks needed to build
+/// [`OwnedIronwoodNote`] values.
+///
+/// [`InputSource`]: zcash_client_backend::data_api::InputSource
+pub trait OwnedIronwoodNoteSource {
+    type Error: Debug;
+
+    fn owned_unspent_ironwood_notes(&self) -> Result<Vec<OwnedIronwoodNote>, Self::Error>;
+}
+
 impl IronwoodViewingCapability {
     pub(crate) fn require_nullifier_derivation(self) -> Result<(), InventoryError> {
         match self {
@@ -75,8 +93,6 @@ pub struct OwnedIronwoodNote {
     pub position: Option<u32>,
     /// Whether the note is currently locked at the wallet's selection target.
     pub locked: bool,
-    /// The currently recorded lock owner, if the wallet exposed one.
-    pub lock_owner: Option<LockOwner>,
     /// Whether the host wallet considers the note spendable for a new use.
     pub spendable: bool,
     /// Explicit witness/chain freshness supplied by a later wallet adapter.
@@ -179,7 +195,6 @@ mod tests {
             nullifier: [id; 32],
             position: Some(u32::from(id)),
             locked: true,
-            lock_owner: None,
             spendable: false,
             freshness_eligible: false,
         }
