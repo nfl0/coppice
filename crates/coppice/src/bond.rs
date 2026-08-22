@@ -21,14 +21,19 @@ use orchard::{
 };
 use pasta_curves::{group::ff::PrimeField, pallas, vesta};
 use rand_chacha::ChaCha20Rng;
-use rand_core::{OsRng, SeedableRng};
+use rand_core::{CryptoRng, OsRng, RngCore, SeedableRng};
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use shardtree::{ShardTree, store::memory::MemoryShardStore};
 use std::time::{Duration, Instant};
 use zcash_note_encryption::try_note_decryption;
 use zcash_protocol::memo::MemoBytes;
 
+use orchard::circuit::coppice_bond::CoppiceBondCircuit;
+
 pub const BOND_K: u32 = 12;
+/// Minimum parameter size for the dedicated parallel-Merkle Coppice bond circuit.
+pub const COPPICE_BOND_K: u32 = 11;
 /// Exercises the inclusive `value >= B` boundary at exactly 1 ZEC.
 pub const FIXTURE_VALUE: u64 = constants::MINIMUM_BOND_VALUE;
 pub const FIXTURE_MINIMUM: u64 = constants::MINIMUM_BOND_VALUE;
@@ -172,6 +177,17 @@ fn fixture(
     owner_pk: [u8; 32],
     address: &[u8],
 ) -> Option<(BondCircuit, Vec<pallas::Base>, [u8; 32])> {
+    let witness = fixture_witness(value, corrupt_path, ask_override, note_seed, 0)?;
+    circuit_for_witness(witness, minimum, name, owner_pk, address)
+}
+
+fn fixture_witness(
+    value: u64,
+    corrupt_path: bool,
+    ask_override: Option<SpendAuthorizingKey>,
+    note_seed: &[u8],
+    position: u32,
+) -> Option<RegistrationBondWitness> {
     let sk = Option::<SpendingKey>::from(SpendingKey::from_bytes([7; 32]))?;
     let ask = SpendAuthorizingKey::from(&sk);
     let fvk = FullViewingKey::from(&sk);
@@ -204,10 +220,17 @@ fn fixture(
     let cmx = orchard::note::ExtractedNoteCommitment::from(note.commitment());
     let mut tree =
         ShardTree::<_, 32, 16>::new(MemoryShardStore::<MerkleHashOrchard, u32>::empty(), 100);
+    for _ in 0..position {
+        tree.append(MerkleHashOrchard::from_cmx(&cmx), Retention::Ephemeral)
+            .ok()?;
+    }
     tree.append(MerkleHashOrchard::from_cmx(&cmx), Retention::Marked)
         .ok()?;
     tree.checkpoint(1).ok()?;
-    let mut path: MerklePath = tree.witness_at_checkpoint_depth(0.into(), 0).ok()??.into();
+    let mut path: MerklePath = tree
+        .witness_at_checkpoint_depth(u64::from(position).into(), 0)
+        .ok()??
+        .into();
     if corrupt_path {
         let mut auth = path.auth_path();
         auth[0] = Option::<MerkleHashOrchard>::from(MerkleHashOrchard::from_bytes(
@@ -216,30 +239,301 @@ fn fixture(
         path = MerklePath::from_parts(path.position(), auth);
     }
     let actual_ask = ask_override.unwrap_or(ask);
-    circuit_for_witness(
-        RegistrationBondWitness {
-            note,
-            full_viewing_key: fvk,
-            spend_authorizing_key: actual_ask,
-            merkle_path: path,
-        },
-        minimum,
-        name,
-        owner_pk,
-        address,
-    )
+    Some(RegistrationBondWitness {
+        note,
+        full_viewing_key: fvk,
+        spend_authorizing_key: actual_ask,
+        merkle_path: path,
+    })
 }
 
-fn prove(
+fn minimal_fixture(
+    value: u64,
+    minimum: u64,
+    position: u32,
+    position_floor: u32,
+    corrupt_path: bool,
+    ask_override: Option<SpendAuthorizingKey>,
+    name: &str,
+    note_seed: &[u8],
+    owner_pk: [u8; 32],
+    address: &[u8],
+) -> Option<(CoppiceBondCircuit, Vec<pallas::Base>, [u8; 32])> {
+    let RegistrationBondWitness {
+        note,
+        full_viewing_key,
+        spend_authorizing_key,
+        merkle_path,
+    } = fixture_witness(value, corrupt_path, ask_override, note_seed, position)?;
+    let cmx = orchard::note::ExtractedNoteCommitment::from(note.commitment());
+    let anchor = merkle_path.root(cmx);
+    let nf = note.nullifier(&full_viewing_key);
+    let spend = SpendInfo::new(full_viewing_key, note, merkle_path)?;
+    let protocol = protocol_binding();
+    let context = context_binding(name, address);
+    let owner = owner_binding(owner_pk);
+    let circuit = CoppiceBondCircuit::from_spend(
+        spend,
+        spend_authorizing_key,
+        minimum,
+        protocol,
+        context,
+        owner,
+        position_floor,
+        crate::spent::bond_tag_domain_field(),
+    )?;
+    let nf_bytes = nf.to_bytes();
+    let tag_bytes = spent_tag(&nf_bytes).ok()?;
+    let tag = Option::<pallas::Base>::from(pallas::Base::from_repr(tag_bytes))?;
+    let anchor_field = Option::<pallas::Base>::from(pallas::Base::from_repr(anchor.to_bytes()))?;
+    Some((
+        circuit,
+        vec![
+            anchor_field,
+            pallas::Base::from(minimum),
+            pallas::Base::from(u64::from(position_floor)),
+            protocol,
+            context,
+            owner,
+            tag,
+        ],
+        nf_bytes,
+    ))
+}
+
+#[derive(Serialize)]
+struct PublicInputVector {
+    name: &'static str,
+    value: String,
+}
+
+#[derive(Serialize)]
+struct FailedPublicInputMutation {
+    index: usize,
+    name: &'static str,
+    mutated_value: String,
+    accepted: bool,
+}
+
+#[derive(Serialize)]
+struct BondProofVector {
+    source_git_commit: String,
+    halo2_proofs: &'static str,
+    params: &'static str,
+    commitment_scheme: &'static str,
+    transcript: &'static str,
+    proof_rng: &'static str,
+    public_inputs: Vec<PublicInputVector>,
+    verifier_artifact_format: &'static str,
+    verifier_artifact: String,
+    #[serde(rename = "BOND_VK_ID")]
+    bond_vk_id: String,
+    accepted_proof: String,
+    proof_length: usize,
+    accepted: bool,
+    failed_public_input_mutations: Vec<FailedPublicInputMutation>,
+    floor_equality_pass: bool,
+    floor_minus_one_fail: bool,
+}
+
+#[derive(Serialize)]
+struct OwnerKeyVector {
+    source: &'static str,
+    pallas_scalar: String,
+    redpallas_spendauth_verification_key: String,
+}
+
+#[derive(Serialize)]
+struct BondTagVector {
+    version: &'static str,
+    canonical_nullifier: String,
+    poseidon_bond_tag: String,
+}
+
+/// Generates the dedicated bond proof fixture and the two native vectors.
+///
+/// `source_git_commit` is explicit so the generated artifact can identify the
+/// source commit without creating a commit-hash cycle when the vectors themselves
+/// are committed afterward.
+pub fn generate_coppice_bond_vectors(
+    source_git_commit: &str,
+    canonical_nullifier: [u8; 32],
+) -> Result<(String, String, String), String> {
+    const PROOF_RNG_SEED: [u8; 32] = [42; 32];
+    const FIXTURE_POSITION: u32 = 1;
+    const PUBLIC_INPUT_NAMES: [&str; 7] = [
+        "anchor",
+        "minimum_value",
+        "position_floor",
+        "protocol_binding",
+        "context_binding",
+        "owner_binding",
+        "bond_tag",
+    ];
+
+    let owner = crate::owner::owner_key_bytes(
+        &(&crate::owner::OwnerSigningKey::try_from([1; 32]).map_err(|_| "owner key")?).into(),
+    );
+    let (circuit, instance, _) = minimal_fixture(
+        FIXTURE_VALUE,
+        FIXTURE_MINIMUM,
+        FIXTURE_POSITION,
+        FIXTURE_POSITION,
+        false,
+        None,
+        "bonded",
+        b"minimal-bond",
+        owner,
+        b"UA_BOND",
+    )
+    .ok_or("bond fixture")?;
+    let params = Params::<vesta::Affine>::new(COPPICE_BOND_K);
+    let vk = keygen_vk(&params, &circuit).map_err(|e| format!("vk: {e:?}"))?;
+    let pk = keygen_pk(&params, vk, &circuit).map_err(|e| format!("pk: {e:?}"))?;
+    let proof = prove_with_rng(
+        &params,
+        &pk,
+        circuit,
+        &instance,
+        ChaCha20Rng::from_seed(PROOF_RNG_SEED),
+    )
+    .map_err(|e| format!("proof: {e:?}"))?;
+    let accepted = verify(&params, pk.get_vk(), &proof, &instance);
+    if !accepted {
+        return Err("generated proof rejected".into());
+    }
+
+    let failed_public_input_mutations = PUBLIC_INPUT_NAMES
+        .iter()
+        .enumerate()
+        .map(|(index, name)| {
+            let mut mutated = instance.clone();
+            mutated[index] += pallas::Base::one();
+            FailedPublicInputMutation {
+                index,
+                name,
+                mutated_value: hex::encode(mutated[index].to_repr()),
+                accepted: verify(&params, pk.get_vk(), &proof, &mutated),
+            }
+        })
+        .collect::<Vec<_>>();
+    if failed_public_input_mutations
+        .iter()
+        .any(|mutation| mutation.accepted)
+    {
+        return Err("public input mutation accepted".into());
+    }
+
+    let failing_floor = FIXTURE_POSITION + 1;
+    let (below_floor, below_floor_instance, _) = minimal_fixture(
+        FIXTURE_VALUE,
+        FIXTURE_MINIMUM,
+        FIXTURE_POSITION,
+        failing_floor,
+        false,
+        None,
+        "bonded",
+        b"minimal-bond",
+        owner,
+        b"UA_BOND",
+    )
+    .ok_or("below-floor fixture")?;
+    let below_floor_proof = prove_with_rng(
+        &params,
+        &pk,
+        below_floor,
+        &below_floor_instance,
+        ChaCha20Rng::from_seed(PROOF_RNG_SEED),
+    )
+    .map_err(|e| format!("below-floor proof: {e:?}"))?;
+    let floor_minus_one_fail = !verify(
+        &params,
+        pk.get_vk(),
+        &below_floor_proof,
+        &below_floor_instance,
+    );
+    if !floor_minus_one_fail {
+        return Err("position below floor accepted".into());
+    }
+
+    let verifier_artifact = format!("{:?}", pk.get_vk().pinned()).into_bytes();
+    let bond_vk_id = blake2b_simd::Params::new()
+        .hash_length(32)
+        .personal(b"CoppiceBondV1")
+        .hash(&verifier_artifact);
+    let bond = BondProofVector {
+        source_git_commit: source_git_commit.to_owned(),
+        halo2_proofs: "0.3.2",
+        params: "Params::<vesta::Affine>::new(11)",
+        commitment_scheme: "Halo2 IPA/Vesta",
+        transcript: "Blake2bWrite/Blake2bRead with Challenge255",
+        proof_rng: "ChaCha20Rng::from_seed([42; 32])",
+        public_inputs: PUBLIC_INPUT_NAMES
+            .iter()
+            .zip(&instance)
+            .map(|(name, value)| PublicInputVector {
+                name,
+                value: hex::encode(value.to_repr()),
+            })
+            .collect(),
+        verifier_artifact_format: "UTF-8 Debug bytes of halo2_proofs::plonk::VerifyingKey::pinned()",
+        verifier_artifact: hex::encode(verifier_artifact),
+        bond_vk_id: hex::encode(bond_vk_id.as_bytes()),
+        accepted_proof: hex::encode(&proof),
+        proof_length: proof.len(),
+        accepted,
+        failed_public_input_mutations,
+        floor_equality_pass: accepted,
+        floor_minus_one_fail,
+    };
+    if bond.proof_length != 4_960 {
+        return Err(format!("unexpected proof length: {}", bond.proof_length));
+    }
+
+    let owner_key =
+        crate::owner::OwnerSigningKey::try_from([1; 32]).map_err(|_| "native owner key")?;
+    let owner_vector = OwnerKeyVector {
+        source: "reference-v0 owner partial vector",
+        pallas_scalar: hex::encode(<[u8; 32]>::from(&owner_key)),
+        redpallas_spendauth_verification_key: hex::encode(crate::owner::owner_key_bytes(
+            &(&owner_key).into(),
+        )),
+    };
+    let bond_tag = spent_tag(&canonical_nullifier).map_err(|_| "canonical nullifier")?;
+    let tag_vector = BondTagVector {
+        version: "Coppice bond tag v1 Poseidon P128Pow5T3 ConstantLength<2>",
+        canonical_nullifier: hex::encode(canonical_nullifier),
+        poseidon_bond_tag: hex::encode(bond_tag),
+    };
+
+    fn json<T: Serialize>(value: &T) -> Result<String, String> {
+        serde_json::to_string_pretty(value)
+            .map(|json| json + "\n")
+            .map_err(|e| e.to_string())
+    }
+    Ok((json(&bond)?, json(&owner_vector)?, json(&tag_vector)?))
+}
+
+fn prove<C: halo2_proofs::plonk::Circuit<pallas::Base>>(
     params: &Params<vesta::Affine>,
     pk: &halo2_proofs::plonk::ProvingKey<vesta::Affine>,
-    circuit: BondCircuit,
+    circuit: C,
     instance: &[pallas::Base],
+) -> Result<Vec<u8>, halo2_proofs::plonk::Error> {
+    prove_with_rng(params, pk, circuit, instance, OsRng)
+}
+
+fn prove_with_rng<C: halo2_proofs::plonk::Circuit<pallas::Base>, R: RngCore + CryptoRng>(
+    params: &Params<vesta::Affine>,
+    pk: &halo2_proofs::plonk::ProvingKey<vesta::Affine>,
+    circuit: C,
+    instance: &[pallas::Base],
+    rng: R,
 ) -> Result<Vec<u8>, halo2_proofs::plonk::Error> {
     let columns: [&[pallas::Base]; 1] = [instance];
     let instances: [&[&[pallas::Base]]; 1] = [&columns];
     let mut transcript = Blake2bWrite::<_, vesta::Affine, Challenge255<_>>::init(Vec::new());
-    create_proof(params, pk, &[circuit], &instances, OsRng, &mut transcript)?;
+    create_proof(params, pk, &[circuit], &instances, rng, &mut transcript)?;
     Ok(transcript.finalize())
 }
 fn verify(
@@ -430,6 +724,7 @@ pub(crate) fn test_registration_bond_with_owner_and_seed(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use halo2_proofs::plonk::ConstraintSystem;
     #[test]
     fn real_bond_circuit_positive_and_negative() {
         let owner = crate::owner::owner_key_bytes(
@@ -516,5 +811,211 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    const MINIMAL_TEST_POSITION: u32 = 1;
+
+    fn minimal_good(
+        value: u64,
+        floor: u32,
+        corrupt_path: bool,
+        ask_override: Option<SpendAuthorizingKey>,
+    ) -> Option<(CoppiceBondCircuit, Vec<pallas::Base>, [u8; 32])> {
+        let owner = crate::owner::owner_key_bytes(
+            &(&crate::owner::OwnerSigningKey::try_from([1; 32]).unwrap()).into(),
+        );
+        minimal_fixture(
+            value,
+            FIXTURE_MINIMUM,
+            MINIMAL_TEST_POSITION,
+            floor,
+            corrupt_path,
+            ask_override,
+            "bonded",
+            b"minimal-bond",
+            owner,
+            b"UA_BOND",
+        )
+    }
+
+    fn circuit_stats<C: halo2_proofs::plonk::Circuit<pallas::Base>>() -> [usize; 7] {
+        let mut cs = ConstraintSystem::<pallas::Base>::default();
+        C::configure(&mut cs);
+        let pinned = format!("{:?}", cs.pinned());
+        let count = |field: &str| {
+            pinned
+                .split_once(field)
+                .and_then(|(_, rest)| rest.split_once(','))
+                .and_then(|(value, _)| value.trim().parse::<usize>().ok())
+                .unwrap()
+        };
+        let permutation = pinned
+            .split_once("permutation: Argument { columns: [")
+            .and_then(|(_, rest)| rest.split_once("] }, lookups:"))
+            .unwrap()
+            .0;
+        let permutation_columns = permutation.matches("Column {").count();
+        let lookups = pinned
+            .split_once("lookups: [")
+            .and_then(|(_, rest)| rest.split_once("], constants:"))
+            .unwrap()
+            .0
+            .matches("Argument { input_expressions")
+            .count();
+        let degree = cs.degree();
+        [
+            count("num_advice_columns:"),
+            count("num_fixed_columns:"),
+            count("num_instance_columns:"),
+            lookups,
+            permutation_columns,
+            permutation_columns.div_ceil(degree - 2),
+            degree,
+        ]
+    }
+
+    #[test]
+    fn minimal_bond_relation_positive_and_negative() {
+        let (good, instance, _) =
+            minimal_good(FIXTURE_VALUE, MINIMAL_TEST_POSITION, false, None).unwrap();
+        let params = Params::<vesta::Affine>::new(11);
+        let vk = keygen_vk(&params, &good).unwrap();
+        let pk = keygen_pk(&params, vk, &good).unwrap();
+        let proof = prove(&params, &pk, good, &instance).unwrap();
+        assert!(verify(&params, pk.get_vk(), &proof, &instance));
+
+        let (wrong_path, mut wrong_path_instance, _) =
+            minimal_good(FIXTURE_VALUE, MINIMAL_TEST_POSITION, true, None).unwrap();
+        let wrong_path_proof = prove(&params, &pk, wrong_path, &wrong_path_instance).unwrap();
+        wrong_path_instance[0] = instance[0];
+        assert!(!verify(
+            &params,
+            pk.get_vk(),
+            &wrong_path_proof,
+            &wrong_path_instance
+        ));
+
+        let wrong_sk = Option::<SpendingKey>::from(SpendingKey::from_bytes([8; 32])).unwrap();
+        assert!(
+            minimal_good(
+                FIXTURE_VALUE,
+                MINIMAL_TEST_POSITION,
+                false,
+                Some(SpendAuthorizingKey::from(&wrong_sk)),
+            )
+            .is_none()
+        );
+
+        let (low, low_instance, _) =
+            minimal_good(FIXTURE_MINIMUM - 1, MINIMAL_TEST_POSITION, false, None).unwrap();
+        let low_proof = prove(&params, &pk, low, &low_instance).unwrap();
+        assert!(!verify(&params, pk.get_vk(), &low_proof, &low_instance));
+
+        for input in [3usize, 4, 5, 6] {
+            let mut wrong = instance.clone();
+            wrong[input] += pallas::Base::one();
+            assert!(!verify(&params, pk.get_vk(), &proof, &wrong));
+        }
+
+        // Inclusive boundary: position == floor.
+        assert_eq!(
+            instance[2],
+            pallas::Base::from(u64::from(MINIMAL_TEST_POSITION))
+        );
+
+        // position == floor - 1 must fail.
+        let failing_floor = MINIMAL_TEST_POSITION + 1;
+        let (below_floor, below_floor_instance, _) =
+            minimal_good(FIXTURE_VALUE, failing_floor, false, None).unwrap();
+        let below_floor_proof = prove(&params, &pk, below_floor, &below_floor_instance).unwrap();
+        assert!(!verify(
+            &params,
+            pk.get_vk(),
+            &below_floor_proof,
+            &below_floor_instance
+        ));
+    }
+
+    #[test]
+    fn dedicated_bond_vectors_regenerate_byte_for_byte() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let bond_path = root.join("test-vectors/coppice_bond_v1.json");
+        let owner_path = root.join("test-vectors/owner_keys.json");
+        let tag_path = root.join("test-vectors/bond_tags.json");
+        let expected_bond = std::fs::read_to_string(bond_path).expect("bond vector");
+        let expected_owner = std::fs::read_to_string(owner_path).expect("owner vector");
+        let expected_tag = std::fs::read_to_string(tag_path).expect("tag vector");
+        let bond: serde_json::Value = serde_json::from_str(&expected_bond).unwrap();
+        let tag: serde_json::Value = serde_json::from_str(&expected_tag).unwrap();
+        let source = bond["source_git_commit"].as_str().unwrap();
+        let canonical_nullifier: [u8; 32] =
+            hex::decode(tag["canonical_nullifier"].as_str().unwrap())
+                .unwrap()
+                .try_into()
+                .unwrap();
+        let (bond, owner, tag) =
+            generate_coppice_bond_vectors(source, canonical_nullifier).unwrap();
+        assert_eq!(bond, expected_bond);
+        assert_eq!(owner, expected_owner);
+        assert_eq!(tag, expected_tag);
+    }
+
+    #[test]
+    #[ignore = "manual optimized benchmark"]
+    fn minimal_bond_benchmark() {
+        const RUNS: usize = 10;
+        let (circuit, instance, _) =
+            minimal_good(FIXTURE_VALUE, MINIMAL_TEST_POSITION, false, None).unwrap();
+        for k in 9..=11 {
+            let params = Params::<vesta::Affine>::new(k);
+            let result = keygen_vk(&params, &circuit).and_then(|vk| {
+                let pk = keygen_pk(&params, vk, &circuit)?;
+                let proof = prove(&params, &pk, circuit.clone(), &instance)?;
+                if verify(&params, pk.get_vk(), &proof, &instance) {
+                    Ok(())
+                } else {
+                    Err(halo2_proofs::plonk::Error::ConstraintSystemFailure)
+                }
+            });
+            println!("minimum-k-probe k={k} prove-verify={:?}", result.is_ok());
+        }
+
+        let k = 11;
+        let params = Params::<vesta::Affine>::new(k);
+        let vk = keygen_vk(&params, &circuit).unwrap();
+        let pk = keygen_pk(&params, vk, &circuit).unwrap();
+        let warmup = prove(&params, &pk, circuit.clone(), &instance).unwrap();
+        assert!(verify(&params, pk.get_vk(), &warmup, &instance));
+
+        let mut proof = Vec::new();
+        let mut proving = Duration::ZERO;
+        let mut verifying = Duration::ZERO;
+        for _ in 0..RUNS {
+            let start = Instant::now();
+            proof = prove(&params, &pk, circuit.clone(), &instance).unwrap();
+            proving += start.elapsed();
+            let start = Instant::now();
+            assert!(verify(&params, pk.get_vk(), &proof, &instance));
+            verifying += start.elapsed();
+        }
+        let [
+            advice,
+            fixed,
+            instance_columns,
+            lookups,
+            permutation_columns,
+            permutation_sets,
+            degree,
+        ] = circuit_stats::<CoppiceBondCircuit>();
+        println!(
+            "columns advice={} fixed={} instance={} lookups={} permutation-columns={} permutation-product-sets={} degree={}",
+            advice, fixed, instance_columns, lookups, permutation_columns, permutation_sets, degree,
+        );
+        let baseline = circuit_stats::<BondCircuit>();
+        println!("baseline-constraint-system={baseline:?}");
+        println!("proof-bytes={}", proof.len());
+        println!("prove-mean-us={}", proving.as_micros() / RUNS as u128);
+        println!("verify-mean-us={}", verifying.as_micros() / RUNS as u128);
+        println!("peak-rss-kib={:?}", peak_memory_kib());
     }
 }

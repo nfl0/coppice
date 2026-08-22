@@ -162,6 +162,54 @@ fn vectors(write: bool) {
     }
 }
 
+fn write_bond_vectors(source_git_commit: &str) {
+    assert!(
+        source_git_commit.len() == 40
+            && source_git_commit
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit()),
+        "source commit must be a 40-character hexadecimal SHA"
+    );
+    let head = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("run git rev-parse");
+    assert!(head.status.success(), "git rev-parse HEAD failed");
+    assert_eq!(
+        source_git_commit,
+        String::from_utf8(head.stdout)
+            .expect("ASCII git SHA")
+            .trim(),
+        "source commit must equal the checked-out HEAD"
+    );
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let reference = std::fs::read_to_string(root.join("test-vectors/reference-v0.json"))
+        .expect("read reference vectors");
+    let reference: serde_json::Value =
+        serde_json::from_str(&reference).expect("parse reference vectors");
+    let canonical_nullifier: [u8; 32] = hex::decode(
+        reference["ironwood_nullifier"]
+            .as_str()
+            .expect("canonical nullifier"),
+    )
+    .expect("hex nullifier")
+    .try_into()
+    .expect("32-byte nullifier");
+    let (bond, owner_keys, bond_tags) =
+        bond::generate_coppice_bond_vectors(source_git_commit, canonical_nullifier)
+            .expect("generate bond vectors");
+    let vectors = root.join("test-vectors");
+    for (name, contents) in [
+        ("coppice_bond_v1.json", bond),
+        ("owner_keys.json", owner_keys),
+        ("bond_tags.json", bond_tags),
+    ] {
+        let path = vectors.join(name);
+        std::fs::write(&path, contents).expect("write vector");
+        println!("{}", path.display());
+    }
+}
+
 fn main() {
     let args = std::env::args().collect::<Vec<_>>();
     match args.get(1).map(String::as_str) {
@@ -170,6 +218,12 @@ fn main() {
         Some("bond-demo") => bond_demo(),
         Some("print-test-vectors") => vectors(false),
         Some("write-test-vectors") => vectors(true),
-        _ => eprintln!("usage: carrier-demo | replay-demo | bond-demo | print-test-vectors"),
+        Some("write-bond-vectors") => write_bond_vectors(
+            args.get(2)
+                .expect("usage: write-bond-vectors <source-git-commit>"),
+        ),
+        _ => eprintln!(
+            "usage: carrier-demo | replay-demo | bond-demo | print-test-vectors | write-bond-vectors <source-git-commit>"
+        ),
     }
 }

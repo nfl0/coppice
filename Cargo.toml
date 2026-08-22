@@ -12,6 +12,7 @@ repository = "https://github.com/nfl0/coppice"
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(zcash_unstable, values("nu7"))'] }
 
 [workspace.dependencies]
+blake2b_simd = "1"
 coppice = { path = "crates/coppice" }
 halo2_gadgets = { version = "0.5", default-features = false }
 halo2_proofs = "=0.3.2"

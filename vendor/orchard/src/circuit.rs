@@ -1310,6 +1310,486 @@ pub mod bond {
     }
 }
 
+/// Dedicated non-consensus Coppice bond circuit composed from the existing Orchard gadgets.
+/// It deliberately omits every output-note and Action-only relation.
+#[allow(missing_docs)]
+pub mod coppice_bond {
+    use super::*;
+    use halo2_gadgets::poseidon::Hash as PoseidonHash;
+
+    pub const ANCHOR_INPUT: usize = 0;
+    pub const MINIMUM_VALUE_INPUT: usize = 1;
+    pub const POSITION_FLOOR_INPUT: usize = 2;
+    pub const PROTOCOL_INPUT: usize = 3;
+    pub const CONTEXT_INPUT: usize = 4;
+    pub const OWNER_BINDING_INPUT: usize = 5;
+    pub const BOND_TAG_INPUT: usize = 6;
+
+    #[derive(Clone, Debug)]
+    pub struct CoppiceBondConfig {
+        primary: Column<InstanceColumn>,
+        advices: [Column<Advice>; 10],
+        q_relation: Selector,
+        add_config: AddConfig,
+        ecc_config: EccConfig<OrchardFixedBases>,
+        poseidon_config: PoseidonConfig<pallas::Base, 3, 2>,
+        merkle_configs:
+            [MerkleConfig<OrchardHashDomains, OrchardCommitDomains, OrchardFixedBases>; 2],
+        sinsemilla_configs:
+            [SinsemillaConfig<OrchardHashDomains, OrchardCommitDomains, OrchardFixedBases>; 2],
+        commit_ivk_config: CommitIvkConfig,
+        note_commit_config: NoteCommitConfig,
+        range_check: LookupRangeCheckConfig<pallas::Base, 10>,
+    }
+
+    impl CoppiceBondConfig {
+        fn ecc_chip(&self) -> EccChip<OrchardFixedBases> {
+            EccChip::construct(self.ecc_config.clone(), CircuitVersion::AnchoredBase)
+        }
+
+        fn add_chip(&self) -> AddChip {
+            AddChip::construct(self.add_config.clone())
+        }
+
+        fn poseidon_chip(&self) -> PoseidonChip<pallas::Base, 3, 2> {
+            PoseidonChip::construct(self.poseidon_config.clone())
+        }
+
+        fn sinsemilla_chip(
+            &self,
+            index: usize,
+        ) -> SinsemillaChip<OrchardHashDomains, OrchardCommitDomains, OrchardFixedBases> {
+            SinsemillaChip::construct(self.sinsemilla_configs[index].clone())
+        }
+
+        fn merkle_chip(
+            &self,
+            index: usize,
+        ) -> MerkleChip<OrchardHashDomains, OrchardCommitDomains, OrchardFixedBases> {
+            MerkleChip::construct(self.merkle_configs[index].clone())
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct CoppiceBondCircuit {
+        path: Value<[MerkleHashOrchard; MERKLE_DEPTH_ORCHARD]>,
+        pos: Value<u32>,
+        g_d: Value<NonIdentityPallasPoint>,
+        pk_d: Value<DiversifiedTransmissionKey>,
+        value: Value<NoteValue>,
+        rho: Value<Rho>,
+        psi: Value<pallas::Base>,
+        rcm: Value<NoteCommitTrapdoor>,
+        cm: Value<NoteCommitment>,
+        ask: Value<pallas::Scalar>,
+        ak: Value<SpendValidatingKey>,
+        nk: Value<NullifierDerivingKey>,
+        rivk: Value<CommitIvkRandomness>,
+        minimum_value: u64,
+        protocol_binding: Value<pallas::Base>,
+        context_binding: Value<pallas::Base>,
+        owner_binding: Value<pallas::Base>,
+        position_floor: Value<u32>,
+        bond_domain: pallas::Base,
+    }
+
+    impl CoppiceBondCircuit {
+        #[allow(clippy::too_many_arguments)]
+        pub fn from_spend(
+            spend: SpendInfo,
+            ask: crate::keys::SpendAuthorizingKey,
+            minimum_value: u64,
+            protocol_binding: pallas::Base,
+            context_binding: pallas::Base,
+            owner_binding: pallas::Base,
+            position_floor: u32,
+            bond_domain: pallas::Base,
+        ) -> Option<Self> {
+            let expected_ak: SpendValidatingKey = (&ask).into();
+            let note_ak: SpendValidatingKey = spend.fvk.clone().into();
+            if expected_ak != note_ak {
+                return None;
+            }
+            let address = spend.note.recipient();
+            let merkle_path = spend.merkle_path?;
+            Some(Self {
+                path: Value::known(merkle_path.auth_path()),
+                pos: Value::known(merkle_path.position()),
+                g_d: Value::known(address.g_d()),
+                pk_d: Value::known(*address.pk_d()),
+                value: Value::known(spend.note.value()),
+                rho: Value::known(spend.note.rho()),
+                psi: Value::known(spend.note.psi()),
+                rcm: Value::known(spend.note.rcm()),
+                cm: Value::known(spend.note.commitment()),
+                ask: Value::known(ask.to_scalar()),
+                ak: Value::known(note_ak),
+                nk: Value::known(*spend.fvk.nk()),
+                rivk: Value::known(spend.fvk.rivk(spend.scope)),
+                minimum_value,
+                protocol_binding: Value::known(protocol_binding),
+                context_binding: Value::known(context_binding),
+                owner_binding: Value::known(owner_binding),
+                position_floor: Value::known(position_floor),
+                bond_domain,
+            })
+        }
+
+        fn empty(&self) -> Self {
+            Self {
+                path: Value::unknown(),
+                pos: Value::unknown(),
+                g_d: Value::unknown(),
+                pk_d: Value::unknown(),
+                value: Value::unknown(),
+                rho: Value::unknown(),
+                psi: Value::unknown(),
+                rcm: Value::unknown(),
+                cm: Value::unknown(),
+                ask: Value::unknown(),
+                ak: Value::unknown(),
+                nk: Value::unknown(),
+                rivk: Value::unknown(),
+                minimum_value: self.minimum_value,
+                protocol_binding: Value::unknown(),
+                context_binding: Value::unknown(),
+                owner_binding: Value::unknown(),
+                position_floor: Value::unknown(),
+                bond_domain: self.bond_domain,
+            }
+        }
+    }
+
+    impl plonk::Circuit<pallas::Base> for CoppiceBondCircuit {
+        type Config = CoppiceBondConfig;
+        type FloorPlanner = floor_planner::V1;
+
+        fn without_witnesses(&self) -> Self {
+            self.empty()
+        }
+
+        fn configure(meta: &mut plonk::ConstraintSystem<pallas::Base>) -> Self::Config {
+            let advices = core::array::from_fn(|_| meta.advice_column());
+            let primary = meta.instance_column();
+            meta.enable_equality(primary);
+            for advice in advices {
+                meta.enable_equality(advice);
+            }
+
+            let q_relation = meta.selector();
+            meta.create_gate("Coppice bond ordered relations", |meta| {
+                let q = meta.query_selector(q_relation);
+                let lhs = meta.query_advice(advices[0], Rotation::cur());
+                let rhs = meta.query_advice(advices[1], Rotation::cur());
+                let difference = meta.query_advice(advices[2], Rotation::cur());
+                Constraints::with_selector(q, [("lhs = rhs + difference", lhs - rhs - difference)])
+            });
+
+            let add_config = AddChip::configure(meta, advices[7], advices[8], advices[6]);
+            let table_idx = meta.lookup_table_column();
+            let lookup = (
+                table_idx,
+                meta.lookup_table_column(),
+                meta.lookup_table_column(),
+            );
+            let lagrange_coeffs = core::array::from_fn(|_| meta.fixed_column());
+            meta.enable_constant(lagrange_coeffs[0]);
+            let range_check = LookupRangeCheckConfig::configure(meta, advices[9], table_idx);
+            let ecc_config =
+                EccChip::<OrchardFixedBases>::configure(meta, advices, lagrange_coeffs, range_check);
+            let poseidon_config = PoseidonChip::configure::<poseidon::P128Pow5T3>(
+                meta,
+                advices[6..9].try_into().unwrap(),
+                advices[5],
+                lagrange_coeffs[2..5].try_into().unwrap(),
+                lagrange_coeffs[5..8].try_into().unwrap(),
+            );
+            let sinsemilla_config_1 = SinsemillaChip::configure(
+                meta,
+                advices[..5].try_into().unwrap(),
+                advices[6],
+                lagrange_coeffs[0],
+                lookup,
+                range_check,
+                false,
+            );
+            let sinsemilla_config_2 = SinsemillaChip::configure(
+                meta,
+                advices[5..].try_into().unwrap(),
+                advices[7],
+                lagrange_coeffs[1],
+                lookup,
+                range_check,
+                false,
+            );
+            let merkle_configs = [
+                MerkleChip::configure(meta, sinsemilla_config_1.clone()),
+                MerkleChip::configure(meta, sinsemilla_config_2.clone()),
+            ];
+            let commit_ivk_config = CommitIvkChip::configure(meta, advices);
+            let note_commit_config =
+                NoteCommitChip::configure(meta, advices, sinsemilla_config_1.clone());
+
+            CoppiceBondConfig {
+                primary,
+                advices,
+                q_relation,
+                add_config,
+                ecc_config,
+                poseidon_config,
+                merkle_configs,
+                sinsemilla_configs: [sinsemilla_config_1, sinsemilla_config_2],
+                commit_ivk_config,
+                note_commit_config,
+                range_check,
+            }
+        }
+
+        #[allow(non_snake_case)]
+        fn synthesize(
+            &self,
+            config: Self::Config,
+            mut layouter: impl Layouter<pallas::Base>,
+        ) -> Result<(), plonk::Error> {
+            SinsemillaChip::load(config.sinsemilla_configs[0].clone(), &mut layouter)?;
+            let ecc_chip = config.ecc_chip();
+            let psi = assign_free_advice(
+                layouter.namespace(|| "witness psi"),
+                config.advices[0],
+                self.psi,
+            )?;
+            let rho = assign_free_advice(
+                layouter.namespace(|| "witness rho"),
+                config.advices[0],
+                self.rho.map(|rho| rho.into_inner()),
+            )?;
+            let cm = Point::new(
+                ecc_chip.clone(),
+                layouter.namespace(|| "note commitment"),
+                self.cm.as_ref().map(|cm| cm.inner().to_affine()),
+            )?;
+            let g_d = NonIdentityPoint::new(
+                ecc_chip.clone(),
+                layouter.namespace(|| "diversifier base"),
+                self.g_d.as_ref().map(|point| point.to_affine()),
+            )?;
+            let ak_P: Value<pallas::Point> = self.ak.as_ref().map(|ak| ak.into());
+            let ak_P = NonIdentityPoint::new(
+                ecc_chip.clone(),
+                layouter.namespace(|| "spend validating key"),
+                ak_P.map(|point| point.to_affine()),
+            )?;
+            let nk = assign_free_advice(
+                layouter.namespace(|| "nullifier deriving key"),
+                config.advices[0],
+                self.nk.map(|nk| nk.inner()),
+            )?;
+            let value = assign_free_advice(
+                layouter.namespace(|| "note value"),
+                config.advices[0],
+                self.value,
+            )?;
+
+            let path = self.path.map(|path| path.map(|node| node.inner()));
+            let merkle_inputs = MerklePath::construct(
+                [config.merkle_chip(0), config.merkle_chip(1)],
+                OrchardHashDomains::MerkleCrh,
+                self.pos,
+                path,
+            );
+            let root = merkle_inputs.calculate_root(
+                layouter.namespace(|| "32-level Ironwood Merkle path"),
+                cm.extract_p().inner().clone(),
+            )?;
+            layouter.constrain_instance(root.cell(), config.primary, ANCHOR_INPUT)?;
+
+            let ivk = {
+                let rivk = ScalarFixed::new(
+                    ecc_chip.clone(),
+                    layouter.namespace(|| "rivk"),
+                    self.rivk.map(|rivk| rivk.inner()),
+                )?;
+                gadget::commit_ivk(
+                    config.sinsemilla_chip(0),
+                    ecc_chip.clone(),
+                    CommitIvkChip::construct(config.commit_ivk_config.clone()),
+                    layouter.namespace(|| "CommitIvk"),
+                    ak_P.extract_p().inner().clone(),
+                    nk.clone(),
+                    rivk,
+                )?
+            };
+            let ivk = ScalarVar::from_base(
+                ecc_chip.clone(),
+                layouter.namespace(|| "ivk scalar"),
+                ivk.inner(),
+            )?;
+            let (derived_pk_d, _) = g_d.mul(layouter.namespace(|| "[ivk] g_d"), ivk)?;
+            let pk_d = NonIdentityPoint::new(
+                ecc_chip.clone(),
+                layouter.namespace(|| "transmission key"),
+                self.pk_d.map(|point| point.inner().to_affine()),
+            )?;
+            derived_pk_d.constrain_equal(layouter.namespace(|| "note owner"), &pk_d)?;
+
+            let rcm = ScalarFixed::new(
+                ecc_chip.clone(),
+                layouter.namespace(|| "note commitment trapdoor"),
+                self.rcm.as_ref().map(|rcm| rcm.inner()),
+            )?;
+            let derived_cm = gadget::note_commit(
+                layouter.namespace(|| "V3 note commitment"),
+                config.sinsemilla_chip(0),
+                ecc_chip.clone(),
+                NoteCommitChip::construct(config.note_commit_config.clone()),
+                g_d.inner(),
+                pk_d.inner(),
+                value.clone(),
+                rho.clone(),
+                psi.clone(),
+                rcm,
+            )?;
+            derived_cm.constrain_equal(layouter.namespace(|| "note commitment equality"), &cm)?;
+
+            let ask = ScalarFixed::new(
+                ecc_chip.clone(),
+                layouter.namespace(|| "spend authorizing key"),
+                self.ask,
+            )?;
+            let spend_auth_g =
+                FixedPoint::from_inner(ecc_chip.clone(), OrchardFixedBasesFull::SpendAuthG);
+            let (derived_ak, _) =
+                spend_auth_g.mul(layouter.namespace(|| "[ask] SpendAuthG"), ask)?;
+            derived_ak.constrain_equal(layouter.namespace(|| "spend authority"), &ak_P)?;
+
+            let nf = gadget::derive_nullifier(
+                layouter.namespace(|| "canonical nullifier"),
+                config.poseidon_chip(),
+                config.add_chip(),
+                ecc_chip,
+                rho,
+                &psi,
+                &cm,
+                nk,
+            )?;
+            let bond_domain = layouter.assign_region(
+                || "fixed bond domain",
+                |mut region| {
+                    region.assign_advice_from_constant(
+                        || "bond domain",
+                        config.advices[0],
+                        0,
+                        self.bond_domain,
+                    )
+                },
+            )?;
+            let bond_tag = PoseidonHash::<
+                _,
+                _,
+                poseidon::P128Pow5T3,
+                poseidon::ConstantLength<2>,
+                3,
+                2,
+            >::init(config.poseidon_chip(), layouter.namespace(|| "bond tag init"))?
+            .hash(
+                layouter.namespace(|| "bond tag"),
+                [bond_domain, nf.inner().clone()],
+            )?;
+            layouter.constrain_instance(bond_tag.cell(), config.primary, BOND_TAG_INPUT)?;
+
+            let value_difference = self
+                .value
+                .map(|value| pallas::Base::from(value.inner().saturating_sub(self.minimum_value)));
+            let value_running = config.range_check.witness_check(
+                layouter.namespace(|| "value difference"),
+                value_difference,
+                7,
+                true,
+            )?;
+            config.range_check.copy_short_check(
+                layouter.namespace(|| "value difference top bits"),
+                value_running[6].clone(),
+                4,
+            )?;
+
+            let position = self.pos.map(|position| pallas::Base::from(u64::from(position)));
+            let position_difference = self
+                .pos
+                .zip(self.position_floor)
+                .map(|(position, floor)| {
+                    pallas::Base::from(u64::from(position.saturating_sub(floor)))
+                });
+            let position_running = config.range_check.witness_check(
+                layouter.namespace(|| "position difference"),
+                position_difference,
+                4,
+                true,
+            )?;
+            config.range_check.copy_short_check(
+                layouter.namespace(|| "position difference top bits"),
+                position_running[3].clone(),
+                2,
+            )?;
+
+            layouter.assign_region(
+                || "ordered public relations",
+                |mut region| {
+                    value.copy_advice(|| "value", &mut region, config.advices[0], 0)?;
+                    region.assign_advice_from_instance(
+                        || "minimum value",
+                        config.primary,
+                        MINIMUM_VALUE_INPUT,
+                        config.advices[1],
+                        0,
+                    )?;
+                    value_running[0].copy_advice(
+                        || "value difference",
+                        &mut region,
+                        config.advices[2],
+                        0,
+                    )?;
+                    config.q_relation.enable(&mut region, 0)?;
+
+                    region.assign_advice(
+                        || "position",
+                        config.advices[0],
+                        1,
+                        || position,
+                    )?;
+                    region.assign_advice_from_instance(
+                        || "position floor",
+                        config.primary,
+                        POSITION_FLOOR_INPUT,
+                        config.advices[1],
+                        1,
+                    )?;
+                    position_running[0].copy_advice(
+                        || "position difference",
+                        &mut region,
+                        config.advices[2],
+                        1,
+                    )?;
+                    config.q_relation.enable(&mut region, 1)
+                },
+            )?;
+
+            for (label, value, input) in [
+                ("protocol binding", self.protocol_binding, PROTOCOL_INPUT),
+                ("context binding", self.context_binding, CONTEXT_INPUT),
+                ("owner binding", self.owner_binding, OWNER_BINDING_INPUT),
+            ] {
+                let cell = assign_free_advice(
+                    layouter.namespace(|| label),
+                    config.advices[0],
+                    value,
+                )?;
+                layouter.constrain_instance(cell.cell(), config.primary, input)?;
+            }
+            Ok(())
+        }
+    }
+}
+
 /// The verifying key for the Orchard Action circuit.
 ///
 /// Build with [`VerifyingKey::build`] for an explicit circuit version.
