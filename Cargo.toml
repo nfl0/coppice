@@ -20,7 +20,6 @@ hex = "0.4"
 incrementalmerkletree = { version = "0.8.2", features = ["legacy-api"] }
 orchard = { version = "0.15.0", features = ["std"] }
 pasta_curves = "0.5"
-pczt = { version = "=0.9.3", features = ["zcp-builder", "io-finalizer", "prover", "signer", "spend-finalizer", "tx-extractor"] }
 rand_chacha = "0.3"
 rand_core = "0.6"
 serde = { version = "1", features = ["derive"] }
@@ -33,7 +32,6 @@ zcash_protocol = { version = "=0.10.3", features = ["std", "local-consensus"] }
 
 [patch.crates-io]
 orchard = { path = "vendor/orchard" }
-pczt = { path = "vendor/pczt" }
 zcash_primitives = { git = "https://github.com/zcash/librustzcash.git", rev = "6c07e5f3297febf469e5cc8d0b91321e0767cdd7" }
 zcash_protocol = { git = "https://github.com/zcash/librustzcash.git", rev = "6c07e5f3297febf469e5cc8d0b91321e0767cdd7" }
 zcash_transparent = { git = "https://github.com/zcash/librustzcash.git", rev = "6c07e5f3297febf469e5cc8d0b91321e0767cdd7" }
