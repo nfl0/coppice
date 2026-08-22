@@ -122,6 +122,21 @@ pub struct AppliedBlock {
     pub transaction_outcomes: Vec<TransactionOutcome>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RewindError {
+    BeforeActivation,
+    BeyondTip,
+    SnapshotMissing,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ReducerSnapshot {
+    state: CoppiceState,
+    ironwood_tree: IronwoodFrontier,
+    ironwood_checkpoints: BTreeMap<u32, AuthenticatedIronwoodCheckpoint>,
+    tip: ReplayTip,
+}
+
 pub struct V1Reducer {
     deployment: DeploymentParameters,
     deployment_id: [u8; 32],
@@ -130,6 +145,10 @@ pub struct V1Reducer {
     ironwood_checkpoints: BTreeMap<u32, AuthenticatedIronwoodCheckpoint>,
     tip: ReplayTip,
     verifier: V1BondVerifier,
+    /// In-memory reference reorg history. This intentionally retains every
+    /// complete canonical snapshot since activation; it is not a persistence
+    /// or serialization format.
+    history: BTreeMap<u32, ReducerSnapshot>,
 }
 
 enum CarrierSemantic {
@@ -165,17 +184,29 @@ impl V1Reducer {
         ironwood_checkpoints.insert(checkpoint.height, authenticated);
         let verifier =
             V1BondVerifier::new().map_err(|_| FatalReducerError::VerifierInitializationFailure)?;
+        let state = CoppiceState::default();
+        let ironwood_tree = checkpoint.ironwood_frontier;
+        let tip = ReplayTip {
+            height: checkpoint.height,
+            block_hash: checkpoint.block_hash,
+        };
+        let initial_snapshot = ReducerSnapshot {
+            state: state.clone(),
+            ironwood_tree: ironwood_tree.clone(),
+            ironwood_checkpoints: ironwood_checkpoints.clone(),
+            tip,
+        };
+        let mut history = BTreeMap::new();
+        history.insert(checkpoint.height, initial_snapshot);
         Ok(Self {
             deployment,
             deployment_id,
-            state: CoppiceState::default(),
-            ironwood_tree: checkpoint.ironwood_frontier,
+            state,
+            ironwood_tree,
             ironwood_checkpoints,
-            tip: ReplayTip {
-                height: checkpoint.height,
-                block_hash: checkpoint.block_hash,
-            },
+            tip,
             verifier,
+            history,
         })
     }
 
@@ -201,6 +232,47 @@ impl V1Reducer {
 
     pub fn tip(&self) -> ReplayTip {
         self.tip
+    }
+
+    pub fn oldest_rewind_height(&self) -> u32 {
+        *self
+            .history
+            .first_key_value()
+            .expect("activation snapshot is always retained")
+            .0
+    }
+
+    pub fn has_rewind_snapshot(&self, height: u32) -> bool {
+        self.history.contains_key(&height)
+    }
+
+    /// Restores the exact in-memory reducer snapshot at the host-selected
+    /// common ancestor and discards the abandoned canonical suffix.
+    pub fn rewind_to(&mut self, height: u32) -> Result<(), RewindError> {
+        let activation_checkpoint_height = self
+            .deployment
+            .activation_height
+            .checked_sub(1)
+            .expect("validated deployment has nonzero activation height");
+        if height < activation_checkpoint_height {
+            return Err(RewindError::BeforeActivation);
+        }
+        if height > self.tip.height {
+            return Err(RewindError::BeyondTip);
+        }
+        let snapshot = self
+            .history
+            .get(&height)
+            .cloned()
+            .ok_or(RewindError::SnapshotMissing)?;
+
+        self.state = snapshot.state;
+        self.ironwood_tree = snapshot.ironwood_tree;
+        self.ironwood_checkpoints = snapshot.ironwood_checkpoints;
+        self.tip = snapshot.tip;
+        self.history
+            .retain(|snapshot_height, _| *snapshot_height <= height);
+        Ok(())
     }
 
     pub fn apply_block(
@@ -317,6 +389,15 @@ impl V1Reducer {
         self.ironwood_tree = tree;
         self.ironwood_checkpoints = checkpoints;
         self.tip = tip;
+        self.history.insert(
+            block.height,
+            ReducerSnapshot {
+                state: self.state.clone(),
+                ironwood_tree: self.ironwood_tree.clone(),
+                ironwood_checkpoints: self.ironwood_checkpoints.clone(),
+                tip: self.tip,
+            },
+        );
         Ok(AppliedBlock {
             tip,
             ironwood_checkpoint,
@@ -692,13 +773,75 @@ mod tests {
         IronwoodFrontier,
         BTreeMap<u32, AuthenticatedIronwoodCheckpoint>,
         ReplayTip,
+        BTreeMap<u32, ReducerSnapshot>,
     ) {
         (
             reducer.state.clone(),
             reducer.ironwood_tree.clone(),
             reducer.ironwood_checkpoints.clone(),
             reducer.tip,
+            reducer.history.clone(),
         )
+    }
+
+    fn empty_block_at(
+        reducer: &V1Reducer,
+        height: u32,
+        block_hash: [u8; 32],
+    ) -> CanonicalBlockInput {
+        CanonicalBlockInput {
+            height,
+            block_hash,
+            prev_block_hash: reducer.tip.block_hash,
+            branch_id: BranchId::Nu6_3,
+            transactions: vec![],
+        }
+    }
+
+    fn semantic_block(
+        reducer: &mut V1Reducer,
+        height: u32,
+        block_hash: [u8; 32],
+        mutate: impl FnOnce(&V1Reducer, &mut CoppiceState),
+    ) -> AppliedBlock {
+        let mut staged = reducer.state.clone();
+        mutate(reducer, &mut staged);
+        reducer.state = staged;
+        reducer
+            .apply_block(&empty_block_at(reducer, height, block_hash))
+            .unwrap()
+    }
+
+    fn block_with_effects(
+        reducer: &V1Reducer,
+        height: u32,
+        block_hash: [u8; 32],
+        nullifiers: Vec<[u8; 32]>,
+        commitments: Vec<[u8; 32]>,
+    ) -> CanonicalBlockInput {
+        let mut input = empty_block_at(reducer, height, block_hash);
+        input.transactions.push(CanonicalTxInput {
+            tx_index: 0,
+            txid: [height as u8; 32],
+            ironwood_nullifiers: nullifiers,
+            ironwood_commitments: commitments,
+            full_tx_required: false,
+            candidate_full_tx: None,
+        });
+        input
+    }
+
+    fn valid_commitment(byte: u8) -> [u8; 32] {
+        for suffix in 0..=u8::MAX {
+            let mut candidate = [byte; 32];
+            candidate[31] = suffix;
+            if Option::<MerkleHashOrchard>::from(MerkleHashOrchard::from_bytes(&candidate))
+                .is_some()
+            {
+                return candidate;
+            }
+        }
+        panic!("test must find a canonical field encoding")
     }
 
     fn assert_atomic(error: FatalReducerError, mutate: impl FnOnce(&mut CanonicalBlockInput)) {
@@ -1050,5 +1193,352 @@ mod tests {
             })
             .unwrap()
         );
+    }
+
+    fn install_reorg_common_history(reducer: &mut V1Reducer, commitment: [u8; 32]) {
+        reducer
+            .apply_block(&empty_block_at(reducer, 100, [0x10; 32]))
+            .unwrap();
+        semantic_block(reducer, 101, [0x11; 32], |_, state| {
+            state
+                .apply_prevalidated_commit(
+                    commitment,
+                    pending::ChainPosition {
+                        block_height: 101,
+                        tx_index: 0,
+                    },
+                )
+                .unwrap();
+        });
+    }
+
+    fn install_reorg_reveal(
+        reducer: &mut V1Reducer,
+        commitment: [u8; 32],
+        owner_pk: [u8; 32],
+        bond_tag: [u8; 32],
+        block_hash: [u8; 32],
+    ) -> AppliedBlock {
+        semantic_block(reducer, 102, block_hash, |_, state| {
+            state
+                .apply_prevalidated_reveal(crate::state::PrevalidatedReveal {
+                    name: "alice".to_owned(),
+                    owner_pk,
+                    bond_tag,
+                    address: canonical_ua(),
+                    commitment,
+                    path: crate::state::PrevalidatedRevealPath::NewName,
+                })
+                .unwrap();
+        })
+    }
+
+    #[test]
+    fn reorg_vector_rewind_and_replay_equals_fresh_replay() {
+        let vector: serde_json::Value =
+            serde_json::from_str(include_str!("../../../test-vectors/reorg.json")).unwrap();
+        assert_eq!(vector["vector"]["common_ancestor_height"], 101);
+
+        let key = OwnerSigningKey::try_from([7; 32]).unwrap();
+        let owner_pk = owner_key_bytes(&(&key).into());
+        let nullifier = canonical_nullifier();
+        let bond_tag = bond_tag::derive_v1_bond_tag(&nullifier).unwrap();
+        let commitment = [0x51; 32];
+        let abandoned_pending = [0x61; 32];
+        let abandoned_nullifier = [1; 32];
+        let abandoned_tag = bond_tag::derive_v1_bond_tag(&abandoned_nullifier).unwrap();
+        let abandoned_commitment = valid_commitment(3);
+
+        let mut rewound = reducer();
+        install_reorg_common_history(&mut rewound, commitment);
+        let ancestor = snapshot(&rewound);
+        install_reorg_reveal(&mut rewound, commitment, owner_pk, bond_tag, [0xa2; 32]);
+
+        let previous = rewound.state.names["alice"].clone();
+        let mut update = Operation::Update {
+            name: "alice".to_owned(),
+            sequence: 1,
+            address: canonical_ua(),
+            signature: vec![],
+        };
+        let signature =
+            authorization::sign_v1(rewound.deployment_id, &key, &update, &previous).unwrap();
+        if let Operation::Update { signature: out, .. } = &mut update {
+            *out = signature.to_vec();
+        }
+        let mut staged = rewound.state.clone();
+        assert_eq!(
+            rewound
+                .apply_operation(&mut staged, &rewound.ironwood_checkpoints, 103, 0, &update)
+                .unwrap(),
+            TransactionOutcome::Applied
+        );
+        staged
+            .apply_prevalidated_commit(
+                abandoned_pending,
+                pending::ChainPosition {
+                    block_height: 103,
+                    tx_index: 1,
+                },
+            )
+            .unwrap();
+        rewound.state = staged;
+        let old_tip = rewound
+            .apply_block(&block_with_effects(
+                &rewound,
+                103,
+                [0xa3; 32],
+                vec![abandoned_nullifier],
+                vec![abandoned_commitment],
+            ))
+            .unwrap();
+        assert_eq!(rewound.state.names["alice"].sequence, 1);
+        assert_eq!(rewound.state.names["alice"].status, NameStatus::Active);
+        assert!(rewound.state.pending.contains_key(&abandoned_pending));
+        assert_eq!(old_tip.tip.block_hash, [0xa3; 32]);
+        let abandoned_root = old_tip.ironwood_checkpoint.root;
+
+        rewound.rewind_to(101).unwrap();
+        assert_eq!(snapshot(&rewound).0, ancestor.0);
+        assert_eq!(snapshot(&rewound).1, ancestor.1);
+        assert_eq!(snapshot(&rewound).2, ancestor.2);
+        assert_eq!(snapshot(&rewound).3, ancestor.3);
+        assert!(!rewound.has_rewind_snapshot(102));
+        assert!(!rewound.has_rewind_snapshot(103));
+        assert!(!rewound.state.pending.contains_key(&abandoned_pending));
+        assert!(rewound.state.recent_spent.is_empty());
+
+        install_reorg_reveal(&mut rewound, commitment, owner_pk, bond_tag, [0xb2; 32]);
+        let replacement = rewound
+            .apply_block(&block_with_effects(
+                &rewound,
+                103,
+                [0xb3; 32],
+                vec![nullifier],
+                vec![],
+            ))
+            .unwrap();
+
+        let mut fresh = reducer();
+        install_reorg_common_history(&mut fresh, commitment);
+        install_reorg_reveal(&mut fresh, commitment, owner_pk, bond_tag, [0xb2; 32]);
+        let fresh_replacement = fresh
+            .apply_block(&block_with_effects(
+                &fresh,
+                103,
+                [0xb3; 32],
+                vec![nullifier],
+                vec![],
+            ))
+            .unwrap();
+
+        assert_eq!(rewound.state, fresh.state);
+        assert_eq!(rewound.ironwood_tree, fresh.ironwood_tree);
+        assert_eq!(rewound.ironwood_checkpoints, fresh.ironwood_checkpoints);
+        assert_eq!(rewound.tip, fresh.tip);
+        assert_eq!(replacement.name_tree_root, fresh_replacement.name_tree_root);
+        assert_eq!(replacement.pending_root, fresh_replacement.pending_root);
+        assert_eq!(
+            replacement.recent_spent_root,
+            fresh_replacement.recent_spent_root
+        );
+        assert_eq!(replacement.state_root, fresh_replacement.state_root);
+
+        let expected = &vector["vector"]["expected_after_replay"];
+        assert_eq!(expected["status"], "BondSpent");
+        assert_eq!(expected["terminal_height"], 103);
+        assert_eq!(expected["sequence"], 0);
+        assert_eq!(rewound.state.names["alice"].sequence, 0);
+        assert_eq!(
+            rewound.state.names["alice"].status,
+            NameStatus::BondSpent {
+                terminal_height: 103
+            }
+        );
+        assert!(!rewound.state.active_bond_index().contains_key(&bond_tag));
+        assert_eq!(rewound.state.recent_spent.get(&bond_tag), Some(&103));
+        assert!(!rewound.state.recent_spent.contains_key(&abandoned_tag));
+        assert!(!rewound.state.pending.contains_key(&abandoned_pending));
+        assert_ne!(replacement.ironwood_checkpoint.root, abandoned_root);
+        assert_eq!(rewound.history[&103].tip.block_hash, [0xb3; 32]);
+        assert!(
+            rewound
+                .history
+                .values()
+                .all(|snapshot| snapshot.tip.block_hash != [0xa3; 32])
+        );
+    }
+
+    #[test]
+    fn invalid_rewinds_and_fatal_replacement_are_atomic() {
+        let mut reducer = reducer();
+        let deployment_before = reducer.deployment.clone();
+        let deployment_id_before = reducer.deployment_id;
+        let verifier_id_before = reducer.verifier.verifier_id();
+        assert_eq!(reducer.oldest_rewind_height(), 99);
+        reducer
+            .apply_block(&empty_block_at(&reducer, 100, [0x10; 32]))
+            .unwrap();
+        reducer
+            .apply_block(&empty_block_at(&reducer, 101, [0x11; 32]))
+            .unwrap();
+        let before = snapshot(&reducer);
+        assert_eq!(reducer.rewind_to(101), Ok(()));
+        assert_eq!(snapshot(&reducer), before);
+        assert_eq!(reducer.rewind_to(98), Err(RewindError::BeforeActivation));
+        assert_eq!(snapshot(&reducer), before);
+        assert_eq!(reducer.rewind_to(102), Err(RewindError::BeyondTip));
+        assert_eq!(snapshot(&reducer), before);
+        reducer.history.remove(&100);
+        let missing_before = snapshot(&reducer);
+        assert_eq!(reducer.rewind_to(100), Err(RewindError::SnapshotMissing));
+        assert_eq!(snapshot(&reducer), missing_before);
+
+        reducer.rewind_to(99).unwrap();
+        assert_eq!(reducer.deployment, deployment_before);
+        assert_eq!(reducer.deployment_id, deployment_id_before);
+        assert_eq!(reducer.verifier.verifier_id(), verifier_id_before);
+        let ancestor = snapshot(&reducer);
+        let mut invalid = empty_block_at(&reducer, 100, [0x20; 32]);
+        invalid.prev_block_hash = [0xff; 32];
+        assert_eq!(
+            reducer.apply_block(&invalid),
+            Err(FatalReducerError::PredecessorMismatch)
+        );
+        assert_eq!(snapshot(&reducer), ancestor);
+    }
+
+    #[test]
+    fn rewind_restores_active_index_and_replacement_spend_removes_it() {
+        let mut reducer = reducer();
+        let nullifier = canonical_nullifier();
+        let tag = bond_tag::derive_v1_bond_tag(&nullifier).unwrap();
+        let key = OwnerSigningKey::try_from([8; 32]).unwrap();
+        semantic_block(&mut reducer, 100, [0x10; 32], |_, state| {
+            let mut names = BTreeMap::new();
+            names.insert(
+                "alice".to_owned(),
+                NameRecord {
+                    owner_pk: owner_key_bytes(&(&key).into()),
+                    bond_tag: tag,
+                    sequence: 0,
+                    address: canonical_ua(),
+                    status: NameStatus::Active,
+                },
+            );
+            *state = CoppiceState::from_authoritative_parts(
+                names,
+                pending::PendingCommitments::new(),
+                recent_spent::RecentSpent::new(),
+            )
+            .unwrap();
+        });
+        reducer
+            .apply_block(&block_with_effects(
+                &reducer,
+                101,
+                [0x11; 32],
+                vec![nullifier],
+                vec![],
+            ))
+            .unwrap();
+        assert!(!reducer.state.active_bond_index().contains_key(&tag));
+        reducer.rewind_to(100).unwrap();
+        assert_eq!(reducer.state.names["alice"].status, NameStatus::Active);
+        assert_eq!(
+            reducer
+                .state
+                .active_bond_index()
+                .get(&tag)
+                .map(String::as_str),
+            Some("alice")
+        );
+        reducer
+            .apply_block(&block_with_effects(
+                &reducer,
+                101,
+                [0x21; 32],
+                vec![nullifier],
+                vec![],
+            ))
+            .unwrap();
+        assert!(!reducer.state.active_bond_index().contains_key(&tag));
+    }
+
+    #[test]
+    fn repeated_rewinds_remove_each_abandoned_suffix() {
+        let mut reducer = reducer();
+        for (height, byte) in [(100, 0x10), (101, 0x11), (102, 0x12)] {
+            reducer
+                .apply_block(&empty_block_at(&reducer, height, [byte; 32]))
+                .unwrap();
+        }
+        reducer.rewind_to(101).unwrap();
+        reducer
+            .apply_block(&empty_block_at(&reducer, 102, [0x22; 32]))
+            .unwrap();
+        assert_eq!(reducer.history[&102].tip.block_hash, [0x22; 32]);
+        reducer.rewind_to(100).unwrap();
+        for (height, byte) in [(101, 0x31), (102, 0x32)] {
+            reducer
+                .apply_block(&empty_block_at(&reducer, height, [byte; 32]))
+                .unwrap();
+        }
+        assert_eq!(reducer.history.len(), 4);
+        assert_eq!(reducer.history[&101].tip.block_hash, [0x31; 32]);
+        assert_eq!(reducer.history[&102].tip.block_hash, [0x32; 32]);
+        assert!(reducer.history.values().all(|snapshot| {
+            ![[0x11; 32], [0x12; 32], [0x22; 32]].contains(&snapshot.tip.block_hash)
+        }));
+    }
+
+    #[test]
+    fn protocol_rejection_after_rewind_still_snapshots_committed_block() {
+        let mut reducer = reducer();
+        let commitment = [0x71; 32];
+        semantic_block(&mut reducer, 100, [0x10; 32], |_, state| {
+            state
+                .apply_prevalidated_commit(
+                    commitment,
+                    pending::ChainPosition {
+                        block_height: 100,
+                        tx_index: 0,
+                    },
+                )
+                .unwrap();
+        });
+        reducer
+            .apply_block(&empty_block_at(&reducer, 101, [0x11; 32]))
+            .unwrap();
+        reducer.rewind_to(100).unwrap();
+        let mut staged = reducer.state.clone();
+        assert_eq!(
+            reducer
+                .apply_operation(
+                    &mut staged,
+                    &reducer.ironwood_checkpoints,
+                    101,
+                    0,
+                    &Operation::Commit { commitment },
+                )
+                .unwrap(),
+            TransactionOutcome::Rejected(ProtocolRejection::DuplicateCommitment)
+        );
+        reducer.state = staged;
+        let replacement_commitment = valid_commitment(4);
+        reducer
+            .apply_block(&block_with_effects(
+                &reducer,
+                101,
+                [0x21; 32],
+                vec![],
+                vec![replacement_commitment],
+            ))
+            .unwrap();
+        assert_eq!(reducer.tip.height, 101);
+        assert!(reducer.has_rewind_snapshot(101));
+        assert!(reducer.state.pending.contains_key(&commitment));
+        assert_eq!(reducer.ironwood_tree.size(), 1);
+        assert_eq!(reducer.ironwood_checkpoints[&101].tree_size, 1);
     }
 }
