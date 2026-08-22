@@ -11,6 +11,7 @@ mod guard;
 mod inventory;
 mod locking;
 mod pending;
+mod reconcile;
 mod register;
 mod selection;
 mod source;
@@ -34,6 +35,10 @@ pub use pending::{
     PendingRegistration, PendingRegistrationCollection, PendingRegistrationCollectionError,
     PendingRegistrationTransitionError, PendingRegistrationValidationError,
     pending_attempt_expired, pending_commit_expired,
+};
+pub use reconcile::{
+    CanonicalBlockSource, CanonicalTip, ReconcileError, ReconcileKind, ReconcileOutcome,
+    reconcile_canonical_chain,
 };
 pub use register::{
     BeginRegistrationError, CanonicalCommitMissing, CarrierPreparationError, CommitTransitionError,

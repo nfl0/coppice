@@ -636,6 +636,16 @@ branch ID, its txid, and the exact compact/full Ironwood effects before applying
 the block atomically. A compact hit does not imply a valid Coppice bulletin, and
 a missing required full transaction prevents any reducer advance.
 
+Canonical-chain reconciliation takes host-selected block identities as its sole
+chain authority; Coppice performs no Zcash fork choice. It discovers the highest
+common ancestor without mutation inside the reducer's retained history, invokes
+`V1Reducer::rewind_to`, and replays replacement CompactBlocks exclusively through
+`apply_compact_block`. Reorg depth is bounded by the frozen reducer undo history;
+a deeper divergence requires rebuild. Replay starts no earlier than activation,
+is resumable, and is block-atomic rather than one range transaction. Once a
+known-stale suffix has been rewound, a later failure leaves the reducer at the
+last successfully applied canonical block and never restores that stale suffix.
+
 The Orchard/Ironwood builder may randomize Action positions. Wallet carrier
 construction MUST NOT rely on output insertion order to preserve frame order.
 It may add rendezvous outputs in any builder order; canonical v1 reconstruction

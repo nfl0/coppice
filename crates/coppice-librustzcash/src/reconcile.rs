@@ -1,0 +1,767 @@
+//! Host-authoritative canonical-chain reconciliation for Coppice.
+//!
+//! This module performs no fork choice. [`CanonicalBlockSource`] exposes the
+//! history the host has already selected as canonical.
+
+use std::{collections::BTreeMap, fmt::Debug};
+
+use coppice::reducer_v1::{ReplayTip, RewindError, V1Reducer};
+use zcash_client_backend::proto::compact_formats::CompactBlock;
+use zcash_protocol::consensus::Parameters;
+
+use crate::{CompactBlockApplyError, FullTransactionSource, apply_compact_block};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CanonicalTip {
+    pub height: u32,
+    pub block_hash: [u8; 32],
+}
+
+impl From<ReplayTip> for CanonicalTip {
+    fn from(tip: ReplayTip) -> Self {
+        Self {
+            height: tip.height,
+            block_hash: tip.block_hash,
+        }
+    }
+}
+
+/// Supplies history that the host has already selected as canonical.
+pub trait CanonicalBlockSource {
+    type Error: Debug;
+
+    fn canonical_tip(&mut self) -> Result<CanonicalTip, Self::Error>;
+
+    fn compact_block(&mut self, height: u32) -> Result<Option<CompactBlock>, Self::Error>;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReconcileKind {
+    AlreadyCurrent,
+    Forward,
+    Reorg,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReconcileOutcome {
+    pub kind: ReconcileKind,
+    pub original_tip: ReplayTip,
+    pub observed_host_tip: CanonicalTip,
+    pub common_ancestor: Option<ReplayTip>,
+    pub blocks_rewound: u32,
+    pub blocks_applied: u32,
+    pub final_tip: ReplayTip,
+}
+
+#[derive(Debug)]
+pub enum ReconcileError<CanonicalError: Debug, FullTxError: Debug> {
+    CanonicalBlockSource(CanonicalError),
+    MissingCanonicalBlock {
+        height: u32,
+    },
+    InvalidCanonicalIdentity {
+        requested_height: u32,
+    },
+    CanonicalHistoryChanged {
+        observed: CanonicalTip,
+        current: CanonicalTip,
+    },
+    NoRetainedCommonAncestor,
+    Rewind(RewindError),
+    CompactBlockApply {
+        height: u32,
+        error: CompactBlockApplyError<FullTxError>,
+    },
+    ArithmeticOverflow,
+}
+
+fn block_identity(block: &CompactBlock, requested_height: u32) -> Option<CanonicalTip> {
+    let height = u32::try_from(block.height).ok()?;
+    let block_hash: [u8; 32] = block.hash.as_slice().try_into().ok()?;
+    (height == requested_height).then_some(CanonicalTip { height, block_hash })
+}
+
+fn checked_block<'a, C, F>(
+    source: &mut C,
+    height: u32,
+    cache: &'a mut BTreeMap<u32, CompactBlock>,
+) -> Result<&'a CompactBlock, ReconcileError<C::Error, F>>
+where
+    C: CanonicalBlockSource,
+    C::Error: Debug,
+    F: Debug,
+{
+    if !cache.contains_key(&height) {
+        let block = source
+            .compact_block(height)
+            .map_err(ReconcileError::CanonicalBlockSource)?
+            .ok_or(ReconcileError::MissingCanonicalBlock { height })?;
+        block_identity(&block, height).ok_or(ReconcileError::InvalidCanonicalIdentity {
+            requested_height: height,
+        })?;
+        cache.insert(height, block);
+    }
+    cache
+        .get(&height)
+        .ok_or(ReconcileError::MissingCanonicalBlock { height })
+}
+
+fn canonical_hash_at<C, F>(
+    source: &mut C,
+    observed_tip: CanonicalTip,
+    activation_height: u32,
+    height: u32,
+    cache: &mut BTreeMap<u32, CompactBlock>,
+) -> Result<[u8; 32], ReconcileError<C::Error, F>>
+where
+    C: CanonicalBlockSource,
+    C::Error: Debug,
+    F: Debug,
+{
+    if height == observed_tip.height {
+        return Ok(observed_tip.block_hash);
+    }
+    let activation_base = activation_height
+        .checked_sub(1)
+        .ok_or(ReconcileError::ArithmeticOverflow)?;
+    if height == activation_base {
+        // Never request a pre-activation CompactBlock. The activation block's
+        // predecessor identifies the host-selected activation base.
+        let block = checked_block::<C, F>(source, activation_height, cache)?;
+        return block.prev_hash.as_slice().try_into().map_err(|_| {
+            ReconcileError::InvalidCanonicalIdentity {
+                requested_height: activation_height,
+            }
+        });
+    }
+    checked_block::<C, F>(source, height, cache)?
+        .hash
+        .as_slice()
+        .try_into()
+        .map_err(|_| ReconcileError::InvalidCanonicalIdentity {
+            requested_height: height,
+        })
+}
+
+/// Reconciles to the host-selected tip observed at the beginning of this call.
+/// Ancestor discovery is mutation-free; after a rewind, replay is deliberately
+/// block-atomic and resumable rather than range-transactional.
+pub fn reconcile_canonical_chain<P, C, F>(
+    params: &P,
+    reducer: &mut V1Reducer,
+    canonical_source: &mut C,
+    full_tx_source: &mut F,
+) -> Result<ReconcileOutcome, ReconcileError<C::Error, F::Error>>
+where
+    P: Parameters,
+    C: CanonicalBlockSource,
+    F: FullTransactionSource,
+{
+    let original_tip = reducer.tip();
+    let observed_host_tip = canonical_source
+        .canonical_tip()
+        .map_err(ReconcileError::CanonicalBlockSource)?;
+    if original_tip.height == observed_host_tip.height
+        && original_tip.block_hash == observed_host_tip.block_hash
+    {
+        return Ok(ReconcileOutcome {
+            kind: ReconcileKind::AlreadyCurrent,
+            original_tip,
+            observed_host_tip,
+            common_ancestor: None,
+            blocks_rewound: 0,
+            blocks_applied: 0,
+            final_tip: original_tip,
+        });
+    }
+
+    let activation_height = reducer.deployment().activation_height;
+    let activation_base = activation_height
+        .checked_sub(1)
+        .ok_or(ReconcileError::ArithmeticOverflow)?;
+    let mut cache = BTreeMap::new();
+
+    let local_is_ancestor = if original_tip.height < observed_host_tip.height {
+        canonical_hash_at::<C, F::Error>(
+            canonical_source,
+            observed_host_tip,
+            activation_height,
+            original_tip.height,
+            &mut cache,
+        )? == original_tip.block_hash
+    } else {
+        false
+    };
+
+    let (kind, common_ancestor, blocks_rewound) = if local_is_ancestor {
+        (ReconcileKind::Forward, None, 0)
+    } else {
+        let search_top = original_tip.height.min(observed_host_tip.height);
+        let search_floor = reducer.oldest_rewind_height().max(activation_base);
+        let mut common = None;
+        for height in (search_floor..=search_top).rev() {
+            let Some(local) = reducer.retained_tip_at(height) else {
+                continue;
+            };
+            let canonical_hash = canonical_hash_at::<C, F::Error>(
+                canonical_source,
+                observed_host_tip,
+                activation_height,
+                height,
+                &mut cache,
+            )?;
+            if local.block_hash == canonical_hash {
+                common = Some(local);
+                break;
+            }
+        }
+        let common = common.ok_or(ReconcileError::NoRetainedCommonAncestor)?;
+        let rewound = original_tip
+            .height
+            .checked_sub(common.height)
+            .ok_or(ReconcileError::ArithmeticOverflow)?;
+        reducer
+            .rewind_to(common.height)
+            .map_err(ReconcileError::Rewind)?;
+        (ReconcileKind::Reorg, Some(common), rewound)
+    };
+
+    let mut blocks_applied = 0u32;
+    let start = reducer
+        .tip()
+        .height
+        .checked_add(1)
+        .ok_or(ReconcileError::ArithmeticOverflow)?;
+    if start <= observed_host_tip.height {
+        for height in start..=observed_host_tip.height {
+            let block = checked_block::<C, F::Error>(canonical_source, height, &mut cache)?;
+            if height == observed_host_tip.height
+                && block_identity(block, height).map(|id| id.block_hash)
+                    != Some(observed_host_tip.block_hash)
+            {
+                return Err(ReconcileError::CanonicalHistoryChanged {
+                    observed: observed_host_tip,
+                    current: block_identity(block, height).ok_or(
+                        ReconcileError::InvalidCanonicalIdentity {
+                            requested_height: height,
+                        },
+                    )?,
+                });
+            }
+            apply_compact_block(params, reducer, block, full_tx_source)
+                .map_err(|error| ReconcileError::CompactBlockApply { height, error })?;
+            blocks_applied = blocks_applied
+                .checked_add(1)
+                .ok_or(ReconcileError::ArithmeticOverflow)?;
+        }
+    }
+
+    let current_host_tip = canonical_source
+        .canonical_tip()
+        .map_err(ReconcileError::CanonicalBlockSource)?;
+    if current_host_tip != observed_host_tip {
+        return Err(ReconcileError::CanonicalHistoryChanged {
+            observed: observed_host_tip,
+            current: current_host_tip,
+        });
+    }
+
+    Ok(ReconcileOutcome {
+        kind,
+        original_tip,
+        observed_host_tip,
+        common_ancestor,
+        blocks_rewound,
+        blocks_applied,
+        final_tip: reducer.tip(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use coppice::{
+        config::{DeploymentParameters, REGTEST_V0, Rendezvous},
+        reducer_v1::{ActivationCheckpoint, IronwoodFrontier},
+    };
+    use orchard::{
+        note::{ExtractedNoteCommitment, Note, NoteVersion, Nullifier, RandomSeed, Rho},
+        note_encryption::{IronwoodDomain, IronwoodNoteEncryption},
+        value::NoteValue,
+    };
+    use zcash_client_backend::proto::compact_formats::{CompactOrchardAction, CompactTx};
+    use zcash_note_encryption::Domain;
+    use zcash_protocol::{
+        consensus::{BlockHeight, NetworkType},
+        local_consensus::LocalNetwork,
+    };
+
+    use super::*;
+
+    fn params() -> LocalNetwork {
+        let active = Some(BlockHeight::from_u32(1));
+        LocalNetwork {
+            overwinter: active,
+            sapling: active,
+            blossom: active,
+            heartwood: active,
+            canopy: active,
+            nu5: active,
+            nu6: active,
+            nu6_1: active,
+            nu6_2: active,
+            nu6_3: active,
+        }
+    }
+
+    fn deployment() -> DeploymentParameters {
+        DeploymentParameters {
+            network_id: REGTEST_V0.network_id.to_vec(),
+            address_network: NetworkType::Regtest,
+            activation_height: 1,
+            minimum_bond_value: REGTEST_V0.minimum_bond_value,
+            commit_ttl_blocks: 20,
+            reuse_delay_blocks: 10,
+            bond_note_max_age_blocks: 100,
+            rendezvous: Rendezvous {
+                orchard_ivk: REGTEST_V0.rendezvous.orchard_ivk,
+                orchard_receiver: REGTEST_V0.rendezvous.orchard_receiver,
+            },
+        }
+    }
+
+    fn new_reducer() -> V1Reducer {
+        let deployment = deployment();
+        V1Reducer::new(
+            deployment.clone(),
+            ActivationCheckpoint {
+                height: deployment.activation_height - 1,
+                block_hash: [9; 32],
+                ironwood_frontier: IronwoodFrontier::empty(),
+                ironwood_tree_size: 0,
+            },
+        )
+        .unwrap()
+    }
+
+    fn canonical_nf(marker: u8) -> [u8; 32] {
+        let mut bytes = [0; 32];
+        bytes[0] = marker;
+        Option::<Nullifier>::from(Nullifier::from_bytes(&bytes))
+            .unwrap()
+            .to_bytes()
+    }
+
+    fn canonical_cmx(marker: u8) -> [u8; 32] {
+        for suffix in 0..=u8::MAX {
+            let mut bytes = [0; 32];
+            bytes[0] = marker;
+            bytes[31] = suffix;
+            if Option::<ExtractedNoteCommitment>::from(ExtractedNoteCommitment::from_bytes(&bytes))
+                .is_some()
+            {
+                return bytes;
+            }
+        }
+        panic!("test marker must yield a canonical commitment")
+    }
+
+    fn action(marker: u8) -> CompactOrchardAction {
+        CompactOrchardAction {
+            nullifier: canonical_nf(marker).to_vec(),
+            cmx: canonical_cmx(marker).to_vec(),
+            ephemeral_key: vec![0; 32],
+            ciphertext: vec![0; 52],
+        }
+    }
+
+    fn candidate_action() -> CompactOrchardAction {
+        let recipient =
+            orchard::Address::from_raw_address_bytes(&REGTEST_V0.rendezvous.orchard_receiver)
+                .unwrap();
+        let nf = Nullifier::from_bytes(&[0; 32]).unwrap();
+        let rho = Rho::from_bytes(&nf.to_bytes()).unwrap();
+        let rseed = (0u8..=u8::MAX)
+            .find_map(|byte| Option::from(RandomSeed::from_bytes([byte; 32], &rho)))
+            .unwrap();
+        let note = Note::from_parts(
+            recipient,
+            NoteValue::from_raw(0),
+            rho,
+            rseed,
+            NoteVersion::V3,
+        )
+        .unwrap();
+        let encryptor = IronwoodNoteEncryption::new(None, note, [0; 512]);
+        let ciphertext = encryptor.encrypt_note_plaintext();
+        CompactOrchardAction {
+            nullifier: nf.to_bytes().to_vec(),
+            cmx: ExtractedNoteCommitment::from(note.commitment())
+                .to_bytes()
+                .to_vec(),
+            ephemeral_key: IronwoodDomain::epk_bytes(encryptor.epk()).0.to_vec(),
+            ciphertext: ciphertext[..52].to_vec(),
+        }
+    }
+
+    fn block(height: u32, hash: u8, prev_hash: [u8; 32], marker: u8) -> CompactBlock {
+        CompactBlock {
+            height: u64::from(height),
+            hash: vec![hash; 32],
+            prev_hash: prev_hash.to_vec(),
+            vtx: vec![CompactTx {
+                index: 2,
+                txid: vec![hash; 32],
+                ironwood_actions: vec![action(marker)],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn chain(spec: &[(u32, u8, u8)]) -> BTreeMap<u32, CompactBlock> {
+        let mut result = BTreeMap::new();
+        let mut prev = [9; 32];
+        for &(height, hash, marker) in spec {
+            result.insert(height, block(height, hash, prev, marker));
+            prev = [hash; 32];
+        }
+        result
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum SourceError {
+        Failed(u32),
+    }
+
+    struct Source {
+        blocks: BTreeMap<u32, CompactBlock>,
+        initial_tip: CanonicalTip,
+        later_tip: Option<CanonicalTip>,
+        tip_calls: usize,
+        block_calls: Vec<u32>,
+        fail_at: Option<u32>,
+    }
+
+    impl Source {
+        fn new(blocks: BTreeMap<u32, CompactBlock>, tip: CanonicalTip) -> Self {
+            Self {
+                blocks,
+                initial_tip: tip,
+                later_tip: None,
+                tip_calls: 0,
+                block_calls: vec![],
+                fail_at: None,
+            }
+        }
+    }
+
+    impl CanonicalBlockSource for Source {
+        type Error = SourceError;
+
+        fn canonical_tip(&mut self) -> Result<CanonicalTip, Self::Error> {
+            let result = if self.tip_calls == 0 {
+                self.initial_tip
+            } else {
+                self.later_tip.unwrap_or(self.initial_tip)
+            };
+            self.tip_calls += 1;
+            Ok(result)
+        }
+
+        fn compact_block(&mut self, height: u32) -> Result<Option<CompactBlock>, Self::Error> {
+            self.block_calls.push(height);
+            if self.fail_at == Some(height) {
+                return Err(SourceError::Failed(height));
+            }
+            Ok(self.blocks.get(&height).cloned())
+        }
+    }
+
+    #[derive(Default)]
+    struct FullSource {
+        calls: usize,
+    }
+
+    impl FullTransactionSource for FullSource {
+        type Error = &'static str;
+
+        fn full_transaction(&mut self, _txid: [u8; 32]) -> Result<Option<Vec<u8>>, Self::Error> {
+            self.calls += 1;
+            Ok(None)
+        }
+    }
+
+    fn apply_history(reducer: &mut V1Reducer, blocks: &BTreeMap<u32, CompactBlock>) {
+        let mut full = FullSource::default();
+        for block in blocks.values() {
+            apply_compact_block(&params(), reducer, block, &mut full).unwrap();
+        }
+        assert_eq!(full.calls, 0);
+    }
+
+    fn tip(height: u32, hash: u8) -> CanonicalTip {
+        CanonicalTip {
+            height,
+            block_hash: [hash; 32],
+        }
+    }
+
+    fn assert_same_reducer(left: &V1Reducer, right: &V1Reducer) {
+        assert_eq!(left.tip(), right.tip());
+        assert_eq!(left.state(), right.state());
+        assert_eq!(
+            left.ironwood_frontier().root(),
+            right.ironwood_frontier().root()
+        );
+        assert_eq!(
+            left.ironwood_frontier().size(),
+            right.ironwood_frontier().size()
+        );
+        assert_eq!(left.ironwood_checkpoints(), right.ironwood_checkpoints());
+        assert_eq!(left.oldest_rewind_height(), right.oldest_rewind_height());
+        for height in left.oldest_rewind_height()..=left.tip().height {
+            assert_eq!(left.retained_tip_at(height), right.retained_tip_at(height));
+        }
+    }
+
+    #[test]
+    fn already_current_does_no_history_or_full_transaction_work() {
+        let mut reducer = new_reducer();
+        let mut source = Source::new(BTreeMap::new(), reducer.tip().into());
+        let mut full = FullSource::default();
+        let outcome =
+            reconcile_canonical_chain(&params(), &mut reducer, &mut source, &mut full).unwrap();
+        assert_eq!(outcome.kind, ReconcileKind::AlreadyCurrent);
+        assert!(source.block_calls.is_empty());
+        assert_eq!(source.tip_calls, 1);
+        assert_eq!(full.calls, 0);
+    }
+
+    #[test]
+    fn activation_and_forward_catch_up_are_ascending_and_complete() {
+        let history = chain(&[(1, 1, 11), (2, 2, 12), (3, 3, 13)]);
+        let mut reducer = new_reducer();
+        let mut source = Source::new(history.clone(), tip(3, 3));
+        let mut full = FullSource::default();
+        let outcome =
+            reconcile_canonical_chain(&params(), &mut reducer, &mut source, &mut full).unwrap();
+        assert_eq!(outcome.kind, ReconcileKind::Forward);
+        assert_eq!(outcome.blocks_applied, 3);
+        assert_eq!(source.block_calls, vec![1, 2, 3]);
+        assert!(!source.block_calls.contains(&0));
+        assert_eq!(reducer.tip().height, 3);
+        assert_eq!(reducer.ironwood_frontier().size(), 3);
+
+        let mut source = Source::new(
+            chain(&[(1, 1, 11), (2, 2, 12), (3, 3, 13), (4, 4, 14)]),
+            tip(4, 4),
+        );
+        let outcome =
+            reconcile_canonical_chain(&params(), &mut reducer, &mut source, &mut full).unwrap();
+        assert_eq!(outcome.kind, ReconcileKind::Forward);
+        assert_eq!(outcome.blocks_applied, 1);
+        assert_eq!(reducer.tip().height, 4);
+    }
+
+    #[test]
+    fn one_block_reorg_removes_old_effects_and_applies_replacement() {
+        let old = chain(&[(1, 10, 20)]);
+        let replacement = chain(&[(1, 11, 21)]);
+        let mut reducer = new_reducer();
+        apply_history(&mut reducer, &old);
+        let old_root = reducer.ironwood_frontier().root();
+        let mut source = Source::new(replacement.clone(), tip(1, 11));
+        let mut full = FullSource::default();
+        let outcome =
+            reconcile_canonical_chain(&params(), &mut reducer, &mut source, &mut full).unwrap();
+        assert_eq!(outcome.common_ancestor.unwrap().height, 0);
+        assert_eq!(outcome.blocks_rewound, 1);
+        assert_ne!(reducer.ironwood_frontier().root(), old_root);
+        let mut fresh = new_reducer();
+        apply_history(&mut fresh, &replacement);
+        assert_same_reducer(&reducer, &fresh);
+    }
+
+    #[test]
+    fn highest_common_ancestor_is_not_unnecessarily_deep() {
+        let old = chain(&[(1, 1, 31), (2, 2, 32), (3, 3, 33), (4, 40, 34)]);
+        let replacement = chain(&[(1, 1, 31), (2, 2, 32), (3, 3, 33), (4, 41, 44), (5, 5, 45)]);
+        let mut reducer = new_reducer();
+        apply_history(&mut reducer, &old);
+        let mut source = Source::new(replacement.clone(), tip(5, 5));
+        let mut full = FullSource::default();
+        let outcome =
+            reconcile_canonical_chain(&params(), &mut reducer, &mut source, &mut full).unwrap();
+        assert_eq!(outcome.common_ancestor.unwrap().height, 3);
+        assert_eq!(outcome.blocks_rewound, 1);
+        assert_eq!(outcome.blocks_applied, 2);
+        let mut fresh = new_reducer();
+        apply_history(&mut fresh, &replacement);
+        assert_same_reducer(&reducer, &fresh);
+    }
+
+    #[test]
+    fn multi_block_reorg_replays_replacement_branch_and_equals_fresh_replay() {
+        let old = chain(&[(1, 1, 141), (2, 2, 142), (3, 3, 143), (4, 4, 144)]);
+        let replacement = chain(&[
+            (1, 1, 141),
+            (2, 12, 152),
+            (3, 13, 153),
+            (4, 14, 154),
+            (5, 15, 155),
+        ]);
+        let mut reducer = new_reducer();
+        apply_history(&mut reducer, &old);
+        let mut source = Source::new(replacement.clone(), tip(5, 15));
+        let mut full = FullSource::default();
+        let outcome =
+            reconcile_canonical_chain(&params(), &mut reducer, &mut source, &mut full).unwrap();
+        assert_eq!(outcome.common_ancestor.unwrap().height, 1);
+        assert_eq!(outcome.blocks_rewound, 3);
+        assert_eq!(outcome.blocks_applied, 4);
+        let mut fresh = new_reducer();
+        apply_history(&mut fresh, &replacement);
+        assert_same_reducer(&reducer, &fresh);
+    }
+
+    #[test]
+    fn reducer_ahead_rewinds_to_host_tip_without_replay() {
+        let history = chain(&[(1, 1, 51), (2, 2, 52), (3, 3, 53)]);
+        let mut reducer = new_reducer();
+        apply_history(&mut reducer, &history);
+        let mut source = Source::new(history, tip(2, 2));
+        let mut full = FullSource::default();
+        let outcome =
+            reconcile_canonical_chain(&params(), &mut reducer, &mut source, &mut full).unwrap();
+        assert_eq!(outcome.common_ancestor.unwrap().height, 2);
+        assert_eq!(outcome.blocks_rewound, 1);
+        assert_eq!(outcome.blocks_applied, 0);
+        assert_eq!(reducer.tip().height, 2);
+    }
+
+    #[test]
+    fn divergence_below_activation_base_requires_rebuild_without_mutation() {
+        let old = chain(&[(1, 1, 61)]);
+        let mut foreign = chain(&[(1, 2, 62)]);
+        foreign.get_mut(&1).unwrap().prev_hash = vec![8; 32];
+        let mut reducer = new_reducer();
+        apply_history(&mut reducer, &old);
+        let before_tip = reducer.tip();
+        let before_root = reducer.ironwood_frontier().root();
+        let mut source = Source::new(foreign, tip(1, 2));
+        let mut full = FullSource::default();
+        assert!(matches!(
+            reconcile_canonical_chain(&params(), &mut reducer, &mut source, &mut full),
+            Err(ReconcileError::NoRetainedCommonAncestor)
+        ));
+        assert_eq!(reducer.tip(), before_tip);
+        assert_eq!(reducer.ironwood_frontier().root(), before_root);
+    }
+
+    #[test]
+    fn ancestor_source_failure_is_pre_rewind_atomic() {
+        let old = chain(&[(1, 1, 71), (2, 2, 72), (3, 3, 73)]);
+        let replacement = chain(&[(1, 1, 71), (2, 20, 82), (3, 30, 83)]);
+        let mut reducer = new_reducer();
+        apply_history(&mut reducer, &old);
+        let before_tip = reducer.tip();
+        let before_state = reducer.state().clone();
+        let before_root = reducer.ironwood_frontier().root();
+        let before_checkpoints = reducer.ironwood_checkpoints().clone();
+        let mut source = Source::new(replacement, tip(3, 30));
+        source.fail_at = Some(2);
+        let mut full = FullSource::default();
+        assert!(matches!(
+            reconcile_canonical_chain(&params(), &mut reducer, &mut source, &mut full),
+            Err(ReconcileError::CanonicalBlockSource(SourceError::Failed(2)))
+        ));
+        assert_eq!(reducer.tip(), before_tip);
+        assert_eq!(reducer.state(), &before_state);
+        assert_eq!(reducer.ironwood_frontier().root(), before_root);
+        assert_eq!(reducer.ironwood_checkpoints(), &before_checkpoints);
+        assert_eq!(full.calls, 0);
+    }
+
+    #[test]
+    fn post_rewind_failure_keeps_only_successful_canonical_progress_and_retry_converges() {
+        let old = chain(&[(1, 1, 91), (2, 2, 92), (3, 3, 93)]);
+        let replacement = chain(&[(1, 10, 101), (2, 20, 102), (3, 30, 103)]);
+        let mut reducer = new_reducer();
+        apply_history(&mut reducer, &old);
+        let mut broken = replacement.clone();
+        broken.get_mut(&2).unwrap().vtx[0].ironwood_actions[0].cmx = vec![0; 31];
+        let mut source = Source::new(broken, tip(3, 30));
+        let mut full = FullSource::default();
+        assert!(matches!(
+            reconcile_canonical_chain(&params(), &mut reducer, &mut source, &mut full),
+            Err(ReconcileError::CompactBlockApply { height: 2, .. })
+        ));
+        assert_eq!(
+            reducer.tip(),
+            ReplayTip {
+                height: 1,
+                block_hash: [10; 32]
+            }
+        );
+        assert!(!reducer.has_rewind_snapshot(2));
+
+        let mut retry = Source::new(replacement.clone(), tip(3, 30));
+        reconcile_canonical_chain(&params(), &mut reducer, &mut retry, &mut full).unwrap();
+        let mut fresh = new_reducer();
+        apply_history(&mut fresh, &replacement);
+        assert_same_reducer(&reducer, &fresh);
+    }
+
+    #[test]
+    fn first_replacement_failure_leaves_common_ancestor() {
+        let old = chain(&[(1, 1, 111)]);
+        let mut replacement = chain(&[(1, 10, 112)]);
+        replacement.get_mut(&1).unwrap().vtx[0].ironwood_actions[0].cmx = vec![0; 31];
+        let mut reducer = new_reducer();
+        apply_history(&mut reducer, &old);
+        let mut source = Source::new(replacement, tip(1, 10));
+        let mut full = FullSource::default();
+        assert!(matches!(
+            reconcile_canonical_chain(&params(), &mut reducer, &mut source, &mut full),
+            Err(ReconcileError::CompactBlockApply { height: 1, .. })
+        ));
+        assert_eq!(reducer.tip().height, 0);
+        assert_ne!(reducer.tip().block_hash, [1; 32]);
+    }
+
+    #[test]
+    fn host_tip_change_is_explicit_after_bounded_pass() {
+        let history = chain(&[(1, 1, 121)]);
+        let mut reducer = new_reducer();
+        let mut source = Source::new(history, tip(1, 1));
+        source.later_tip = Some(tip(2, 2));
+        let mut full = FullSource::default();
+        assert!(matches!(
+            reconcile_canonical_chain(&params(), &mut reducer, &mut source, &mut full),
+            Err(ReconcileError::CanonicalHistoryChanged { .. })
+        ));
+        assert_eq!(reducer.tip().height, 1);
+    }
+
+    #[test]
+    fn rendezvous_candidate_uses_existing_full_transaction_path_once() {
+        let mut history = chain(&[(1, 1, 131)]);
+        history.get_mut(&1).unwrap().vtx[0].ironwood_actions = vec![candidate_action()];
+        let mut reducer = new_reducer();
+        let mut source = Source::new(history, tip(1, 1));
+        let mut full = FullSource::default();
+        assert!(matches!(
+            reconcile_canonical_chain(&params(), &mut reducer, &mut source, &mut full),
+            Err(ReconcileError::CompactBlockApply {
+                height: 1,
+                error: CompactBlockApplyError::Prepare(
+                    crate::CompactBlockAdapterError::RequiredFullTransactionMissing { .. }
+                )
+            })
+        ));
+        assert_eq!(full.calls, 1);
+        assert_eq!(reducer.tip().height, 0);
+    }
+}

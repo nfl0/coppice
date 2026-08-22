@@ -246,6 +246,12 @@ impl V1Reducer {
         self.history.contains_key(&height)
     }
 
+    /// Returns the canonical identity stored in a retained rewind snapshot.
+    /// This is read-only and does not extend or otherwise alter retention.
+    pub fn retained_tip_at(&self, height: u32) -> Option<ReplayTip> {
+        self.history.get(&height).map(|snapshot| snapshot.tip)
+    }
+
     /// Restores the exact in-memory reducer snapshot at the host-selected
     /// common ancestor and discards the abandoned canonical suffix.
     pub fn rewind_to(&mut self, height: u32) -> Result<(), RewindError> {
