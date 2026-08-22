@@ -1,13 +1,14 @@
 use crate::crypto;
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NameStatus {
     Active,
     Released { terminal_height: u32 },
     BondSpent { terminal_height: u32 },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NameRecord {
     pub owner_pk: [u8; 32],
     pub bond_tag: [u8; 32],

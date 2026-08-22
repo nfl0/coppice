@@ -752,6 +752,15 @@ pub struct CoppiceSnapshotV1 {
 
 `active_bond_index` should be reconstructed rather than trusted as independent persisted authority.
 
+The reference reducer exposes a versioned local snapshot containing its current
+authoritative state plus a bounded rewind journal. The default journal retains
+the current snapshot and 100 predecessor blocks. Loading rejects a wrong
+deployment, non-contiguous or oversized history, malformed canonical records,
+invalid tree/checkpoint relationships, and state-root mismatches. The active
+bond index is always rebuilt from authoritative name records. Snapshot bytes
+remain wallet-local data; after loading, the host must still compare the saved
+tip identity with its selected canonical chain before enabling protected spends.
+
 ## I-025 — Snapshot validation and local trust model
 
 On load:

@@ -1,7 +1,8 @@
 use crate::crypto;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChainPosition {
     pub block_height: u32,
     pub tx_index: u32,

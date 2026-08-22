@@ -12,7 +12,7 @@ use crate::{
     config::{DeploymentParameters, DeploymentValidationError},
     constants::MAX_TRANSACTION_LEN,
     envelope::Operation,
-    ironwood, pending,
+    ironwood, pending, recent_spent,
     record::NameStatus,
     reveal::{self, AuthenticatedIronwoodCheckpoint, RevealValidationError},
     state::{CoppiceState, StateMutationError},
@@ -20,11 +20,18 @@ use crate::{
 };
 use incrementalmerkletree::frontier::CommitmentTree;
 use orchard::tree::MerkleHashOrchard;
+use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, io::Cursor};
 use zcash_primitives::transaction::Transaction;
 use zcash_protocol::consensus::BranchId;
 
 pub type IronwoodFrontier = CommitmentTree<MerkleHashOrchard, 32>;
+
+/// Number of previously-applied blocks retained for local bounded rewinds.
+///
+/// This is wallet-local recovery policy, not a protocol consensus parameter.
+pub const DEFAULT_REORG_RETENTION_BLOCKS: u32 = 100;
+pub const COPPICE_SNAPSHOT_FORMAT_VERSION: u32 = 1;
 
 #[derive(Clone, Debug)]
 pub struct CanonicalBlockInput {
@@ -129,6 +136,52 @@ pub enum RewindError {
     SnapshotMissing,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SnapshotError {
+    Encoding,
+    UnsupportedFormat,
+    DeploymentMismatch,
+    EmptyHistory,
+    HistoryTooLarge,
+    NonCanonicalHistory,
+    InvalidState,
+    InvalidIronwoodTree,
+    InvalidCheckpoint,
+    StateRootMismatch,
+    VerifierInitializationFailure,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct StoredState {
+    names: Vec<(String, crate::record::NameRecord)>,
+    pending: Vec<([u8; 32], pending::ChainPosition)>,
+    recent_spent: Vec<([u8; 32], u32)>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+struct StoredCheckpoint {
+    height: u32,
+    root: [u8; 32],
+    tree_size: u32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct StoredReducerSnapshot {
+    height: u32,
+    block_hash: [u8; 32],
+    state: StoredState,
+    ironwood_tree: Vec<u8>,
+    ironwood_checkpoints: Vec<StoredCheckpoint>,
+    state_root: [u8; 32],
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct StoredV1Reducer {
+    format_version: u32,
+    deployment_id: [u8; 32],
+    snapshots: Vec<StoredReducerSnapshot>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ReducerSnapshot {
     state: CoppiceState,
@@ -145,9 +198,8 @@ pub struct V1Reducer {
     ironwood_checkpoints: BTreeMap<u32, AuthenticatedIronwoodCheckpoint>,
     tip: ReplayTip,
     verifier: V1BondVerifier,
-    /// In-memory reference reorg history. This intentionally retains every
-    /// complete canonical snapshot since activation; it is not a persistence
-    /// or serialization format.
+    /// Bounded local reorg history. It retains the current state and at most
+    /// [`DEFAULT_REORG_RETENTION_BLOCKS`] predecessor snapshots.
     history: BTreeMap<u32, ReducerSnapshot>,
 }
 
@@ -250,6 +302,87 @@ impl V1Reducer {
     /// This is read-only and does not extend or otherwise alter retention.
     pub fn retained_tip_at(&self, height: u32) -> Option<ReplayTip> {
         self.history.get(&height).map(|snapshot| snapshot.tip)
+    }
+
+    /// Serializes the validated reducer state and bounded rewind journal.
+    ///
+    /// The returned bytes are local wallet material, not protocol wire data.
+    pub fn save_snapshot(&self) -> Result<Vec<u8>, SnapshotError> {
+        let snapshots = self
+            .history
+            .values()
+            .map(|snapshot| self.store_snapshot(snapshot))
+            .collect::<Result<Vec<_>, _>>()?;
+        serde_json::to_vec(&StoredV1Reducer {
+            format_version: COPPICE_SNAPSHOT_FORMAT_VERSION,
+            deployment_id: self.deployment_id,
+            snapshots,
+        })
+        .map_err(|_| SnapshotError::Encoding)
+    }
+
+    /// Loads and fully validates a local reducer snapshot.
+    ///
+    /// Derived indexes are rebuilt from authoritative records. The caller must
+    /// still compare the returned tip with its host-selected canonical block
+    /// identity before using the reducer for protected wallet operations.
+    pub fn load_snapshot(
+        deployment: DeploymentParameters,
+        bytes: &[u8],
+    ) -> Result<Self, SnapshotError> {
+        let deployment_id = deployment
+            .validate()
+            .map_err(|_| SnapshotError::DeploymentMismatch)?;
+        let stored: StoredV1Reducer =
+            serde_json::from_slice(bytes).map_err(|_| SnapshotError::Encoding)?;
+        if stored.format_version != COPPICE_SNAPSHOT_FORMAT_VERSION {
+            return Err(SnapshotError::UnsupportedFormat);
+        }
+        if stored.deployment_id != deployment_id {
+            return Err(SnapshotError::DeploymentMismatch);
+        }
+        if stored.snapshots.is_empty() {
+            return Err(SnapshotError::EmptyHistory);
+        }
+        if stored.snapshots.len() > DEFAULT_REORG_RETENTION_BLOCKS as usize + 1 {
+            return Err(SnapshotError::HistoryTooLarge);
+        }
+
+        let activation_base = deployment
+            .activation_height
+            .checked_sub(1)
+            .ok_or(SnapshotError::InvalidState)?;
+        let mut history = BTreeMap::new();
+        let mut previous_height: Option<u32> = None;
+        for stored_snapshot in stored.snapshots {
+            if stored_snapshot.height < activation_base
+                || previous_height
+                    .is_some_and(|height| height.checked_add(1) != Some(stored_snapshot.height))
+            {
+                return Err(SnapshotError::NonCanonicalHistory);
+            }
+            previous_height = Some(stored_snapshot.height);
+            let snapshot = Self::restore_snapshot(&deployment, deployment_id, stored_snapshot)?;
+            if history.insert(snapshot.tip.height, snapshot).is_some() {
+                return Err(SnapshotError::NonCanonicalHistory);
+            }
+        }
+        let current = history
+            .last_key_value()
+            .map(|(_, snapshot)| snapshot.clone())
+            .ok_or(SnapshotError::EmptyHistory)?;
+        let verifier =
+            V1BondVerifier::new().map_err(|_| SnapshotError::VerifierInitializationFailure)?;
+        Ok(Self {
+            deployment,
+            deployment_id,
+            state: current.state,
+            ironwood_tree: current.ironwood_tree,
+            ironwood_checkpoints: current.ironwood_checkpoints,
+            tip: current.tip,
+            verifier,
+            history,
+        })
     }
 
     /// Restores the exact in-memory reducer snapshot at the host-selected
@@ -404,6 +537,8 @@ impl V1Reducer {
                 tip: self.tip,
             },
         );
+        let oldest_retained = block.height.saturating_sub(DEFAULT_REORG_RETENTION_BLOCKS);
+        self.history.retain(|height, _| *height >= oldest_retained);
         Ok(AppliedBlock {
             tip,
             ironwood_checkpoint,
@@ -413,6 +548,218 @@ impl V1Reducer {
             state_root: final_root,
             transaction_outcomes: outcomes,
         })
+    }
+
+    fn store_snapshot(
+        &self,
+        snapshot: &ReducerSnapshot,
+    ) -> Result<StoredReducerSnapshot, SnapshotError> {
+        let mut ironwood_tree = Vec::new();
+        zcash_primitives::merkle_tree::write_commitment_tree(
+            &snapshot.ironwood_tree,
+            &mut ironwood_tree,
+        )
+        .map_err(|_| SnapshotError::InvalidIronwoodTree)?;
+        let state_root = Self::snapshot_state_root(
+            &self.deployment,
+            self.deployment_id,
+            &snapshot.state,
+            &snapshot.ironwood_tree,
+            &snapshot.ironwood_checkpoints,
+            snapshot.tip,
+        )?;
+        Ok(StoredReducerSnapshot {
+            height: snapshot.tip.height,
+            block_hash: snapshot.tip.block_hash,
+            state: StoredState {
+                names: snapshot
+                    .state
+                    .names
+                    .iter()
+                    .map(|(name, record)| (name.clone(), record.clone()))
+                    .collect(),
+                pending: snapshot
+                    .state
+                    .pending
+                    .iter()
+                    .map(|(commitment, position)| (*commitment, *position))
+                    .collect(),
+                recent_spent: snapshot
+                    .state
+                    .recent_spent
+                    .iter()
+                    .map(|(tag, height)| (*tag, *height))
+                    .collect(),
+            },
+            ironwood_tree,
+            ironwood_checkpoints: snapshot
+                .ironwood_checkpoints
+                .values()
+                .map(|checkpoint| StoredCheckpoint {
+                    height: checkpoint.height,
+                    root: checkpoint.root,
+                    tree_size: checkpoint.tree_size,
+                })
+                .collect(),
+            state_root,
+        })
+    }
+
+    fn restore_snapshot(
+        deployment: &DeploymentParameters,
+        deployment_id: [u8; 32],
+        stored: StoredReducerSnapshot,
+    ) -> Result<ReducerSnapshot, SnapshotError> {
+        let stored_name_count = stored.state.names.len();
+        let names = stored.state.names.into_iter().collect::<BTreeMap<_, _>>();
+        if names.len() != stored_name_count
+            || names.iter().any(|(name, record)| {
+                !crate::envelope::valid_name(name)
+                    || crate::owner::parse_v1_owner_key(record.owner_pk).is_err()
+                    || reveal::canonical_v1_address(&record.address, deployment).is_err()
+                    || matches!(
+                        record.status,
+                        NameStatus::Released { terminal_height: 0 }
+                            | NameStatus::BondSpent { terminal_height: 0 }
+                    )
+            })
+        {
+            return Err(SnapshotError::InvalidState);
+        }
+        let pending = stored
+            .state
+            .pending
+            .iter()
+            .copied()
+            .collect::<BTreeMap<_, _>>();
+        let recent_spent = stored
+            .state
+            .recent_spent
+            .iter()
+            .copied()
+            .collect::<BTreeMap<_, _>>();
+        if pending.len() != stored.state.pending.len()
+            || recent_spent.len() != stored.state.recent_spent.len()
+            || pending
+                .values()
+                .any(|position| position.block_height > stored.height)
+            || recent_spent.values().any(|height| *height > stored.height)
+        {
+            return Err(SnapshotError::InvalidState);
+        }
+        let state = CoppiceState::from_authoritative_parts(names, pending, recent_spent)
+            .map_err(|_| SnapshotError::InvalidState)?;
+
+        let mut tree_cursor = Cursor::new(&stored.ironwood_tree);
+        let ironwood_tree: IronwoodFrontier =
+            zcash_primitives::merkle_tree::read_commitment_tree(&mut tree_cursor)
+                .map_err(|_| SnapshotError::InvalidIronwoodTree)?;
+        if tree_cursor.position() != stored.ironwood_tree.len() as u64 {
+            return Err(SnapshotError::InvalidIronwoodTree);
+        }
+
+        let checkpoints = stored
+            .ironwood_checkpoints
+            .iter()
+            .map(|checkpoint| {
+                (
+                    checkpoint.height,
+                    AuthenticatedIronwoodCheckpoint {
+                        height: checkpoint.height,
+                        root: checkpoint.root,
+                        tree_size: checkpoint.tree_size,
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        if checkpoints.len() != stored.ironwood_checkpoints.len()
+            || checkpoints.keys().any(|height| *height > stored.height)
+        {
+            return Err(SnapshotError::InvalidCheckpoint);
+        }
+        let tree_size =
+            u32::try_from(ironwood_tree.size()).map_err(|_| SnapshotError::InvalidIronwoodTree)?;
+        let tip_checkpoint = checkpoints
+            .get(&stored.height)
+            .ok_or(SnapshotError::InvalidCheckpoint)?;
+        if tip_checkpoint.root != ironwood_tree.root().to_bytes()
+            || tip_checkpoint.tree_size != tree_size
+        {
+            return Err(SnapshotError::InvalidCheckpoint);
+        }
+        let tip = ReplayTip {
+            height: stored.height,
+            block_hash: stored.block_hash,
+        };
+        let computed_root = Self::snapshot_state_root(
+            deployment,
+            deployment_id,
+            &state,
+            &ironwood_tree,
+            &checkpoints,
+            tip,
+        )?;
+        if computed_root != stored.state_root {
+            return Err(SnapshotError::StateRootMismatch);
+        }
+        Ok(ReducerSnapshot {
+            state,
+            ironwood_tree,
+            ironwood_checkpoints: checkpoints,
+            tip,
+        })
+    }
+
+    fn snapshot_state_root(
+        deployment: &DeploymentParameters,
+        deployment_id: [u8; 32],
+        state: &CoppiceState,
+        tree: &IronwoodFrontier,
+        checkpoints: &BTreeMap<u32, AuthenticatedIronwoodCheckpoint>,
+        tip: ReplayTip,
+    ) -> Result<[u8; 32], SnapshotError> {
+        let checkpoint = checkpoints
+            .get(&tip.height)
+            .ok_or(SnapshotError::InvalidCheckpoint)?;
+        let tree_size =
+            u32::try_from(tree.size()).map_err(|_| SnapshotError::InvalidIronwoodTree)?;
+        if checkpoint.tree_size != tree_size || checkpoint.root != tree.root().to_bytes() {
+            return Err(SnapshotError::InvalidCheckpoint);
+        }
+        let oldest_retained_height = recent_spent::oldest_retained_height(
+            deployment.activation_height,
+            tip.height,
+            deployment.bond_note_max_age_blocks,
+            deployment.commit_ttl_blocks,
+        )
+        .map_err(|_| SnapshotError::InvalidState)?;
+        if state
+            .recent_spent
+            .values()
+            .any(|height| *height < oldest_retained_height || *height > tip.height)
+        {
+            return Err(SnapshotError::InvalidState);
+        }
+        let name_tree_root = state
+            .name_tree_root()
+            .map_err(|_| SnapshotError::InvalidState)?;
+        let pending_root = state
+            .pending_root()
+            .map_err(|_| SnapshotError::InvalidState)?;
+        let recent_spent_root = state
+            .recent_spent_root(oldest_retained_height)
+            .map_err(|_| SnapshotError::InvalidState)?;
+        state_root::state_root(&StateRootInput {
+            deployment_id,
+            height: tip.height,
+            block_hash: tip.block_hash,
+            ironwood_tree_size: tree_size,
+            ironwood_root: checkpoint.root,
+            name_tree_root,
+            pending_root,
+            recent_spent_root,
+        })
+        .map_err(|_| SnapshotError::InvalidState)
     }
 
     fn validate_candidate(
@@ -1546,5 +1893,58 @@ mod tests {
         assert!(reducer.state.pending.contains_key(&commitment));
         assert_eq!(reducer.ironwood_tree.size(), 1);
         assert_eq!(reducer.ironwood_checkpoints[&101].tree_size, 1);
+    }
+
+    #[test]
+    fn bounded_history_and_validated_snapshot_round_trip() {
+        let mut reducer = reducer();
+        for height in 100u32..=229 {
+            let mut block_hash = [0u8; 32];
+            block_hash[..4].copy_from_slice(&height.to_be_bytes());
+            reducer
+                .apply_block(&empty_block_at(&reducer, height, block_hash))
+                .unwrap();
+        }
+
+        assert_eq!(reducer.history.len(), 101);
+        assert_eq!(reducer.oldest_rewind_height(), 129);
+        assert!(!reducer.has_rewind_snapshot(128));
+        assert_eq!(reducer.rewind_to(128), Err(RewindError::SnapshotMissing));
+
+        let encoded = reducer.save_snapshot().unwrap();
+        let restored = V1Reducer::load_snapshot(deployment(), &encoded).unwrap();
+        assert_eq!(restored.tip(), reducer.tip());
+        assert_eq!(restored.state(), reducer.state());
+        assert_eq!(restored.ironwood_frontier(), reducer.ironwood_frontier());
+        assert_eq!(
+            restored.ironwood_checkpoints(),
+            reducer.ironwood_checkpoints()
+        );
+        assert_eq!(restored.oldest_rewind_height(), 129);
+        assert_eq!(restored.history.len(), 101);
+    }
+
+    #[test]
+    fn snapshot_rejects_wrong_deployment_and_tampered_state_root() {
+        let mut reducer = reducer();
+        reducer
+            .apply_block(&empty_block_at(&reducer, 100, [0x10; 32]))
+            .unwrap();
+        let encoded = reducer.save_snapshot().unwrap();
+
+        let mut wrong_deployment = deployment();
+        wrong_deployment.network_id.push(0x42);
+        assert!(matches!(
+            V1Reducer::load_snapshot(wrong_deployment, &encoded),
+            Err(SnapshotError::DeploymentMismatch)
+        ));
+
+        let mut value: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        value["snapshots"][1]["state_root"] =
+            serde_json::Value::Array(vec![serde_json::Value::from(0); 32]);
+        assert!(matches!(
+            V1Reducer::load_snapshot(deployment(), &serde_json::to_vec(&value).unwrap()),
+            Err(SnapshotError::StateRootMismatch)
+        ));
     }
 }
