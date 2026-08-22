@@ -112,7 +112,7 @@ pub fn verify_v1(deployment_id: [u8; 32], operation: &Operation, previous: &Name
     let Ok(signature): Result<[u8; 64], _> = signature.as_slice().try_into() else {
         return false;
     };
-    let Ok(key) = owner::parse_owner_key(previous.owner_pk) else {
+    let Ok(key) = owner::parse_v1_owner_key(previous.owner_pk) else {
         return false;
     };
     let Ok(message) = authorization_message_v1(deployment_id, operation, previous) else {
@@ -302,6 +302,10 @@ mod tests {
         let mut wrong_owner = previous.clone();
         wrong_owner.owner_pk = owner::owner_key_bytes(&(&other_key).into());
         assert!(!verify_v1(deployment_id, &update, &wrong_owner));
+
+        let mut identity_owner = previous.clone();
+        identity_owner.owner_pk = [0; 32];
+        assert!(!verify_v1(deployment_id, &update, &identity_owner));
 
         let mut short_signature = update.clone();
         if let Operation::Update { signature, .. } = &mut short_signature {

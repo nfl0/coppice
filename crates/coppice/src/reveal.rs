@@ -114,7 +114,7 @@ fn validate_before_proof<'a>(
     if !envelope::valid_name(name) {
         return Err(RevealValidationError::InvalidName);
     }
-    owner::parse_owner_key(*owner_pk).map_err(|_| RevealValidationError::InvalidOwnerKey)?;
+    owner::parse_v1_owner_key(*owner_pk).map_err(|_| RevealValidationError::InvalidOwnerKey)?;
     let address = canonical_v1_address(address, deployment)?;
     if bond_proof.len() > MAX_BOND_PROOF_LEN {
         return Err(RevealValidationError::ProofTooLarge);
@@ -416,6 +416,15 @@ mod tests {
         }
         assert_eq!(
             preproof(&state, &invalid_owner, 101, anchor, floor),
+            Err(RevealValidationError::InvalidOwnerKey)
+        );
+
+        let mut identity_owner = operation();
+        if let Operation::Reveal { owner_pk, .. } = &mut identity_owner {
+            *owner_pk = [0; 32];
+        }
+        assert_eq!(
+            preproof(&state, &identity_owner, 101, anchor, floor),
             Err(RevealValidationError::InvalidOwnerKey)
         );
 

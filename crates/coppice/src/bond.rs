@@ -427,11 +427,8 @@ impl V1BondProver {
         }
         let canonical_address = crate::reveal::canonical_v1_address(canonical_address, deployment)
             .map_err(|_| V1BondProverError::InvalidAddress)?;
-        let owner_key = crate::owner::parse_owner_key(owner_pk)
+        crate::owner::parse_v1_owner_key(owner_pk)
             .map_err(|_| V1BondProverError::InvalidOwnerKey)?;
-        if owner_key.is_identity() {
-            return Err(V1BondProverError::InvalidOwnerKey);
-        }
 
         let V1BondWitness {
             note,

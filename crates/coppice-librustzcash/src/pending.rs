@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use coppice::{
     config::{DeploymentEncodingError, DeploymentParameters, DeploymentValidationError},
     envelope,
-    owner::parse_owner_key,
+    owner::parse_v1_owner_key,
     pending::PendingTimingError,
     registration::registration_commitment,
     reveal::{RevealValidationError, canonical_v1_address},
@@ -60,7 +60,7 @@ impl PendingRegistration {
         if !envelope::valid_name(&name) {
             return Err(PendingRegistrationValidationError::InvalidName);
         }
-        parse_owner_key(owner_pk)
+        parse_v1_owner_key(owner_pk)
             .map_err(|_| PendingRegistrationValidationError::InvalidOwnerKey)?;
 
         let canonical_address = canonical_v1_address(&address, deployment)
@@ -346,6 +346,33 @@ mod tests {
                 wrong,
             ),
             Err(PendingRegistrationValidationError::CommitmentMismatch)
+        ));
+    }
+
+    #[test]
+    fn constructor_rejects_identity_v1_owner_key() {
+        let deployment = deployment();
+        let identity = [0; 32];
+        let commitment = registration_commitment(
+            &deployment,
+            "alice",
+            identity,
+            [0x42; 32],
+            ADDRESS,
+            [0xa5; 32],
+        )
+        .unwrap();
+        assert!(matches!(
+            PendingRegistration::new(
+                &deployment,
+                "alice".to_owned(),
+                ADDRESS.to_vec(),
+                identity,
+                [0x42; 32],
+                [0xa5; 32],
+                commitment,
+            ),
+            Err(PendingRegistrationValidationError::InvalidOwnerKey)
         ));
     }
 
