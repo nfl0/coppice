@@ -47,6 +47,7 @@ pub const REGISTRATION_COMMITMENT_DOMAIN: &[u8] = b"CoppiceCommitV0";
 pub const COMMITMENT_SET_DOMAIN: &[u8] = b"CoppiceCommitSetV0";
 /// A reveal must be mined in a block strictly after its commitment.
 pub const MIN_COMMIT_CONFIRMATIONS: u32 = 1;
+/// Legacy V0 bond-tag domain used only by the compatibility replay path.
 pub const BOND_TAG_DOMAIN: &[u8; 16] = b"CoppiceBondTagV0";
 pub const BOND_OWNER_DOMAIN: &[u8] = b"CoppiceOwnerV0";
 pub const BOND_CONTEXT_DOMAIN: &[u8] = b"CoppiceCtxV0";

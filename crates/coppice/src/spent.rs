@@ -69,12 +69,14 @@ pub fn domain_field(domain: &[u8]) -> Result<pallas::Base, BondTagError> {
     bytes[..domain.len()].copy_from_slice(domain);
     Ok(pallas::Base::from_u128(u128::from_le_bytes(bytes)))
 }
+/// Legacy V0 domain field retained for `SpentTagTree` compatibility replay.
 pub fn bond_tag_domain_field() -> pallas::Base {
     domain_field(BOND_TAG_DOMAIN).expect("fixed 16-byte domain")
 }
 pub fn native_hash(domain: &[u8], value: pallas::Base) -> Result<pallas::Base, BondTagError> {
     Ok(Hash::<_, P128Pow5T3, ConstantLength<2>, 3, 2>::init().hash([domain_field(domain)?, value]))
 }
+/// Legacy V0 tag derivation retained for `SpentTagTree` compatibility replay.
 pub fn spent_tag(nullifier: &[u8; 32]) -> Result<[u8; 32], BondTagError> {
     let nf = Option::<pallas::Base>::from(pallas::Base::from_repr(*nullifier))
         .ok_or(BondTagError::NonCanonicalNullifier)?;

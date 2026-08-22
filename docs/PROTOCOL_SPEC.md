@@ -1005,7 +1005,7 @@ a9521cdf995ffcfd2627ddfdd750253512172d73
 The vector/final working-tree HEAD reported for the freeze is:
 
 ```text
-cf9f7102ddec7f6fb6133b2299a11e71e9ffc8ce
+0c2c177487bb868c848eae4eef33b1b58d59fcfe
 ```
 
 The canonical v1 proof parameters are:
@@ -1016,7 +1016,7 @@ commitment scheme  = Halo2 IPA / Vesta
 parameters         = Params::<vesta::Affine>::new(11)
 transcript         = Blake2bWrite / Blake2bRead with Challenge255
 proof length       = 4960 bytes
-BOND_VK_ID          = d9e24e9de209f3256b4e3b7d0c681211792677bd3a6398bf6079cc2c581c0af3
+BOND_VK_ID          = a16074cfadabc4c24bf58732389a4f2d574e25c43f169239ec21da852f5f7adc
 ```
 
 `BOND_VK_ID` is the protocol-stable verifier identifier. It was derived as:

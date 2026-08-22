@@ -1622,7 +1622,7 @@ The single instance column MUST use this exact order:
 The frozen verifier identifier is:
 
 ```text
-BOND_VK_ID = d9e24e9de209f3256b4e3b7d0c681211792677bd3a6398bf6079cc2c581c0af3
+BOND_VK_ID = a16074cfadabc4c24bf58732389a4f2d574e25c43f169239ec21da852f5f7adc
 ```
 
 The circuit MUST NOT reintroduce the following Action-only machinery:
@@ -1777,10 +1777,10 @@ BondProof source commit:
 a9521cdf995ffcfd2627ddfdd750253512172d73
 
 BondProof final/vector HEAD:
-cf9f7102ddec7f6fb6133b2299a11e71e9ffc8ce
+0c2c177487bb868c848eae4eef33b1b58d59fcfe
 
 BOND_VK_ID:
-d9e24e9de209f3256b4e3b7d0c681211792677bd3a6398bf6079cc2c581c0af3
+a16074cfadabc4c24bf58732389a4f2d574e25c43f169239ec21da852f5f7adc
 
 P-OWNER-002 scalar:
 901a508ef3ce3434c02d57c2b4087afbd3e4d7505bbcec10ea1e6e7194819b0c

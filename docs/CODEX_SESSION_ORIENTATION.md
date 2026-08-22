@@ -43,7 +43,7 @@ Halo2:
 0.3.2 / IPA Vesta / k=11 / Blake2b+Challenge255
 
 BOND_VK_ID:
-d9e24e9de209f3256b4e3b7d0c681211792677bd3a6398bf6079cc2c581c0af3
+a16074cfadabc4c24bf58732389a4f2d574e25c43f169239ec21da852f5f7adc
 ```
 
 The intended development process is incremental: one narrowly scoped task per

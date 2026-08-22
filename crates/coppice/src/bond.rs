@@ -1,5 +1,6 @@
 //! First non-recursive private BondCircuit POC, composed from the Orchard Action constraints.
 use crate::{
+    bond_tag::{derive_v1_bond_tag, v1_bond_tag_domain_field},
     config::{DeploymentParameters, Rendezvous},
     constants, crypto,
     spent::{domain_field, native_hash, spent_tag},
@@ -27,6 +28,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use shardtree::{ShardTree, store::memory::MemoryShardStore};
 use std::time::{Duration, Instant};
+use zcash_address::unified::{self, Encoding};
 use zcash_note_encryption::try_note_decryption;
 use zcash_protocol::memo::MemoBytes;
 
@@ -168,6 +170,23 @@ fn dedicated_v1_deployment_id() -> [u8; 32] {
         assert_eq!(computed, expected, "deployment fixture ID");
         computed
     })
+}
+
+fn dedicated_v1_fixture_address() -> String {
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("../../../test-vectors/deployment.json"))
+            .expect("deployment fixture JSON");
+    let receiver: [u8; 43] = hex::decode(
+        fixture["input"]["rendezvous_receiver_hex"]
+            .as_str()
+            .expect("deployment Orchard receiver"),
+    )
+    .expect("deployment Orchard receiver hex")
+    .try_into()
+    .expect("deployment Orchard receiver length");
+    unified::Address::try_from_items(vec![unified::Receiver::Orchard(receiver)])
+        .expect("single Orchard receiver is a valid Unified Address")
+        .encode(&zcash_protocol::consensus::NetworkType::Regtest)
 }
 
 fn v1_registration_preimage(name: &str, address: &[u8]) -> Result<Vec<u8>, V1BindingError> {
@@ -389,10 +408,10 @@ fn minimal_fixture(
         context,
         owner,
         position_floor,
-        crate::spent::bond_tag_domain_field(),
+        v1_bond_tag_domain_field(),
     )?;
     let nf_bytes = nf.to_bytes();
-    let tag_bytes = spent_tag(&nf_bytes).ok()?;
+    let tag_bytes = derive_v1_bond_tag(&nf_bytes).ok()?;
     let tag = Option::<pallas::Base>::from(pallas::Base::from_repr(tag_bytes))?;
     let anchor_field = Option::<pallas::Base>::from(pallas::Base::from_repr(anchor.to_bytes()))?;
     Some((
@@ -466,6 +485,7 @@ pub fn generate_coppice_bond_vectors(
     let owner = crate::owner::owner_key_bytes(
         &(&crate::owner::OwnerSigningKey::try_from([1; 32]).map_err(|_| "owner key")?).into(),
     );
+    let fixture_address = dedicated_v1_fixture_address();
     let (circuit, instance, _) = minimal_fixture(
         FIXTURE_VALUE,
         FIXTURE_MINIMUM,
@@ -476,7 +496,7 @@ pub fn generate_coppice_bond_vectors(
         "bonded",
         b"minimal-bond",
         owner,
-        b"UA_BOND",
+        fixture_address.as_bytes(),
     )
     .ok_or("bond fixture")?;
     let params = Params::<vesta::Affine>::new(COPPICE_BOND_K);
@@ -527,7 +547,7 @@ pub fn generate_coppice_bond_vectors(
         "bonded",
         b"minimal-bond",
         owner,
-        b"UA_BOND",
+        fixture_address.as_bytes(),
     )
     .ok_or("below-floor fixture")?;
     let below_floor_proof = prove_with_rng(
@@ -582,7 +602,7 @@ pub fn generate_coppice_bond_vectors(
         return Err(format!("unexpected proof length: {}", bond.proof_length));
     }
 
-    let bond_tag = spent_tag(&canonical_nullifier).map_err(|_| "canonical nullifier")?;
+    let bond_tag = derive_v1_bond_tag(&canonical_nullifier).map_err(|_| "canonical nullifier")?;
     let tag_vector = BondTagVector {
         version: "Coppice bond tag v1 Poseidon P128Pow5T3 ConstantLength<2>",
         canonical_nullifier: hex::encode(canonical_nullifier),
@@ -798,6 +818,7 @@ pub(crate) fn test_registration_bond(name: &str, address: &[u8]) -> &'static Bon
 mod tests {
     use super::*;
     use halo2_proofs::plonk::ConstraintSystem;
+    use zcash_address::unified::Container;
 
     fn deployment_vector_id() -> [u8; 32] {
         let fixture: serde_json::Value =
@@ -827,16 +848,35 @@ mod tests {
             hex::encode(v1_protocol_binding().to_repr()),
             "c1f0f1ef06f5ffd8a21edcb859d46fbb55b653022a66a6d01ee4945c2cf0ae1f"
         );
-        assert_eq!(
-            hex::encode(v1_context_binding("bonded", b"UA_BOND").unwrap().to_repr()),
-            "387c5a48d6d89f417de832512cd15bd08167624b956afeec4a193115f7789c27"
-        );
         let owner = crate::owner::owner_key_bytes(
             &(&crate::owner::OwnerSigningKey::try_from([1; 32]).unwrap()).into(),
         );
         assert_eq!(
             hex::encode(v1_owner_binding(owner).to_repr()),
             "9a89a45a3c07244e3b42f6058bdaccab77b438946c4826783e7f35955b89b514"
+        );
+    }
+
+    #[test]
+    fn dedicated_fixture_address_is_canonical_regtest_ua() {
+        let encoded = dedicated_v1_fixture_address();
+        println!("canonical-fixture-ua={encoded}");
+        let (network, decoded) = unified::Address::decode(&encoded).unwrap();
+        assert_eq!(network, zcash_protocol::consensus::NetworkType::Regtest);
+        assert_eq!(decoded.encode(&network), encoded);
+
+        let deployment: serde_json::Value =
+            serde_json::from_str(include_str!("../../../test-vectors/deployment.json")).unwrap();
+        let expected_receiver = hex::decode(
+            deployment["input"]["rendezvous_receiver_hex"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(decoded.items().len(), 1);
+        assert_eq!(
+            decoded.items()[0],
+            unified::Receiver::Orchard(expected_receiver.try_into().unwrap())
         );
     }
 
@@ -877,6 +917,7 @@ mod tests {
         let owner = crate::owner::owner_key_bytes(
             &(&crate::owner::OwnerSigningKey::try_from([1; 32]).unwrap()).into(),
         );
+        let fixture_address = dedicated_v1_fixture_address();
         let (_, instance, _) = minimal_fixture(
             FIXTURE_VALUE,
             FIXTURE_MINIMUM,
@@ -887,7 +928,7 @@ mod tests {
             "bonded",
             b"minimal-bond",
             owner,
-            b"UA_BOND",
+            fixture_address.as_bytes(),
         )
         .unwrap();
         assert_eq!(instance.len(), COPPICE_PUBLIC_INPUT_NAMES.len());
@@ -992,6 +1033,7 @@ mod tests {
         let owner = crate::owner::owner_key_bytes(
             &(&crate::owner::OwnerSigningKey::try_from([1; 32]).unwrap()).into(),
         );
+        let fixture_address = dedicated_v1_fixture_address();
         minimal_fixture(
             value,
             FIXTURE_MINIMUM,
@@ -1002,7 +1044,7 @@ mod tests {
             "bonded",
             b"minimal-bond",
             owner,
-            b"UA_BOND",
+            fixture_address.as_bytes(),
         )
     }
 
@@ -1141,10 +1183,83 @@ mod tests {
         );
         assert_eq!(
             generated_bond_value["BOND_VK_ID"],
-            "d9e24e9de209f3256b4e3b7d0c681211792677bd3a6398bf6079cc2c581c0af3"
+            "a16074cfadabc4c24bf58732389a4f2d574e25c43f169239ec21da852f5f7adc"
         );
         assert_eq!(generated_bond, expected_bond);
         assert_eq!(tag, expected_tag);
+    }
+
+    #[test]
+    fn frozen_dedicated_vector_uses_v1_tag_context_and_verifier_identity() {
+        let frozen: serde_json::Value =
+            serde_json::from_str(include_str!("../../../test-vectors/coppice_bond_v1.json"))
+                .unwrap();
+        let owner = crate::owner::owner_key_bytes(
+            &(&crate::owner::OwnerSigningKey::try_from([1; 32]).unwrap()).into(),
+        );
+        let address = dedicated_v1_fixture_address();
+        let (_, instance, nullifier) = minimal_fixture(
+            FIXTURE_VALUE,
+            FIXTURE_MINIMUM,
+            1,
+            1,
+            false,
+            None,
+            "bonded",
+            b"minimal-bond",
+            owner,
+            address.as_bytes(),
+        )
+        .unwrap();
+        let public_inputs = frozen["public_inputs"].as_array().unwrap();
+        assert_eq!(public_inputs.len(), COPPICE_PUBLIC_INPUT_NAMES.len());
+        assert_eq!(
+            public_inputs[4]["value"],
+            hex::encode(
+                v1_context_binding("bonded", address.as_bytes())
+                    .unwrap()
+                    .to_repr()
+            )
+        );
+        assert_eq!(
+            public_inputs[6]["value"],
+            hex::encode(derive_v1_bond_tag(&nullifier).unwrap())
+        );
+        assert_eq!(
+            public_inputs[6]["value"],
+            hex::encode(instance[6].to_repr())
+        );
+
+        let verifier_artifact = hex::decode(frozen["verifier_artifact"].as_str().unwrap()).unwrap();
+        let recomputed_id = blake2b_simd::Params::new()
+            .hash_length(32)
+            .personal(b"CoppiceBondV1")
+            .hash(&verifier_artifact);
+        assert_eq!(frozen["BOND_VK_ID"], hex::encode(recomputed_id.as_bytes()));
+        assert_ne!(
+            frozen["BOND_VK_ID"],
+            "d9e24e9de209f3256b4e3b7d0c681211792677bd3a6398bf6079cc2c581c0af3"
+        );
+        assert_eq!(frozen["proof_length"], 4_960);
+    }
+
+    #[test]
+    #[ignore = "explicit one-time normative vector regeneration"]
+    fn regenerate_dedicated_bond_vectors() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let tag_path = root.join("test-vectors/bond_tags.json");
+        let tag: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&tag_path).unwrap()).unwrap();
+        let canonical_nullifier = hex::decode(tag["canonical_nullifier"].as_str().unwrap())
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let source = std::env::var("COPPICE_BOND_SOURCE_COMMIT")
+            .expect("set COPPICE_BOND_SOURCE_COMMIT to the final generator source commit");
+        let (bond, corrected_tag) =
+            generate_coppice_bond_vectors(&source, canonical_nullifier).unwrap();
+        assert_eq!(corrected_tag, std::fs::read_to_string(tag_path).unwrap());
+        std::fs::write(root.join("test-vectors/coppice_bond_v1.json"), bond).unwrap();
     }
 
     #[test]
