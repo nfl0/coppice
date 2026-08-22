@@ -1,5 +1,5 @@
 //! Canonical RedPallas owner authorization for the POC state machine.
-use crate::{constants, envelope::Operation, state::NameRecord};
+use crate::{constants, crypto, envelope::Operation, state::NameRecord};
 use orchard::primitives::redpallas::{Signature, SigningKey, SpendAuth, VerificationKey};
 use rand_core::OsRng;
 use sha2::{Digest, Sha256};
@@ -15,9 +15,7 @@ pub fn owner_key_bytes(key: &OwnerVerificationKey) -> [u8; 32] {
     key.into()
 }
 pub fn name_id(name: &str) -> [u8; 32] {
-    let mut b = constants::NAME_ID_DOMAIN.to_vec();
-    b.extend_from_slice(name.as_bytes());
-    Sha256::digest(b).into()
+    crypto::hash("CoppiceNameV1", name.as_bytes()).expect("fixed v1 name hash label")
 }
 pub fn canonical_record_bytes(r: &NameRecord) -> Vec<u8> {
     let mut b = Vec::new();
@@ -168,5 +166,31 @@ mod owner_key_vectors {
             "expected_redpallas_verification_key_hex = {}",
             hex::encode(verification_key)
         );
+    }
+}
+
+#[cfg(test)]
+mod name_vectors {
+    use super::*;
+
+    #[test]
+    fn p_name_001_vectors() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../test-vectors/names.json")).unwrap();
+
+        for vector in fixture["vectors"].as_array().unwrap() {
+            let name = vector["input_utf8"].as_str().unwrap();
+            let valid = vector["valid"].as_bool().unwrap();
+            assert_eq!(crate::envelope::valid_name(name), valid, "{name:?}");
+
+            if valid {
+                let expected: [u8; 32] =
+                    hex::decode(vector["expected_name_id_hex"].as_str().unwrap())
+                        .unwrap()
+                        .try_into()
+                        .unwrap();
+                assert_eq!(name_id(name), expected, "{name:?}");
+            }
+        }
     }
 }
