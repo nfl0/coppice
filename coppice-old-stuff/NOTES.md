@@ -18,31 +18,13 @@ versions; the required Orchard 0.15.3 circuit API refactor is vendored and docum
 | compact Ironwood actions | `orchard::note_encryption::CompactAction`, `zcash_client_backend::scanning::compact` |
 | transaction builder | `zcash_primitives::transaction::builder::{Builder, BuildConfig, BundlePadding}` |
 
-## Pre-authorization memo dependency experiment
+## Rendez-vous discovery
 
-`tests/preauth_grind.rs` builds a genuine V6 Ironwood PCZT, replaces only a memo plaintext,
-uses `IoFinalizer` to encrypt it, computes `Pczt::into_effects()` / `TxIdDigester`, then proves
-and authorizes only the selected candidate. It parses and decrypts the final transaction.
-
-| Field | Changes with memo | Why |
-|---|---|---|
-| output note / rseed / rho | No | note construction does not contain memo |
-| cmx | No | commitment is over note fields, not memo |
-| cv_net | No | derived from value and `rcv` |
-| nullifier / rk / anchor / flags | No | spend/effecting data fixed before loop |
-| ephemeral key | No | derives from fixed note encryption key material |
-| `encCiphertext[0..52]` | No | fixed note-plaintext prefix |
-| memo ciphertext region and tag | Yes | AEAD encrypts changed memo plaintext |
-| `outCiphertext` | No | output recovery encryption excludes memo |
-| Action circuit statement | No | asserted equal for anchor, cv, nf, rk, cmx, flags |
-| txid / shielded sighash | Yes | V6 txid commits encrypted ciphertext; sighash commits txid digests |
-| Halo2 proof | No reproof needed during loop | proof is created only for winner |
-| spendAuthSig / bindingSig | No signatures in loop | made once after winner, over winner sighash |
-
-This distinguishes cryptography from APIs: PCZT's public `Redactor` method
-`replace_enc_ciphertext_with_memo_plaintext`, `IoFinalizer`, and `into_effects` express this
-lifecycle without a consensus or wallet-layer patch. The final txid equals the pre-authorization
-winning txid because proof and signatures are authorizing data, not effecting data.
+Each deployment fixes a public rendez-vous Orchard receiver and incoming viewing key. Compact
+Ironwood Actions contain the data needed for incoming-note trial decryption. A wallet
+trial-decrypts those compact Actions with the public UIVK and fetches the full transaction only
+when a rendez-vous output is detected. Carrier memos are set during ordinary transaction
+construction; no txid tag or grinding lifecycle is required.
 
 ## Non-consensus BondCircuit refactor
 
