@@ -14,6 +14,7 @@ pub enum Operation {
         name: String,
         owner_pk: [u8; 32],
         bond_tag: [u8; 32],
+        bond_anchor_height: u32,
         bond_anchor: [u8; 32],
         bond_proof: Vec<u8>,
         address: Vec<u8>,
@@ -75,13 +76,14 @@ pub fn encode_operation(op: &Operation) -> Result<Vec<u8>, Error> {
     let mut o = Vec::new();
     match op {
         Operation::Commit { commitment } => {
-            o.push(4);
+            o.push(1);
             o.extend_from_slice(commitment);
         }
         Operation::Reveal {
             name,
             owner_pk,
             bond_tag,
+            bond_anchor_height,
             bond_anchor,
             bond_proof,
             address,
@@ -90,11 +92,12 @@ pub fn encode_operation(op: &Operation) -> Result<Vec<u8>, Error> {
             if !valid_name(name) || address.len() > MAX_PAYLOAD || bond_proof.len() > MAX_PAYLOAD {
                 return Err(Error::Name);
             }
-            o.push(5);
+            o.push(2);
             put_len(&mut o, name.len())?;
             o.extend_from_slice(name.as_bytes());
             o.extend_from_slice(owner_pk);
             o.extend_from_slice(bond_tag);
+            o.extend_from_slice(&bond_anchor_height.to_be_bytes());
             o.extend_from_slice(bond_anchor);
             o.extend_from_slice(secret);
             put_len(&mut o, bond_proof.len())?;
@@ -111,13 +114,15 @@ pub fn encode_operation(op: &Operation) -> Result<Vec<u8>, Error> {
             if !valid_name(name) || address.len() > MAX_PAYLOAD || signature.len() > MAX_PAYLOAD {
                 return Err(Error::Name);
             }
-            o.push(2);
+            o.push(3);
             put_len(&mut o, name.len())?;
             o.extend_from_slice(name.as_bytes());
             o.extend_from_slice(&sequence.to_be_bytes());
             put_len(&mut o, address.len())?;
             o.extend_from_slice(address);
-            put_len(&mut o, signature.len())?;
+            if signature.len() != 64 {
+                return Err(Error::Malformed);
+            }
             o.extend_from_slice(signature)
         }
         Operation::Release {
@@ -128,11 +133,13 @@ pub fn encode_operation(op: &Operation) -> Result<Vec<u8>, Error> {
             if !valid_name(name) || signature.len() > MAX_PAYLOAD {
                 return Err(Error::Name);
             }
-            o.push(3);
+            o.push(4);
             put_len(&mut o, name.len())?;
             o.extend_from_slice(name.as_bytes());
             o.extend_from_slice(&sequence.to_be_bytes());
-            put_len(&mut o, signature.len())?;
+            if signature.len() != 64 {
+                return Err(Error::Malformed);
+            }
             o.extend_from_slice(signature)
         }
     }
@@ -147,31 +154,30 @@ pub fn decode_operation(mut p: &[u8]) -> Result<Operation, Error> {
     }
     let ty = *take(&mut p, 1)?.first().ok_or(Error::Malformed)?;
     let op = match ty {
-        4 => Operation::Commit {
+        1 => Operation::Commit {
             commitment: take(&mut p, 32)?.try_into().map_err(|_| Error::Malformed)?,
         },
-        5 => {
+        2 => {
             let name = take_name(&mut p)?;
             let k: [u8; 32] = take(&mut p, 32)?.try_into().map_err(|_| Error::Malformed)?;
-            crate::owner::parse_owner_key(k).map_err(|_| Error::Malformed)?;
             Operation::Reveal {
                 name,
                 owner_pk: k,
                 bond_tag: take(&mut p, 32)?.try_into().map_err(|_| Error::Malformed)?,
+                bond_anchor_height: u32::from_be_bytes(
+                    take(&mut p, 4)?.try_into().map_err(|_| Error::Malformed)?,
+                ),
                 bond_anchor: take(&mut p, 32)?.try_into().map_err(|_| Error::Malformed)?,
                 secret: take(&mut p, 32)?.try_into().map_err(|_| Error::Malformed)?,
                 bond_proof: take_len(&mut p)?,
                 address: take_len(&mut p)?,
             }
         }
-        2 => {
+        3 => {
             let name = take_name(&mut p)?;
             let s = u64::from_be_bytes(take(&mut p, 8)?.try_into().map_err(|_| Error::Malformed)?);
             let address = take_len(&mut p)?;
-            let signature = take_len(&mut p)?;
-            if signature.len() != 64 {
-                return Err(Error::Malformed);
-            }
+            let signature = take(&mut p, 64)?.to_vec();
             Operation::Update {
                 name,
                 sequence: s,
@@ -179,13 +185,10 @@ pub fn decode_operation(mut p: &[u8]) -> Result<Operation, Error> {
                 signature,
             }
         }
-        3 => {
+        4 => {
             let name = take_name(&mut p)?;
             let s = u64::from_be_bytes(take(&mut p, 8)?.try_into().map_err(|_| Error::Malformed)?);
-            let signature = take_len(&mut p)?;
-            if signature.len() != 64 {
-                return Err(Error::Malformed);
-            }
+            let signature = take(&mut p, 64)?.to_vec();
             Operation::Release {
                 name,
                 sequence: s,
@@ -313,6 +316,7 @@ mod tests {
             name: "alice".into(),
             owner_pk: crate::owner::owner_key_bytes(&(&key).into()),
             bond_tag: [1; 32],
+            bond_anchor_height: 0,
             bond_anchor: [2; 32],
             bond_proof: vec![3; 17],
             address: b"UA_A".to_vec(),
@@ -390,6 +394,7 @@ mod tests {
             name: "alice".into(),
             owner_pk: crate::owner::owner_key_bytes(&(&key).into()),
             bond_tag: [1; 32],
+            bond_anchor_height: 0,
             bond_anchor: [0; 32],
             bond_proof: Vec::new(),
             address: b"UA".to_vec(),
@@ -398,23 +403,93 @@ mod tests {
         let mut p = encode_operation(&op).unwrap();
         p.push(0);
         assert_eq!(decode_operation(&p), Err(Error::Trailing));
-        let bad = Operation::Reveal {
-            name: "alice".into(),
-            owner_pk: [0xff; 32],
-            bond_tag: [1; 32],
-            bond_anchor: [0; 32],
-            bond_proof: Vec::new(),
-            address: b"UA".to_vec(),
-            secret: [9; 32],
-        };
-        assert!(decode_operation(&encode_operation(&bad).unwrap()).is_err());
+        let mut truncated = encode_operation(&op).unwrap();
+        truncated.pop();
+        assert_eq!(decode_operation(&truncated), Err(Error::Malformed));
+        assert_eq!(decode_operation(&[0xff]), Err(Error::Malformed));
         let update = Operation::Update {
             name: "alice".into(),
             sequence: 1,
             address: b"UA".to_vec(),
             signature: vec![0; 63],
         };
-        assert!(decode_operation(&encode_operation(&update).unwrap()).is_err());
+        assert_eq!(encode_operation(&update), Err(Error::Malformed));
+    }
+
+    fn fixed32(hex: &str) -> [u8; 32] {
+        hex::decode(hex).unwrap().try_into().unwrap()
+    }
+
+    #[test]
+    fn operation_wire_vectors_match_v1_oracles() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../test-vectors/operations.json")).unwrap();
+        let expected_bytes = |id: &str| {
+            let vector = fixture["vectors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|vector| vector["id"].as_str() == Some(id))
+                .unwrap();
+            hex::decode(vector["expected_hex"].as_str().unwrap()).unwrap()
+        };
+        let cases = vec![
+            (
+                "commit",
+                Operation::Commit {
+                    commitment: fixed32(
+                        "bb65ec89bc5e298442f519808acea4a91dedeea427357894686399334d76ee80",
+                    ),
+                },
+            ),
+            (
+                "reveal",
+                Operation::Reveal {
+                    name: "alice".into(),
+                    owner_pk: fixed32(
+                        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+                    ),
+                    bond_tag: [0x42; 32],
+                    bond_anchor_height: 123,
+                    bond_anchor: [0x11; 32],
+                    bond_proof: (0..16).collect(),
+                    address: b"u1synthetic-conformance-address".to_vec(),
+                    secret: [0xa5; 32],
+                },
+            ),
+            (
+                "update",
+                Operation::Update {
+                    name: "alice".into(),
+                    sequence: 1,
+                    address: b"u1synthetic-new-address".to_vec(),
+                    signature: vec![0x77; 64],
+                },
+            ),
+            (
+                "release",
+                Operation::Release {
+                    name: "alice".into(),
+                    sequence: 2,
+                    signature: vec![0x77; 64],
+                },
+            ),
+        ];
+
+        for (id, operation) in cases {
+            let expected = expected_bytes(id);
+            let encoded = encode_operation(&operation).unwrap();
+            assert_eq!(encoded, expected, "{id} encoding");
+
+            let decoded = decode_operation(&expected)
+                .unwrap_or_else(|error| panic!("{id} decoding failed: {error:?}"));
+            assert_eq!(decoded, operation, "{id} decoding");
+            assert_eq!(
+                encode_operation(&decoded).unwrap(),
+                expected,
+                "{id} canonical"
+            );
+        }
     }
 
     #[test]

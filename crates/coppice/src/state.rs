@@ -159,6 +159,7 @@ pub(crate) fn apply_operation_with_spent(
             bond_proof,
             address,
             secret,
+            ..
         } => {
             if !valid_name(name) {
                 return Transition::Rejected(TransitionRejectReason::InvalidName);
@@ -318,6 +319,7 @@ mod tests {
             name: "alice".into(),
             owner_pk,
             bond_tag: bond.bond_tag,
+            bond_anchor_height: 0,
             bond_anchor: bond.anchor,
             bond_proof: bond.proof.clone(),
             address: b"UA_A".to_vec(),
@@ -612,6 +614,7 @@ mod tests {
             name: "alice".into(),
             owner_pk,
             bond_tag: bond.bond_tag,
+            bond_anchor_height: 0,
             bond_anchor: bond.anchor,
             bond_proof: bond.proof.clone(),
             address: b"UA_NEW".to_vec(),
@@ -636,6 +639,7 @@ mod tests {
             name: "alice".into(),
             owner_pk,
             bond_tag: bond.bond_tag,
+            bond_anchor_height: 0,
             bond_anchor: bond.anchor,
             bond_proof: bond.proof.clone(),
             address: b"UA_NEW".to_vec(),
@@ -681,6 +685,7 @@ mod tests {
             name: "bob".into(),
             owner_pk,
             bond_tag: bob_bond.bond_tag,
+            bond_anchor_height: 0,
             bond_anchor: bob_bond.anchor,
             bond_proof: bob_bond.proof.clone(),
             address: b"UA_C".to_vec(),
@@ -720,6 +725,7 @@ mod tests {
             name: "alice".into(),
             owner_pk,
             bond_tag: bond.bond_tag,
+            bond_anchor_height: 0,
             bond_anchor: bond.anchor,
             bond_proof: bond.proof.clone(),
             address: b"UA_A".to_vec(),
