@@ -10,6 +10,8 @@ pub mod incremental;
 pub mod ironwood;
 pub mod name_tree;
 pub mod owner;
+pub mod pending;
+pub mod recent_spent;
 pub mod record;
 pub mod registration;
 pub mod replay;
