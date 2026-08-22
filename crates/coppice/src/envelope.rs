@@ -30,16 +30,6 @@ pub enum Operation {
         sequence: u64,
         signature: Vec<u8>,
     },
-    TransferWithNewBond {
-        name: String,
-        sequence: u64,
-        new_owner_pk: [u8; 32],
-        new_bond_tag: [u8; 32],
-        new_bond_anchor: [u8; 32],
-        new_bond_proof: Vec<u8>,
-        address: Vec<u8>,
-        signature: Vec<u8>,
-    },
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
@@ -145,37 +135,6 @@ pub fn encode_operation(op: &Operation) -> Result<Vec<u8>, Error> {
             put_len(&mut o, signature.len())?;
             o.extend_from_slice(signature)
         }
-        Operation::TransferWithNewBond {
-            name,
-            sequence,
-            new_owner_pk,
-            new_bond_tag,
-            new_bond_anchor,
-            new_bond_proof,
-            address,
-            signature,
-        } => {
-            if !valid_name(name)
-                || address.len() > MAX_PAYLOAD
-                || new_bond_proof.len() > MAX_PAYLOAD
-                || signature.len() > MAX_PAYLOAD
-            {
-                return Err(Error::Name);
-            }
-            o.push(6);
-            put_len(&mut o, name.len())?;
-            o.extend_from_slice(name.as_bytes());
-            o.extend_from_slice(&sequence.to_be_bytes());
-            o.extend_from_slice(new_owner_pk);
-            o.extend_from_slice(new_bond_tag);
-            o.extend_from_slice(new_bond_anchor);
-            put_len(&mut o, new_bond_proof.len())?;
-            o.extend_from_slice(new_bond_proof);
-            put_len(&mut o, address.len())?;
-            o.extend_from_slice(address);
-            put_len(&mut o, signature.len())?;
-            o.extend_from_slice(signature);
-        }
     }
     if o.len() > MAX_PAYLOAD {
         return Err(Error::Length);
@@ -230,31 +189,6 @@ pub fn decode_operation(mut p: &[u8]) -> Result<Operation, Error> {
             Operation::Release {
                 name,
                 sequence: s,
-                signature,
-            }
-        }
-        6 => {
-            let name = take_name(&mut p)?;
-            let sequence =
-                u64::from_be_bytes(take(&mut p, 8)?.try_into().map_err(|_| Error::Malformed)?);
-            let new_owner_pk = take(&mut p, 32)?.try_into().map_err(|_| Error::Malformed)?;
-            crate::owner::parse_owner_key(new_owner_pk).map_err(|_| Error::Malformed)?;
-            let new_bond_tag = take(&mut p, 32)?.try_into().map_err(|_| Error::Malformed)?;
-            let new_bond_anchor = take(&mut p, 32)?.try_into().map_err(|_| Error::Malformed)?;
-            let new_bond_proof = take_len(&mut p)?;
-            let address = take_len(&mut p)?;
-            let signature = take_len(&mut p)?;
-            if signature.len() != 64 {
-                return Err(Error::Malformed);
-            }
-            Operation::TransferWithNewBond {
-                name,
-                sequence,
-                new_owner_pk,
-                new_bond_tag,
-                new_bond_anchor,
-                new_bond_proof,
-                address,
                 signature,
             }
         }
@@ -481,5 +415,10 @@ mod tests {
             signature: vec![0; 63],
         };
         assert!(decode_operation(&encode_operation(&update).unwrap()).is_err());
+    }
+
+    #[test]
+    fn obsolete_transfer_tag_is_rejected() {
+        assert_eq!(decode_operation(&[6]), Err(Error::Malformed));
     }
 }

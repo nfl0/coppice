@@ -107,9 +107,6 @@ pub fn process_transaction(
         Ok(op) => {
             let bond_anchor = match &op {
                 Operation::Reveal { bond_anchor, .. } => Some(bond_anchor),
-                Operation::TransferWithNewBond {
-                    new_bond_anchor, ..
-                } => Some(new_bond_anchor),
                 _ => None,
             };
             if bond_anchor.is_some_and(|anchor| !s.accepted_bond_anchors.contains(anchor)) {

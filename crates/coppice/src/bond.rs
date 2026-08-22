@@ -696,16 +696,6 @@ pub(crate) fn test_registration_bond(name: &str, address: &[u8]) -> &'static Bon
 }
 
 #[cfg(test)]
-pub(crate) fn test_registration_bond_with_owner_and_seed(
-    name: &str,
-    owner_pk: [u8; 32],
-    address: &[u8],
-    note_seed: &[u8],
-) -> BondMeasurement {
-    run_bond_poc_for_registration_with_seed(name, owner_pk, address, note_seed).unwrap()
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use halo2_proofs::plonk::ConstraintSystem;
