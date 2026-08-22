@@ -1,6 +1,7 @@
 //! Frozen protocol parameters exposed to wallet integrations.
 
 use crate::{constants, crypto};
+use orchard::keys::IncomingViewingKey;
 use zcash_protocol::consensus::NetworkType;
 
 /// Public incoming capability and receiver used for Coppice bulletin outputs.
@@ -31,6 +32,21 @@ pub enum DeploymentEncodingError {
     Hash(crypto::Error),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeploymentValidationError {
+    NetworkIdLength,
+    ActivationHeight,
+    MinimumBondValue,
+    CommitTtlBlocks,
+    ReuseDelayBlocks,
+    BondNoteMaxAgeBlocks,
+    RetentionOverflow,
+    InvalidRendezvousIvk,
+    InvalidRendezvousReceiver,
+    RendezvousMismatch,
+    Encoding(DeploymentEncodingError),
+}
+
 fn network_type_code(network: NetworkType) -> u8 {
     match network {
         NetworkType::Main => 0x01,
@@ -40,6 +56,43 @@ fn network_type_code(network: NetworkType) -> u8 {
 }
 
 impl DeploymentParameters {
+    pub fn validate(&self) -> Result<[u8; 32], DeploymentValidationError> {
+        if !(1..=64).contains(&self.network_id.len()) {
+            return Err(DeploymentValidationError::NetworkIdLength);
+        }
+        if self.activation_height == 0 {
+            return Err(DeploymentValidationError::ActivationHeight);
+        }
+        if self.minimum_bond_value == 0 {
+            return Err(DeploymentValidationError::MinimumBondValue);
+        }
+        if self.commit_ttl_blocks < 2 {
+            return Err(DeploymentValidationError::CommitTtlBlocks);
+        }
+        if self.reuse_delay_blocks == 0 {
+            return Err(DeploymentValidationError::ReuseDelayBlocks);
+        }
+        if self.bond_note_max_age_blocks == 0 {
+            return Err(DeploymentValidationError::BondNoteMaxAgeBlocks);
+        }
+        self.bond_note_max_age_blocks
+            .checked_add(self.commit_ttl_blocks)
+            .ok_or(DeploymentValidationError::RetentionOverflow)?;
+        let ivk = Option::<IncomingViewingKey>::from(IncomingViewingKey::from_bytes(
+            &self.rendezvous.orchard_ivk,
+        ))
+        .ok_or(DeploymentValidationError::InvalidRendezvousIvk)?;
+        let receiver = Option::<orchard::Address>::from(orchard::Address::from_raw_address_bytes(
+            &self.rendezvous.orchard_receiver,
+        ))
+        .ok_or(DeploymentValidationError::InvalidRendezvousReceiver)?;
+        if ivk.diversifier_index(&receiver).is_none() {
+            return Err(DeploymentValidationError::RendezvousMismatch);
+        }
+        self.deployment_id()
+            .map_err(DeploymentValidationError::Encoding)
+    }
+
     pub fn canonical_preimage(&self) -> Result<Vec<u8>, DeploymentEncodingError> {
         fn put_len(out: &mut Vec<u8>, len: usize) -> Result<(), DeploymentEncodingError> {
             let len = u16::try_from(len).map_err(|_| DeploymentEncodingError::LengthTooLarge)?;
@@ -185,6 +238,38 @@ mod tests {
         assert_eq!(network_type_code(NetworkType::Main), 0x01);
         assert_eq!(network_type_code(NetworkType::Test), 0x02);
         assert_eq!(network_type_code(NetworkType::Regtest), 0x03);
+    }
+
+    #[test]
+    fn deployment_vector_is_valid_and_rendezvous_is_bound() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../test-vectors/deployment.json")).unwrap();
+        let input = &fixture["input"];
+        let mut parameters = DeploymentParameters {
+            network_id: hex::decode(input["network_id_hex"].as_str().unwrap()).unwrap(),
+            address_network: NetworkType::Regtest,
+            activation_height: input["activation_height"].as_u64().unwrap() as u32,
+            minimum_bond_value: input["minimum_bond_value"].as_u64().unwrap(),
+            commit_ttl_blocks: input["commit_ttl_blocks"].as_u64().unwrap() as u32,
+            reuse_delay_blocks: input["reuse_delay_blocks"].as_u64().unwrap() as u32,
+            bond_note_max_age_blocks: input["bond_note_max_age_blocks"].as_u64().unwrap() as u32,
+            rendezvous: Rendezvous {
+                orchard_ivk: hex::decode(input["rendezvous_ivk_hex"].as_str().unwrap())
+                    .unwrap()
+                    .try_into()
+                    .unwrap(),
+                orchard_receiver: hex::decode(input["rendezvous_receiver_hex"].as_str().unwrap())
+                    .unwrap()
+                    .try_into()
+                    .unwrap(),
+            },
+        };
+        assert_eq!(
+            parameters.validate().unwrap(),
+            parameters.deployment_id().unwrap()
+        );
+        parameters.rendezvous.orchard_receiver[0] ^= 1;
+        assert!(parameters.validate().is_err());
     }
 
     #[test]

@@ -18,6 +18,7 @@ pub mod owner;
 pub mod pending;
 pub mod recent_spent;
 pub mod record;
+pub mod reducer_v1;
 pub mod registration;
 pub mod replay;
 pub mod reveal;

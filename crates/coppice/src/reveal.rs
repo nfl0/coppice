@@ -56,7 +56,7 @@ impl From<V1BondVerifierError> for RevealValidationError {
     }
 }
 
-fn canonical_address(
+pub(crate) fn canonical_v1_address(
     bytes: &[u8],
     deployment: &DeploymentParameters,
 ) -> Result<Vec<u8>, RevealValidationError> {
@@ -111,7 +111,7 @@ fn validate_before_proof<'a>(
         return Err(RevealValidationError::InvalidName);
     }
     owner::parse_owner_key(*owner_pk).map_err(|_| RevealValidationError::InvalidOwnerKey)?;
-    let address = canonical_address(address, deployment)?;
+    let address = canonical_v1_address(address, deployment)?;
     if bond_proof.len() > MAX_BOND_PROOF_LEN {
         return Err(RevealValidationError::ProofTooLarge);
     }
