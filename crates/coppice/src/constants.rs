@@ -36,10 +36,18 @@ pub const REGTEST_RENDEZVOUS_RECEIVER: [u8; 43] = [
 pub const MINIMUM_BOND_VALUE: u64 = 100_000_000;
 pub const MAX_NAME_LEN: usize = 63;
 pub const MAX_FRAMES: u8 = 32;
-pub const MAX_PAYLOAD_LEN: usize = 16 * 1024;
+pub const MAX_ADDRESS_LEN: usize = 512;
+pub const MAX_BOND_PROOF_LEN: usize = 8_192;
+pub const START_FRAME_HEADER: usize = 73;
+pub const START_CHUNK_CAP: usize = 439;
+pub const CONT_FRAME_HEADER: usize = 6;
+pub const CONT_CHUNK_CAP: usize = 506;
+pub const MAX_PAYLOAD_LEN: usize = 16_125;
 /// Zcash transactions are bounded by the consensus block-size limit. Applying
 /// the same limit before parsing prevents caller-controlled allocation spikes.
-pub const MAX_TRANSACTION_BYTES: usize = 2_000_000;
+pub const MAX_TRANSACTION_LEN: usize = 2_000_000;
+/// V0 compatibility spelling retained for existing serialized replay callers.
+pub const MAX_TRANSACTION_BYTES: usize = MAX_TRANSACTION_LEN;
 pub const NAME_ID_DOMAIN: &[u8] = b"CoppiceName";
 pub const NAME_RECORD_DOMAIN: &[u8] = b"CoppiceRecordV1";
 pub const OWNER_SIGNATURE_DOMAIN: &[u8] = b"CoppiceOwnerSigV0";

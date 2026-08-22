@@ -3,6 +3,7 @@ pub mod authorization;
 pub mod bond;
 pub mod bond_tag;
 pub mod carrier;
+pub mod carrier_v1;
 pub mod config;
 pub mod constants;
 pub mod crypto;

@@ -65,9 +65,9 @@ fn take<'a>(p: &mut &'a [u8], n: usize) -> Result<&'a [u8], Error> {
     *p = b;
     Ok(a)
 }
-fn take_len(p: &mut &[u8]) -> Result<Vec<u8>, Error> {
+fn take_len_limited(p: &mut &[u8], limit: usize) -> Result<Vec<u8>, Error> {
     let n = u16::from_be_bytes(take(p, 2)?.try_into().map_err(|_| Error::Malformed)?) as usize;
-    if n > MAX_PAYLOAD {
+    if n > limit {
         return Err(Error::Length);
     }
     Ok(take(p, n)?.to_vec())
@@ -89,8 +89,13 @@ pub fn encode_operation(op: &Operation) -> Result<Vec<u8>, Error> {
             address,
             secret,
         } => {
-            if !valid_name(name) || address.len() > MAX_PAYLOAD || bond_proof.len() > MAX_PAYLOAD {
+            if !valid_name(name) {
                 return Err(Error::Name);
+            }
+            if address.len() > constants::MAX_ADDRESS_LEN
+                || bond_proof.len() > constants::MAX_BOND_PROOF_LEN
+            {
+                return Err(Error::Length);
             }
             o.push(2);
             put_len(&mut o, name.len())?;
@@ -111,8 +116,11 @@ pub fn encode_operation(op: &Operation) -> Result<Vec<u8>, Error> {
             address,
             signature,
         } => {
-            if !valid_name(name) || address.len() > MAX_PAYLOAD || signature.len() > MAX_PAYLOAD {
+            if !valid_name(name) {
                 return Err(Error::Name);
+            }
+            if address.len() > constants::MAX_ADDRESS_LEN {
+                return Err(Error::Length);
             }
             o.push(3);
             put_len(&mut o, name.len())?;
@@ -130,16 +138,16 @@ pub fn encode_operation(op: &Operation) -> Result<Vec<u8>, Error> {
             sequence,
             signature,
         } => {
-            if !valid_name(name) || signature.len() > MAX_PAYLOAD {
+            if !valid_name(name) {
                 return Err(Error::Name);
+            }
+            if signature.len() != 64 {
+                return Err(Error::Malformed);
             }
             o.push(4);
             put_len(&mut o, name.len())?;
             o.extend_from_slice(name.as_bytes());
             o.extend_from_slice(&sequence.to_be_bytes());
-            if signature.len() != 64 {
-                return Err(Error::Malformed);
-            }
             o.extend_from_slice(signature)
         }
     }
@@ -169,14 +177,14 @@ pub fn decode_operation(mut p: &[u8]) -> Result<Operation, Error> {
                 ),
                 bond_anchor: take(&mut p, 32)?.try_into().map_err(|_| Error::Malformed)?,
                 secret: take(&mut p, 32)?.try_into().map_err(|_| Error::Malformed)?,
-                bond_proof: take_len(&mut p)?,
-                address: take_len(&mut p)?,
+                bond_proof: take_len_limited(&mut p, constants::MAX_BOND_PROOF_LEN)?,
+                address: take_len_limited(&mut p, constants::MAX_ADDRESS_LEN)?,
             }
         }
         3 => {
             let name = take_name(&mut p)?;
             let s = u64::from_be_bytes(take(&mut p, 8)?.try_into().map_err(|_| Error::Malformed)?);
-            let address = take_len(&mut p)?;
+            let address = take_len_limited(&mut p, constants::MAX_ADDRESS_LEN)?;
             let signature = take(&mut p, 64)?.to_vec();
             Operation::Update {
                 name,
@@ -203,7 +211,9 @@ pub fn decode_operation(mut p: &[u8]) -> Result<Operation, Error> {
     Ok(op)
 }
 fn take_name(p: &mut &[u8]) -> Result<String, Error> {
-    let name = String::from_utf8(take_len(p)?).map_err(|_| Error::Name)?;
+    let name =
+        String::from_utf8(take_len_limited(p, constants::MAX_NAME_LEN).map_err(|_| Error::Name)?)
+            .map_err(|_| Error::Name)?;
     if !valid_name(&name) {
         return Err(Error::Name);
     }
@@ -414,6 +424,84 @@ mod tests {
             signature: vec![0; 63],
         };
         assert_eq!(encode_operation(&update), Err(Error::Malformed));
+    }
+
+    #[test]
+    fn operation_field_limits_are_checked_before_variable_field_copying() {
+        let mut oversized_name = vec![2, 0, 64];
+        oversized_name.extend_from_slice(&[b'a'; 64]);
+        assert_eq!(decode_operation(&oversized_name), Err(Error::Name));
+
+        let mut oversized_reveal_proof = vec![2, 0, 1, b'a'];
+        oversized_reveal_proof.extend_from_slice(&[0; 32 + 32 + 4 + 32 + 32]);
+        oversized_reveal_proof.extend_from_slice(&(8193u16).to_be_bytes());
+        assert_eq!(
+            decode_operation(&oversized_reveal_proof),
+            Err(Error::Length)
+        );
+
+        let mut oversized_reveal_address = vec![2, 0, 1, b'a'];
+        oversized_reveal_address.extend_from_slice(&[0; 32 + 32 + 4 + 32 + 32]);
+        oversized_reveal_address.extend_from_slice(&0u16.to_be_bytes());
+        oversized_reveal_address.extend_from_slice(&(513u16).to_be_bytes());
+        assert_eq!(
+            decode_operation(&oversized_reveal_address),
+            Err(Error::Length)
+        );
+
+        let mut oversized_update_address = vec![3, 0, 1, b'a'];
+        oversized_update_address.extend_from_slice(&[0; 8]);
+        oversized_update_address.extend_from_slice(&(513u16).to_be_bytes());
+        assert_eq!(
+            decode_operation(&oversized_update_address),
+            Err(Error::Length)
+        );
+
+        let mut oversized_operation = vec![0; MAX_PAYLOAD + 1];
+        oversized_operation[0] = 1;
+        assert_eq!(decode_operation(&oversized_operation), Err(Error::Length));
+
+        let reveal = Operation::Reveal {
+            name: "a".repeat(constants::MAX_NAME_LEN),
+            owner_pk: [0; 32],
+            bond_tag: [0; 32],
+            bond_anchor_height: 0,
+            bond_anchor: [0; 32],
+            bond_proof: vec![0; constants::MAX_BOND_PROOF_LEN],
+            address: vec![0; constants::MAX_ADDRESS_LEN],
+            secret: [0; 32],
+        };
+        assert_eq!(encode_operation(&reveal).unwrap().len(), 8_906);
+
+        let mut oversized = reveal.clone();
+        if let Operation::Reveal { bond_proof, .. } = &mut oversized {
+            bond_proof.push(0);
+        }
+        assert_eq!(encode_operation(&oversized), Err(Error::Length));
+        let mut oversized = reveal;
+        if let Operation::Reveal { address, .. } = &mut oversized {
+            address.push(0);
+        }
+        assert_eq!(encode_operation(&oversized), Err(Error::Length));
+    }
+
+    #[test]
+    fn maximum_reveal_payload_uses_eighteen_v1_frames() {
+        let operation = Operation::Reveal {
+            name: "a".repeat(constants::MAX_NAME_LEN),
+            owner_pk: [0; 32],
+            bond_tag: [0; 32],
+            bond_anchor_height: 0,
+            bond_anchor: [0; 32],
+            bond_proof: vec![0; constants::MAX_BOND_PROOF_LEN],
+            address: vec![0; constants::MAX_ADDRESS_LEN],
+            secret: [0; 32],
+        };
+        let payload = encode_operation(&operation).unwrap();
+        assert_eq!(payload.len(), 8_906);
+        let frames = crate::carrier_v1::encode_frames_v1([0; 32], &payload).unwrap();
+        assert_eq!(frames.len(), 18);
+        assert!(frames.len() <= usize::from(constants::MAX_FRAMES));
     }
 
     fn fixed32(hex: &str) -> [u8; 32] {

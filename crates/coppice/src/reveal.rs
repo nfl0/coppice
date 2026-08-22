@@ -11,8 +11,7 @@ use crate::{
 };
 use zcash_address::unified::{Address, Encoding};
 
-pub const MAX_ADDRESS_LEN: usize = 512;
-pub const MAX_BOND_PROOF_LEN: usize = 8_192;
+pub use crate::constants::{MAX_ADDRESS_LEN, MAX_BOND_PROOF_LEN};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AuthenticatedIronwoodCheckpoint {

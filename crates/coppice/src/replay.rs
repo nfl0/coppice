@@ -164,7 +164,7 @@ pub fn process_serialized_transaction(
     tx_index: u32,
     bytes: &[u8],
 ) -> Result<ReplayResult, SerializedReplayError> {
-    if bytes.len() > crate::constants::MAX_TRANSACTION_BYTES {
+    if bytes.len() > crate::constants::MAX_TRANSACTION_LEN {
         return Err(SerializedReplayError::InvalidTransaction);
     }
     let mut cursor = std::io::Cursor::new(bytes);
