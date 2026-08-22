@@ -627,6 +627,15 @@ No production dependency from `coppice` core to SQLite is required.
 - default owner-key derivation for software spending accounts;
 - integration-level tests.
 
+CompactBlock ingestion first validates the complete hostile protobuf structure,
+then extracts every canonical Ironwood nullifier and commitment and performs
+public rendezvous compact trial decryption. Only transactions with a rendezvous
+hit require a raw full-transaction fetch. Those bytes and the compact effects
+are passed to the reducer, which validates the transaction under the canonical
+branch ID, its txid, and the exact compact/full Ironwood effects before applying
+the block atomically. A compact hit does not imply a valid Coppice bulletin, and
+a missing required full transaction prevents any reducer advance.
+
 The Orchard/Ironwood builder may randomize Action positions. Wallet carrier
 construction MUST NOT rely on output insertion order to preserve frame order.
 It may add rendezvous outputs in any builder order; canonical v1 reconstruction

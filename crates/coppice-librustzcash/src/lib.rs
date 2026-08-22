@@ -6,6 +6,7 @@
 
 mod bond_prover;
 mod carrier_tx;
+mod chain;
 mod guard;
 mod inventory;
 mod locking;
@@ -61,6 +62,10 @@ pub use carrier_tx::{
     CarrierTransactionRequestError, ConstructedCarrierTransaction, PostBuildInvariantError,
     PreparedCarrierProposal, carrier_transaction_request, create_carrier_transaction,
     propose_carrier_transaction,
+};
+pub use chain::{
+    CompactBlockAdapterError, CompactBlockApplyError, FullTransactionSource, apply_compact_block,
+    prepare_canonical_block,
 };
 /// The exact pinned librustzcash lock-owner type used by this adapter.
 pub use zcash_client_backend::wallet::LockOwner;
