@@ -1,0 +1,1227 @@
+//! Wallet-local Coppice v1 registration workflow preparation.
+//!
+//! This module stops at canonical carrier frames. Transaction construction,
+//! broadcast, chain discovery, key storage, and persistence belong to the host
+//! wallet.
+
+use std::{convert::Infallible, fmt::Debug};
+
+use coppice::{
+    bond::V1BondProver,
+    carrier_v1,
+    config::DeploymentValidationError,
+    envelope::{self, Operation},
+    owner::{name_id, owner_key_bytes, parse_v1_owner_key},
+    owner_kdf::{OwnerKdfError, derive_v1_owner_verification_key},
+    pending::PendingTimingError,
+    record::{NameRecord, NameStatus},
+    reducer_v1::V1Reducer,
+    registration::registration_commitment,
+    reveal::{RevealValidationError, canonical_v1_address},
+};
+use rand_core::{CryptoRng, RngCore};
+
+use crate::{
+    CoppiceLockBackend, ExactCanonicalTipError, FreshnessContextError, HostCanonicalTipSource,
+    InventoryError, IronwoodOutputId, IronwoodViewingCapability, IronwoodWitnessSource,
+    PendingRegistration, PendingRegistrationCollection, PendingRegistrationCollectionError,
+    ReconciliationError, ResolveWitnessError, SelectedBondNote, WalletBondPrivateMaterial,
+    WalletBondProverError, active_canonical_bond_tags, choose_current_anchor,
+    freshness_for_canonical_commit, freshness_for_next_block_commit, inventory::classify_notes,
+    prove_selected_bond, reconcile_locks, require_exact_canonical_tip,
+    resolve_canonical_ironwood_witness, select_fresh_bond_note,
+};
+
+/// Exact canonical operation bytes and action-ordered v1 memo frames.
+///
+/// This intentionally has no `Debug`: REVEAL bytes contain the registration
+/// secret before publication.
+pub struct PreparedCarrier {
+    payload: Vec<u8>,
+    frames: Vec<[u8; 512]>,
+}
+
+impl PreparedCarrier {
+    pub fn payload(&self) -> &[u8] {
+        &self.payload
+    }
+
+    pub fn frames(&self) -> &[[u8; 512]] {
+        &self.frames
+    }
+}
+
+fn prepare_carrier(
+    reducer: &V1Reducer,
+    operation: &Operation,
+) -> Result<PreparedCarrier, CarrierPreparationError> {
+    let payload = envelope::encode_operation(operation)
+        .map_err(CarrierPreparationError::OperationEncoding)?;
+    let frames = carrier_v1::encode_frames_v1(reducer.deployment_id(), &payload)
+        .map_err(CarrierPreparationError::Framing)?;
+    Ok(PreparedCarrier { payload, frames })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CarrierPreparationError {
+    OperationEncoding(envelope::Error),
+    Framing(carrier_v1::Error),
+}
+
+/// A COMMIT handoff that cannot be obtained until its bond is locked and its
+/// local pending intent is present.
+pub struct PreparedCommit {
+    pub commitment: [u8; 32],
+    pub selected_bond: SelectedBondNote,
+    pub owner_pk: [u8; 32],
+    carrier: PreparedCarrier,
+}
+
+impl PreparedCommit {
+    pub fn carrier(&self) -> &PreparedCarrier {
+        &self.carrier
+    }
+}
+
+/// Public REVEAL preparation metadata and the secret-bearing carrier.
+pub struct PreparedReveal {
+    pub commitment: [u8; 32],
+    pub anchor_height: u32,
+    pub bond_tag: [u8; 32],
+    pub position_floor: u32,
+    pub proof_len: usize,
+    carrier: PreparedCarrier,
+}
+
+impl PreparedReveal {
+    pub fn carrier(&self) -> &PreparedCarrier {
+        &self.carrier
+    }
+}
+
+/// Registration owner choice. Default-software key material is transient and
+/// is never retained in pending metadata.
+pub enum RegistrationOwner<'a> {
+    External([u8; 32]),
+    DefaultSoftware(&'a [u8; 32]),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RegistrationStage {
+    Prepared,
+    CommitBroadcast,
+    CommitMined,
+}
+
+pub fn registration_stage(pending: &PendingRegistration) -> RegistrationStage {
+    match (pending.commit_txid(), pending.commit_height()) {
+        (None, None) => RegistrationStage::Prepared,
+        (Some(_), None) => RegistrationStage::CommitBroadcast,
+        (Some(_), Some(_)) => RegistrationStage::CommitMined,
+        (None, Some(_)) => unreachable!("public pending transitions require a COMMIT txid"),
+    }
+}
+
+#[derive(Debug)]
+pub enum BeginRegistrationError<HostError, BackendError: Debug> {
+    Tip(ExactCanonicalTipError<HostError>),
+    InvalidDeployment(DeploymentValidationError),
+    InvalidName,
+    InvalidAddress(RevealValidationError),
+    CommitHeightOverflow,
+    Freshness(FreshnessContextError),
+    Inventory(BackendError),
+    Selection(InventoryError),
+    NoEligibleBond,
+    InvalidExternalOwner,
+    OwnerDerivation(OwnerKdfError),
+    Commitment(coppice::config::DeploymentEncodingError),
+    PendingValidation(crate::PendingRegistrationValidationError),
+    Carrier(CarrierPreparationError),
+    Lock(BackendError),
+    /// The lock is deliberately left in place. Reconciliation can safely
+    /// remove it because no local-pending or canonical-active tag desires it.
+    PendingInsertionAfterLock(PendingRegistrationCollectionError),
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn begin_registration<Host, Backend, R>(
+    host_tip_source: &Host,
+    reducer: &V1Reducer,
+    pending_collection: &mut PendingRegistrationCollection,
+    capability: IronwoodViewingCapability,
+    lock_backend: &mut Backend,
+    name: &str,
+    canonical_address: &[u8],
+    owner_choice: RegistrationOwner<'_>,
+    mut rng: R,
+) -> Result<PreparedCommit, BeginRegistrationError<Host::Error, Backend::Error>>
+where
+    Host: HostCanonicalTipSource,
+    Backend: CoppiceLockBackend,
+    R: RngCore + CryptoRng,
+{
+    require_exact_canonical_tip(host_tip_source, reducer).map_err(BeginRegistrationError::Tip)?;
+    let deployment = reducer.deployment();
+    deployment
+        .validate()
+        .map_err(BeginRegistrationError::InvalidDeployment)?;
+    if !envelope::valid_name(name) {
+        return Err(BeginRegistrationError::InvalidName);
+    }
+    let address = canonical_v1_address(canonical_address, deployment)
+        .map_err(BeginRegistrationError::InvalidAddress)?;
+    if address != canonical_address {
+        return Err(BeginRegistrationError::InvalidAddress(
+            RevealValidationError::NonCanonicalAddress,
+        ));
+    }
+    let commit_height = reducer
+        .tip()
+        .height
+        .checked_add(1)
+        .ok_or(BeginRegistrationError::CommitHeightOverflow)?;
+    let freshness = freshness_for_next_block_commit(reducer, commit_height)
+        .map_err(BeginRegistrationError::Freshness)?;
+    let notes = lock_backend
+        .owned_unspent_ironwood_notes()
+        .map_err(BeginRegistrationError::Inventory)?;
+    let selected_bond = select_fresh_bond_note(
+        &notes,
+        deployment.minimum_bond_value,
+        capability,
+        &freshness,
+    )
+    .map_err(BeginRegistrationError::Selection)?
+    .ok_or(BeginRegistrationError::NoEligibleBond)?;
+    let owner_pk = match owner_choice {
+        RegistrationOwner::External(bytes) => {
+            parse_v1_owner_key(bytes).map_err(|_| BeginRegistrationError::InvalidExternalOwner)?;
+            bytes
+        }
+        RegistrationOwner::DefaultSoftware(spending_key) => owner_key_bytes(
+            &derive_v1_owner_verification_key(
+                *spending_key,
+                reducer.deployment_id(),
+                name_id(name),
+                selected_bond.bond_tag,
+            )
+            .map_err(BeginRegistrationError::OwnerDerivation)?,
+        ),
+    };
+    let mut secret = [0; 32];
+    rng.fill_bytes(&mut secret);
+    let commitment = registration_commitment(
+        deployment,
+        name,
+        owner_pk,
+        selected_bond.bond_tag,
+        &address,
+        secret,
+    )
+    .map_err(BeginRegistrationError::Commitment)?;
+    let pending = PendingRegistration::new(
+        deployment,
+        name.to_owned(),
+        address,
+        owner_pk,
+        selected_bond.bond_tag,
+        secret,
+        commitment,
+    )
+    .map_err(BeginRegistrationError::PendingValidation)?;
+    let carrier = prepare_carrier(reducer, &Operation::Commit { commitment })
+        .map_err(BeginRegistrationError::Carrier)?;
+
+    lock_backend
+        .ensure_coppice_lock(
+            &selected_bond.output_id,
+            selected_bond.bond_tag,
+            lock_backend.max_lock_expiry_height(),
+        )
+        .map_err(BeginRegistrationError::Lock)?;
+    pending_collection
+        .insert(pending)
+        .map_err(BeginRegistrationError::PendingInsertionAfterLock)?;
+    Ok(PreparedCommit {
+        commitment,
+        selected_bond,
+        owner_pk,
+        carrier,
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommitTransitionError {
+    UnknownCommitment,
+    CommitTxidMissing,
+    CommitTxidMismatch,
+    Pending(PendingRegistrationCollectionError),
+}
+
+pub fn record_commit_broadcast(
+    pending: &mut PendingRegistrationCollection,
+    commitment: &[u8; 32],
+    txid: [u8; 32],
+) -> Result<(), CommitTransitionError> {
+    pending
+        .mark_commit_broadcast(commitment, txid)
+        .map_err(|error| match error {
+            PendingRegistrationCollectionError::UnknownCommitment => {
+                CommitTransitionError::UnknownCommitment
+            }
+            other => CommitTransitionError::Pending(other),
+        })
+}
+
+pub fn record_commit_mined(
+    pending: &mut PendingRegistrationCollection,
+    commitment: &[u8; 32],
+    txid: [u8; 32],
+    height: u32,
+) -> Result<(), CommitTransitionError> {
+    let local = pending
+        .get(commitment)
+        .ok_or(CommitTransitionError::UnknownCommitment)?;
+    match local.commit_txid() {
+        None => return Err(CommitTransitionError::CommitTxidMissing),
+        Some(stored) if stored != txid => return Err(CommitTransitionError::CommitTxidMismatch),
+        Some(_) => {}
+    }
+    pending
+        .mark_commit_mined(commitment, height)
+        .map_err(CommitTransitionError::Pending)
+}
+
+pub trait RegistrationBondMaterialSource {
+    type Error: Debug;
+
+    fn private_material_for(
+        &mut self,
+        output_id: &IronwoodOutputId,
+    ) -> Result<WalletBondPrivateMaterial, Self::Error>;
+}
+
+#[derive(Debug)]
+pub enum PrepareRevealError<HostError, BackendError: Debug, WitnessError, MaterialError: Debug> {
+    Tip(ExactCanonicalTipError<HostError>),
+    UnknownPending,
+    CommitNotBroadcast,
+    CommitNotMined,
+    CommitHeightAboveTip { commit_height: u32, tip_height: u32 },
+    Timing(PendingTimingError),
+    CommitExpired,
+    CanonicalCommitMissing,
+    CanonicalCommitHeightMismatch { local: u32, canonical: u32 },
+    Freshness(FreshnessContextError),
+    BondNoLongerFresh { position: u32, position_floor: u32 },
+    Reconciliation(ReconciliationError<BackendError>),
+    Inventory(BackendError),
+    Classification(InventoryError),
+    MissingPendingBond,
+    AmbiguousBondTag,
+    MissingBondPosition,
+    Anchor(ResolveWitnessError<Infallible>),
+    Witness(ResolveWitnessError<WitnessError>),
+    PrivateMaterial(MaterialError),
+    BondProof(WalletBondProverError),
+    RevealInvariantMismatch,
+    Commitment(coppice::config::DeploymentEncodingError),
+    Carrier(CarrierPreparationError),
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_reveal<Host, Backend, Witness, Material, R>(
+    host_tip_source: &Host,
+    reducer: &V1Reducer,
+    pending_collection: &PendingRegistrationCollection,
+    capability: IronwoodViewingCapability,
+    lock_backend: &mut Backend,
+    witness_source: &mut Witness,
+    private_material_source: &mut Material,
+    prover: &V1BondProver,
+    commitment: &[u8; 32],
+    rng: R,
+) -> Result<
+    PreparedReveal,
+    PrepareRevealError<Host::Error, Backend::Error, Witness::Error, Material::Error>,
+>
+where
+    Host: HostCanonicalTipSource,
+    Backend: CoppiceLockBackend,
+    Witness: IronwoodWitnessSource,
+    Material: RegistrationBondMaterialSource,
+    R: RngCore + CryptoRng,
+{
+    require_exact_canonical_tip(host_tip_source, reducer).map_err(PrepareRevealError::Tip)?;
+    let pending = pending_collection
+        .get(commitment)
+        .cloned()
+        .ok_or(PrepareRevealError::UnknownPending)?;
+    pending
+        .commit_txid()
+        .ok_or(PrepareRevealError::CommitNotBroadcast)?;
+    let commit_height = pending
+        .commit_height()
+        .ok_or(PrepareRevealError::CommitNotMined)?;
+    let tip_height = reducer.tip().height;
+    if commit_height > tip_height {
+        return Err(PrepareRevealError::CommitHeightAboveTip {
+            commit_height,
+            tip_height,
+        });
+    }
+    if crate::pending_commit_expired(
+        commit_height,
+        reducer.deployment().commit_ttl_blocks,
+        tip_height,
+    )
+    .map_err(PrepareRevealError::Timing)?
+    {
+        return Err(PrepareRevealError::CommitExpired);
+    }
+    let canonical = reducer
+        .state()
+        .pending
+        .get(commitment)
+        .ok_or(PrepareRevealError::CanonicalCommitMissing)?;
+    if canonical.block_height != commit_height {
+        return Err(PrepareRevealError::CanonicalCommitHeightMismatch {
+            local: commit_height,
+            canonical: canonical.block_height,
+        });
+    }
+    let freshness = freshness_for_canonical_commit(reducer, commit_height)
+        .map_err(PrepareRevealError::Freshness)?;
+
+    let active_tags = active_canonical_bond_tags(reducer);
+    reconcile_locks(&active_tags, pending_collection, capability, lock_backend).map_err(
+        |error| match error {
+            ReconciliationError::MissingPendingBond { .. } => {
+                PrepareRevealError::MissingPendingBond
+            }
+            other => PrepareRevealError::Reconciliation(other),
+        },
+    )?;
+    let notes = lock_backend
+        .owned_unspent_ironwood_notes()
+        .map_err(PrepareRevealError::Inventory)?;
+    let mut matches = classify_notes(&notes, capability)
+        .map_err(PrepareRevealError::Classification)?
+        .into_iter()
+        .filter(|classified| classified.bond_tag == pending.bond_tag());
+    let matched = matches
+        .next()
+        .ok_or(PrepareRevealError::MissingPendingBond)?;
+    if matches.next().is_some() {
+        return Err(PrepareRevealError::AmbiguousBondTag);
+    }
+    let position = matched
+        .note
+        .position
+        .ok_or(PrepareRevealError::MissingBondPosition)?;
+    if position < freshness.position_floor {
+        return Err(PrepareRevealError::BondNoLongerFresh {
+            position,
+            position_floor: freshness.position_floor,
+        });
+    }
+    let selected = SelectedBondNote {
+        output_id: matched.note.output_id,
+        value_zat: matched.note.value_zat,
+        bond_tag: matched.bond_tag,
+        position,
+    };
+    let anchor =
+        choose_current_anchor(reducer, commit_height).map_err(PrepareRevealError::Anchor)?;
+    let witness = resolve_canonical_ironwood_witness(
+        reducer,
+        witness_source,
+        selected.position,
+        anchor.anchor_height,
+    )
+    .map_err(PrepareRevealError::Witness)?;
+    let private_material = private_material_source
+        .private_material_for(&selected.output_id)
+        .map_err(PrepareRevealError::PrivateMaterial)?;
+    let proof = prove_selected_bond(
+        prover,
+        reducer.deployment(),
+        pending.name(),
+        pending.address(),
+        pending.owner_pk(),
+        selected,
+        private_material,
+        &freshness,
+        &anchor,
+        witness,
+        rng,
+    )
+    .map_err(PrepareRevealError::BondProof)?;
+    let operation = Operation::Reveal {
+        name: pending.name().to_owned(),
+        owner_pk: pending.owner_pk(),
+        bond_tag: pending.bond_tag(),
+        bond_anchor_height: anchor.anchor_height,
+        bond_anchor: proof.anchor,
+        bond_proof: proof.proof,
+        address: pending.address().to_vec(),
+        secret: pending.secret(),
+    };
+    let recomputed = registration_commitment(
+        reducer.deployment(),
+        pending.name(),
+        pending.owner_pk(),
+        pending.bond_tag(),
+        pending.address(),
+        pending.secret(),
+    )
+    .map_err(PrepareRevealError::Commitment)?;
+    if recomputed != pending.commitment() {
+        return Err(PrepareRevealError::RevealInvariantMismatch);
+    }
+    let proof_len = match &operation {
+        Operation::Reveal { bond_proof, .. } => bond_proof.len(),
+        _ => unreachable!(),
+    };
+    let carrier = prepare_carrier(reducer, &operation).map_err(PrepareRevealError::Carrier)?;
+    Ok(PreparedReveal {
+        commitment: pending.commitment(),
+        anchor_height: anchor.anchor_height,
+        bond_tag: pending.bond_tag(),
+        position_floor: freshness.position_floor,
+        proof_len,
+        carrier,
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompletionMismatch {
+    NameMissing,
+    NotActive,
+    Owner,
+    BondTag,
+    Address,
+    Sequence,
+}
+
+pub fn registration_matches_active_record(
+    pending: &PendingRegistration,
+    record: Option<&NameRecord>,
+) -> Result<(), CompletionMismatch> {
+    let record = record.ok_or(CompletionMismatch::NameMissing)?;
+    if record.status != NameStatus::Active {
+        return Err(CompletionMismatch::NotActive);
+    }
+    if record.owner_pk != pending.owner_pk() {
+        return Err(CompletionMismatch::Owner);
+    }
+    if record.bond_tag != pending.bond_tag() {
+        return Err(CompletionMismatch::BondTag);
+    }
+    if record.address != pending.address() {
+        return Err(CompletionMismatch::Address);
+    }
+    if record.sequence != 0 {
+        return Err(CompletionMismatch::Sequence);
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+pub enum LifecycleError<HostError, BackendError: Debug> {
+    Tip(ExactCanonicalTipError<HostError>),
+    UnknownPending,
+    CompletionMismatch(CompletionMismatch),
+    CommitNotMined,
+    Timing(PendingTimingError),
+    NotExpired,
+    Reconciliation(ReconciliationError<BackendError>),
+}
+
+fn staged_remove_and_reconcile<Backend: CoppiceLockBackend>(
+    reducer: &V1Reducer,
+    pending: &mut PendingRegistrationCollection,
+    capability: IronwoodViewingCapability,
+    lock_backend: &mut Backend,
+    commitment: &[u8; 32],
+) -> Result<(), LifecycleError<Infallible, Backend::Error>> {
+    let mut staged = pending.clone();
+    staged
+        .remove(commitment)
+        .ok_or(LifecycleError::UnknownPending)?;
+    reconcile_locks(
+        &active_canonical_bond_tags(reducer),
+        &staged,
+        capability,
+        lock_backend,
+    )
+    .map_err(LifecycleError::Reconciliation)?;
+    *pending = staged;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn complete_registration<Host, Backend>(
+    host_tip_source: &Host,
+    reducer: &V1Reducer,
+    pending: &mut PendingRegistrationCollection,
+    capability: IronwoodViewingCapability,
+    lock_backend: &mut Backend,
+    commitment: &[u8; 32],
+) -> Result<(), LifecycleError<Host::Error, Backend::Error>>
+where
+    Host: HostCanonicalTipSource,
+    Backend: CoppiceLockBackend,
+{
+    require_exact_canonical_tip(host_tip_source, reducer).map_err(LifecycleError::Tip)?;
+    let local = pending
+        .get(commitment)
+        .ok_or(LifecycleError::UnknownPending)?;
+    registration_matches_active_record(local, reducer.state().names.get(local.name()))
+        .map_err(LifecycleError::CompletionMismatch)?;
+    staged_remove_and_reconcile(reducer, pending, capability, lock_backend, commitment).map_err(
+        |error| match error {
+            LifecycleError::UnknownPending => LifecycleError::UnknownPending,
+            LifecycleError::Reconciliation(error) => LifecycleError::Reconciliation(error),
+            _ => unreachable!(),
+        },
+    )
+}
+
+pub fn abandon_registration<Host, Backend>(
+    host_tip_source: &Host,
+    reducer: &V1Reducer,
+    pending: &mut PendingRegistrationCollection,
+    capability: IronwoodViewingCapability,
+    lock_backend: &mut Backend,
+    commitment: &[u8; 32],
+) -> Result<(), LifecycleError<Host::Error, Backend::Error>>
+where
+    Host: HostCanonicalTipSource,
+    Backend: CoppiceLockBackend,
+{
+    require_exact_canonical_tip(host_tip_source, reducer).map_err(LifecycleError::Tip)?;
+    staged_remove_and_reconcile(reducer, pending, capability, lock_backend, commitment).map_err(
+        |error| match error {
+            LifecycleError::UnknownPending => LifecycleError::UnknownPending,
+            LifecycleError::Reconciliation(error) => LifecycleError::Reconciliation(error),
+            _ => unreachable!(),
+        },
+    )
+}
+
+pub fn abandon_expired_registration<Host, Backend>(
+    host_tip_source: &Host,
+    reducer: &V1Reducer,
+    pending: &mut PendingRegistrationCollection,
+    capability: IronwoodViewingCapability,
+    lock_backend: &mut Backend,
+    commitment: &[u8; 32],
+) -> Result<(), LifecycleError<Host::Error, Backend::Error>>
+where
+    Host: HostCanonicalTipSource,
+    Backend: CoppiceLockBackend,
+{
+    require_exact_canonical_tip(host_tip_source, reducer).map_err(LifecycleError::Tip)?;
+    let local = pending
+        .get(commitment)
+        .ok_or(LifecycleError::UnknownPending)?;
+    let commit_height = local
+        .commit_height()
+        .ok_or(LifecycleError::CommitNotMined)?;
+    if !crate::pending_commit_expired(
+        commit_height,
+        reducer.deployment().commit_ttl_blocks,
+        reducer.tip().height,
+    )
+    .map_err(LifecycleError::Timing)?
+    {
+        return Err(LifecycleError::NotExpired);
+    }
+    staged_remove_and_reconcile(reducer, pending, capability, lock_backend, commitment).map_err(
+        |error| match error {
+            LifecycleError::UnknownPending => LifecycleError::UnknownPending,
+            LifecycleError::Reconciliation(error) => LifecycleError::Reconciliation(error),
+            _ => unreachable!(),
+        },
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{cell::Cell, collections::BTreeMap};
+
+    use coppice::{
+        bond::V1BondProver,
+        config::{DeploymentParameters, REGTEST_V0, Rendezvous},
+        constants::REGTEST_V0_ACTIVATION_HEIGHT,
+        owner::{OwnerSigningKey, owner_key_bytes},
+        record::NameRecord,
+        reducer_v1::{ActivationCheckpoint, CanonicalBlockInput, IronwoodFrontier, ReplayTip},
+    };
+    use rand_chacha::ChaCha20Rng;
+    use rand_core::SeedableRng;
+    use zcash_client_backend::wallet::LockOwner;
+    use zcash_protocol::consensus::{BlockHeight, BranchId, NetworkType};
+
+    use super::*;
+    use crate::{IronwoodWitness, OwnedIronwoodNote, lock_owner_for_bond};
+
+    const ADDRESS: &[u8] = b"uregtest15zjdhgeu9vfwkrgxvxyuynkprgryyww0cl668tpj0ykhl7nvvh7v7ln89f0v8c36vwyffxglg24zh5d4622ela80w065cc28mv7gf423";
+
+    fn deployment() -> DeploymentParameters {
+        DeploymentParameters {
+            network_id: REGTEST_V0.network_id.to_vec(),
+            address_network: NetworkType::Regtest,
+            activation_height: REGTEST_V0_ACTIVATION_HEIGHT,
+            minimum_bond_value: REGTEST_V0.minimum_bond_value,
+            commit_ttl_blocks: 20,
+            reuse_delay_blocks: 10,
+            bond_note_max_age_blocks: 100,
+            rendezvous: Rendezvous {
+                orchard_ivk: REGTEST_V0.rendezvous.orchard_ivk,
+                orchard_receiver: REGTEST_V0.rendezvous.orchard_receiver,
+            },
+        }
+    }
+
+    fn reducer() -> V1Reducer {
+        let activation_floor = deployment().activation_height - 1;
+        V1Reducer::new(
+            deployment(),
+            ActivationCheckpoint {
+                height: activation_floor,
+                block_hash: [9; 32],
+                ironwood_frontier: IronwoodFrontier::empty(),
+                ironwood_tree_size: 0,
+            },
+        )
+        .unwrap()
+    }
+
+    fn advance_empty(reducer: &mut V1Reducer, height: u32) {
+        reducer
+            .apply_block(&CanonicalBlockInput {
+                height,
+                block_hash: [height as u8; 32],
+                prev_block_hash: reducer.tip().block_hash,
+                branch_id: BranchId::Nu6_3,
+                transactions: vec![],
+            })
+            .unwrap();
+    }
+
+    fn next_height(reducer: &V1Reducer) -> u32 {
+        reducer.tip().height.checked_add(1).unwrap()
+    }
+
+    #[derive(Clone, Copy)]
+    struct Host(ReplayTip);
+
+    impl HostCanonicalTipSource for Host {
+        type Error = ();
+
+        fn canonical_tip(&self) -> Result<crate::WalletCanonicalTip, Self::Error> {
+            Ok(self.0.into())
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum BackendError {
+        Foreign,
+        Forced,
+    }
+
+    struct Backend {
+        notes: Vec<OwnedIronwoodNote>,
+        locks: BTreeMap<IronwoodOutputId, LockOwner>,
+        fail: bool,
+    }
+
+    impl CoppiceLockBackend for Backend {
+        type Error = BackendError;
+
+        fn owned_unspent_ironwood_notes(&self) -> Result<Vec<OwnedIronwoodNote>, Self::Error> {
+            Ok(self.notes.clone())
+        }
+
+        fn ensure_coppice_lock(
+            &mut self,
+            output_id: &IronwoodOutputId,
+            bond_tag: [u8; 32],
+            _: BlockHeight,
+        ) -> Result<(), Self::Error> {
+            if self.fail {
+                return Err(BackendError::Forced);
+            }
+            let owner = lock_owner_for_bond(bond_tag);
+            if self
+                .locks
+                .get(output_id)
+                .is_some_and(|stored| *stored != owner)
+            {
+                return Err(BackendError::Foreign);
+            }
+            self.locks.insert(*output_id, owner);
+            if let Some(note) = self
+                .notes
+                .iter_mut()
+                .find(|note| note.output_id == *output_id)
+            {
+                note.locked = true;
+            }
+            Ok(())
+        }
+
+        fn remove_coppice_lock(
+            &mut self,
+            output_id: &IronwoodOutputId,
+            bond_tag: [u8; 32],
+        ) -> Result<bool, Self::Error> {
+            if self.fail {
+                return Err(BackendError::Forced);
+            }
+            if self.locks.get(output_id) == Some(&lock_owner_for_bond(bond_tag)) {
+                self.locks.remove(output_id);
+                if let Some(note) = self
+                    .notes
+                    .iter_mut()
+                    .find(|note| note.output_id == *output_id)
+                {
+                    note.locked = false;
+                }
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        }
+
+        fn max_lock_expiry_height(&self) -> BlockHeight {
+            BlockHeight::from_u32(u32::MAX)
+        }
+    }
+
+    fn note(value: u64, id: u8) -> OwnedIronwoodNote {
+        OwnedIronwoodNote {
+            output_id: IronwoodOutputId::new([id; 32], u32::from(id)),
+            value_zat: value,
+            nullifier: [id; 32],
+            position: Some(0),
+            locked: false,
+            spendable: true,
+        }
+    }
+
+    fn backend(notes: Vec<OwnedIronwoodNote>) -> Backend {
+        Backend {
+            notes,
+            locks: BTreeMap::new(),
+            fail: false,
+        }
+    }
+
+    fn owner() -> [u8; 32] {
+        owner_key_bytes(&(&OwnerSigningKey::try_from([1; 32]).unwrap()).into())
+    }
+
+    #[test]
+    fn begin_locks_then_persists_and_builds_exact_commit_carrier() {
+        let reducer = reducer();
+        let host = Host(reducer.tip());
+        let mut pending = PendingRegistrationCollection::new();
+        let minimum = reducer.deployment().minimum_bond_value;
+        let mut backend = backend(vec![note(minimum + 10, 2), note(minimum, 1)]);
+        let prepared = begin_registration(
+            &host,
+            &reducer,
+            &mut pending,
+            IronwoodViewingCapability::FullViewing,
+            &mut backend,
+            "alice",
+            ADDRESS,
+            RegistrationOwner::External(owner()),
+            ChaCha20Rng::from_seed([3; 32]),
+        )
+        .unwrap();
+
+        assert_eq!(prepared.selected_bond.value_zat, minimum);
+        assert!(
+            backend
+                .locks
+                .contains_key(&prepared.selected_bond.output_id)
+        );
+        let local = pending.get(&prepared.commitment).unwrap();
+        assert_eq!(registration_stage(local), RegistrationStage::Prepared);
+        assert_eq!(
+            registration_commitment(
+                reducer.deployment(),
+                local.name(),
+                local.owner_pk(),
+                local.bond_tag(),
+                local.address(),
+                local.secret(),
+            )
+            .unwrap(),
+            prepared.commitment
+        );
+        assert_eq!(
+            envelope::decode_operation(prepared.carrier().payload()).unwrap(),
+            Operation::Commit {
+                commitment: prepared.commitment
+            }
+        );
+        assert_eq!(
+            carrier_v1::reconstruct_frames_v1(
+                prepared.carrier().frames(),
+                reducer.deployment_id(),
+            )
+            .unwrap(),
+            prepared.carrier().payload()
+        );
+    }
+
+    #[test]
+    fn default_owner_is_bound_to_selected_tag_and_transient_account_key() {
+        let reducer = reducer();
+        let host = Host(reducer.tip());
+        let mut pending = PendingRegistrationCollection::new();
+        let mut backend = backend(vec![note(reducer.deployment().minimum_bond_value, 1)]);
+        let account_key = [42; 32];
+        let prepared = begin_registration(
+            &host,
+            &reducer,
+            &mut pending,
+            IronwoodViewingCapability::Spending,
+            &mut backend,
+            "alice",
+            ADDRESS,
+            RegistrationOwner::DefaultSoftware(&account_key),
+            ChaCha20Rng::from_seed([11; 32]),
+        )
+        .unwrap();
+        let expected = owner_key_bytes(
+            &derive_v1_owner_verification_key(
+                account_key,
+                reducer.deployment_id(),
+                name_id("alice"),
+                prepared.selected_bond.bond_tag,
+            )
+            .unwrap(),
+        );
+        assert_eq!(prepared.owner_pk, expected);
+    }
+
+    #[test]
+    fn insertion_failure_after_lock_does_not_speculatively_unlock() {
+        let reducer = reducer();
+        let host = Host(reducer.tip());
+        let selected_note = note(reducer.deployment().minimum_bond_value, 1);
+        let selected_tag = coppice::bond_tag::derive_v1_bond_tag(&selected_note.nullifier).unwrap();
+        let mut rng = ChaCha20Rng::from_seed([12; 32]);
+        let mut secret = [0; 32];
+        rng.fill_bytes(&mut secret);
+        let commitment = registration_commitment(
+            reducer.deployment(),
+            "alice",
+            owner(),
+            selected_tag,
+            ADDRESS,
+            secret,
+        )
+        .unwrap();
+        let mut pending = PendingRegistrationCollection::new();
+        pending
+            .insert(
+                PendingRegistration::new(
+                    reducer.deployment(),
+                    "alice".to_owned(),
+                    ADDRESS.to_vec(),
+                    owner(),
+                    selected_tag,
+                    secret,
+                    commitment,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let mut backend = backend(vec![selected_note]);
+        assert!(matches!(
+            begin_registration(
+                &host,
+                &reducer,
+                &mut pending,
+                IronwoodViewingCapability::FullViewing,
+                &mut backend,
+                "alice",
+                ADDRESS,
+                RegistrationOwner::External(owner()),
+                ChaCha20Rng::from_seed([12; 32]),
+            ),
+            Err(BeginRegistrationError::PendingInsertionAfterLock(
+                PendingRegistrationCollectionError::DuplicateCommitment
+            ))
+        ));
+        assert!(backend.locks.contains_key(&selected_note.output_id));
+        pending.remove(&commitment);
+        reconcile_locks(
+            &active_canonical_bond_tags(&reducer),
+            &pending,
+            IronwoodViewingCapability::FullViewing,
+            &mut backend,
+        )
+        .unwrap();
+        assert!(!backend.locks.contains_key(&selected_note.output_id));
+    }
+
+    #[test]
+    fn exact_tip_and_input_failures_precede_lock_mutation() {
+        let reducer = reducer();
+        let mut pending = PendingRegistrationCollection::new();
+        let mut backend = backend(vec![note(reducer.deployment().minimum_bond_value, 1)]);
+        let bad_host = Host(ReplayTip {
+            height: reducer.tip().height,
+            block_hash: [8; 32],
+        });
+        assert!(matches!(
+            begin_registration(
+                &bad_host,
+                &reducer,
+                &mut pending,
+                IronwoodViewingCapability::FullViewing,
+                &mut backend,
+                "alice",
+                ADDRESS,
+                RegistrationOwner::External(owner()),
+                ChaCha20Rng::from_seed([3; 32]),
+            ),
+            Err(BeginRegistrationError::Tip(
+                ExactCanonicalTipError::BlockHashMismatch { .. }
+            ))
+        ));
+        assert!(backend.locks.is_empty());
+        assert!(pending.is_empty());
+
+        let host = Host(reducer.tip());
+        assert!(matches!(
+            begin_registration(
+                &host,
+                &reducer,
+                &mut pending,
+                IronwoodViewingCapability::FullViewing,
+                &mut backend,
+                "-bad",
+                ADDRESS,
+                RegistrationOwner::External(owner()),
+                ChaCha20Rng::from_seed([3; 32]),
+            ),
+            Err(BeginRegistrationError::InvalidName)
+        ));
+        assert!(backend.locks.is_empty());
+    }
+
+    #[test]
+    fn transition_stage_is_derived_and_txid_is_cross_checked() {
+        let reducer = reducer();
+        let host = Host(reducer.tip());
+        let mut collection = PendingRegistrationCollection::new();
+        let mut backend = backend(vec![note(reducer.deployment().minimum_bond_value, 1)]);
+        let commitment = begin_registration(
+            &host,
+            &reducer,
+            &mut collection,
+            IronwoodViewingCapability::FullViewing,
+            &mut backend,
+            "alice",
+            ADDRESS,
+            RegistrationOwner::External(owner()),
+            ChaCha20Rng::from_seed([5; 32]),
+        )
+        .unwrap()
+        .commitment;
+        let txid = [7; 32];
+        record_commit_broadcast(&mut collection, &commitment, txid).unwrap();
+        record_commit_broadcast(&mut collection, &commitment, txid).unwrap();
+        assert_eq!(
+            registration_stage(collection.get(&commitment).unwrap()),
+            RegistrationStage::CommitBroadcast
+        );
+        assert_eq!(
+            record_commit_mined(&mut collection, &commitment, [8; 32], 100),
+            Err(CommitTransitionError::CommitTxidMismatch)
+        );
+        let mined_height = next_height(&reducer);
+        record_commit_mined(&mut collection, &commitment, txid, mined_height).unwrap();
+        record_commit_mined(&mut collection, &commitment, txid, mined_height).unwrap();
+        assert_eq!(
+            registration_stage(collection.get(&commitment).unwrap()),
+            RegistrationStage::CommitMined
+        );
+    }
+
+    struct NeverWitness(Cell<usize>);
+
+    impl IronwoodWitnessSource for NeverWitness {
+        type Error = ();
+
+        fn witness_at(&mut self, _: u32, _: u32) -> Result<IronwoodWitness, Self::Error> {
+            self.0.set(self.0.get() + 1);
+            panic!("witness must not be requested")
+        }
+    }
+
+    struct NeverMaterial(Cell<usize>);
+
+    impl RegistrationBondMaterialSource for NeverMaterial {
+        type Error = ();
+
+        fn private_material_for(
+            &mut self,
+            _: &IronwoodOutputId,
+        ) -> Result<WalletBondPrivateMaterial, Self::Error> {
+            self.0.set(self.0.get() + 1);
+            panic!("private material must not be requested")
+        }
+    }
+
+    #[test]
+    fn stale_local_commit_is_rejected_from_current_reducer_before_private_work() {
+        let mut reducer = reducer();
+        let initial_host = Host(reducer.tip());
+        let mut collection = PendingRegistrationCollection::new();
+        let mut backend = backend(vec![note(reducer.deployment().minimum_bond_value, 1)]);
+        let commitment = begin_registration(
+            &initial_host,
+            &reducer,
+            &mut collection,
+            IronwoodViewingCapability::FullViewing,
+            &mut backend,
+            "alice",
+            ADDRESS,
+            RegistrationOwner::External(owner()),
+            ChaCha20Rng::from_seed([6; 32]),
+        )
+        .unwrap()
+        .commitment;
+        record_commit_broadcast(&mut collection, &commitment, [7; 32]).unwrap();
+        let mined_height = next_height(&reducer);
+        record_commit_mined(&mut collection, &commitment, [7; 32], mined_height).unwrap();
+        advance_empty(&mut reducer, mined_height);
+        let host = Host(reducer.tip());
+        let mut witness = NeverWitness(Cell::new(0));
+        let mut material = NeverMaterial(Cell::new(0));
+        assert!(matches!(
+            prepare_reveal(
+                &host,
+                &reducer,
+                &collection,
+                IronwoodViewingCapability::FullViewing,
+                &mut backend,
+                &mut witness,
+                &mut material,
+                &V1BondProver::new().unwrap(),
+                &commitment,
+                ChaCha20Rng::from_seed([9; 32]),
+            ),
+            Err(PrepareRevealError::CanonicalCommitMissing)
+        ));
+        assert_eq!(witness.0.get(), 0);
+        assert_eq!(material.0.get(), 0);
+        assert!(collection.get(&commitment).is_some());
+    }
+
+    #[test]
+    fn active_record_matching_checks_every_registration_fact() {
+        let reducer = reducer();
+        let bond_tag = [4; 32];
+        let secret = [5; 32];
+        let commitment = registration_commitment(
+            reducer.deployment(),
+            "alice",
+            owner(),
+            bond_tag,
+            ADDRESS,
+            secret,
+        )
+        .unwrap();
+        let pending = PendingRegistration::new(
+            reducer.deployment(),
+            "alice".to_owned(),
+            ADDRESS.to_vec(),
+            owner(),
+            bond_tag,
+            secret,
+            commitment,
+        )
+        .unwrap();
+        let record = NameRecord {
+            owner_pk: owner(),
+            bond_tag,
+            sequence: 0,
+            address: ADDRESS.to_vec(),
+            status: NameStatus::Active,
+        };
+        assert_eq!(
+            registration_matches_active_record(&pending, Some(&record)),
+            Ok(())
+        );
+        let mut wrong = record.clone();
+        wrong.sequence = 1;
+        assert_eq!(
+            registration_matches_active_record(&pending, Some(&wrong)),
+            Err(CompletionMismatch::Sequence)
+        );
+        wrong = record.clone();
+        wrong.status = NameStatus::Released { terminal_height: 1 };
+        assert_eq!(
+            registration_matches_active_record(&pending, Some(&wrong)),
+            Err(CompletionMismatch::NotActive)
+        );
+    }
+
+    #[test]
+    fn explicit_abandon_is_staged_and_reconciliation_failure_retains_pending() {
+        let reducer = reducer();
+        let host = Host(reducer.tip());
+        let mut pending = PendingRegistrationCollection::new();
+        let mut backend = backend(vec![note(reducer.deployment().minimum_bond_value, 1)]);
+        let commitment = begin_registration(
+            &host,
+            &reducer,
+            &mut pending,
+            IronwoodViewingCapability::FullViewing,
+            &mut backend,
+            "alice",
+            ADDRESS,
+            RegistrationOwner::External(owner()),
+            ChaCha20Rng::from_seed([13; 32]),
+        )
+        .unwrap()
+        .commitment;
+        backend.fail = true;
+        assert!(matches!(
+            abandon_registration(
+                &host,
+                &reducer,
+                &mut pending,
+                IronwoodViewingCapability::FullViewing,
+                &mut backend,
+                &commitment,
+            ),
+            Err(LifecycleError::Reconciliation(_))
+        ));
+        assert!(pending.get(&commitment).is_some());
+        backend.fail = false;
+        abandon_registration(
+            &host,
+            &reducer,
+            &mut pending,
+            IronwoodViewingCapability::FullViewing,
+            &mut backend,
+            &commitment,
+        )
+        .unwrap();
+        assert!(pending.get(&commitment).is_none());
+        assert!(backend.locks.is_empty());
+    }
+}

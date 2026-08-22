@@ -33,6 +33,46 @@ pub trait HostCanonicalTipSource {
     fn canonical_tip(&self) -> Result<WalletCanonicalTip, Self::Error>;
 }
 
+/// Exact canonical-tip comparison shared by every mutation-capable adapter
+/// workflow.
+#[derive(Debug)]
+pub enum ExactCanonicalTipError<E> {
+    HostTipUnavailable(E),
+    HeightMismatch {
+        host_height: u32,
+        coppice_height: u32,
+    },
+    BlockHashMismatch {
+        height: u32,
+        host_block_hash: [u8; 32],
+        coppice_block_hash: [u8; 32],
+    },
+}
+
+pub fn require_exact_canonical_tip<Host: HostCanonicalTipSource>(
+    host_tip_source: &Host,
+    reducer: &V1Reducer,
+) -> Result<WalletCanonicalTip, ExactCanonicalTipError<Host::Error>> {
+    let host_tip = host_tip_source
+        .canonical_tip()
+        .map_err(ExactCanonicalTipError::HostTipUnavailable)?;
+    let coppice_tip = WalletCanonicalTip::from(reducer.tip());
+    if host_tip.height != coppice_tip.height {
+        return Err(ExactCanonicalTipError::HeightMismatch {
+            host_height: host_tip.height,
+            coppice_height: coppice_tip.height,
+        });
+    }
+    if host_tip.block_hash != coppice_tip.block_hash {
+        return Err(ExactCanonicalTipError::BlockHashMismatch {
+            height: host_tip.height,
+            host_block_hash: host_tip.block_hash,
+            coppice_block_hash: coppice_tip.block_hash,
+        });
+    }
+    Ok(host_tip)
+}
+
 /// Runtime protection mode at the adapter boundary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CoppiceProtectionMode {
@@ -90,23 +130,27 @@ where
         return Ok((proposal_fn(), None));
     }
 
-    let host_tip = host_tip_source
-        .canonical_tip()
-        .map_err(SpendGuardError::HostTipUnavailable)?;
-    let coppice_tip = WalletCanonicalTip::from(reducer.tip());
-    if host_tip.height != coppice_tip.height {
-        return Err(SpendGuardError::HeightMismatch {
-            host_height: host_tip.height,
-            coppice_height: coppice_tip.height,
-        });
-    }
-    if host_tip.block_hash != coppice_tip.block_hash {
-        return Err(SpendGuardError::BlockHashMismatch {
-            height: host_tip.height,
-            host_block_hash: host_tip.block_hash,
-            coppice_block_hash: coppice_tip.block_hash,
-        });
-    }
+    require_exact_canonical_tip(host_tip_source, reducer).map_err(|error| match error {
+        ExactCanonicalTipError::HostTipUnavailable(error) => {
+            SpendGuardError::HostTipUnavailable(error)
+        }
+        ExactCanonicalTipError::HeightMismatch {
+            host_height,
+            coppice_height,
+        } => SpendGuardError::HeightMismatch {
+            host_height,
+            coppice_height,
+        },
+        ExactCanonicalTipError::BlockHashMismatch {
+            height,
+            host_block_hash,
+            coppice_block_hash,
+        } => SpendGuardError::BlockHashMismatch {
+            height,
+            host_block_hash,
+            coppice_block_hash,
+        },
+    })?;
 
     let active_tags = active_canonical_bond_tags(reducer);
     let report = reconcile_locks(&active_tags, pending, capability, lock_backend)
