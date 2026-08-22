@@ -3,6 +3,7 @@ pub mod bond;
 pub mod carrier;
 pub mod config;
 pub mod constants;
+pub mod crypto;
 pub mod envelope;
 pub mod incremental;
 pub mod ironwood;
