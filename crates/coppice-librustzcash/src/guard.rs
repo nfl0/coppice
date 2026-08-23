@@ -1,6 +1,6 @@
 use std::fmt::Debug;
 
-use coppice::reducer::{ReplayTip, V1Reducer};
+use coppice::reducer::{Reducer, ReplayTip};
 
 use crate::{
     CoppiceLockBackend, IronwoodViewingCapability, PendingRegistrationCollection,
@@ -52,7 +52,7 @@ pub enum ExactCanonicalTipError<E> {
 
 pub fn require_exact_canonical_tip<Host: HostCanonicalTipSource>(
     host_tip_source: &Host,
-    reducer: &V1Reducer,
+    reducer: &Reducer,
 ) -> Result<WalletCanonicalTip, ExactCanonicalTipError<Host::Error>> {
     let host_tip = host_tip_source
         .canonical_tip()
@@ -123,7 +123,7 @@ pub enum SpendGuardError<HostError, BackendError: Debug> {
 pub fn with_coppice_spend_guard<Host, Backend, Proposal>(
     mode: CoppiceProtectionMode,
     host_tip_source: &Host,
-    reducer: &V1Reducer,
+    reducer: &Reducer,
     pending: &PendingRegistrationCollection,
     account_id: WalletAccountId,
     capability: IronwoodViewingCapability,
@@ -174,7 +174,7 @@ mod tests {
         config::{DeploymentParameters, REGTEST_V0, Rendezvous},
         constants::REGTEST_V0_ACTIVATION_HEIGHT,
         owner::{OwnerSigningKey, owner_key_bytes},
-        reducer::{ActivationCheckpoint, IronwoodFrontier, V1Reducer},
+        reducer::{ActivationCheckpoint, IronwoodFrontier, Reducer},
         registration::registration_commitment,
     };
     use zcash_client_backend::wallet::LockOwner;
@@ -322,8 +322,8 @@ mod tests {
         }
     }
 
-    fn reducer() -> V1Reducer {
-        V1Reducer::new(
+    fn reducer() -> Reducer {
+        Reducer::new(
             deployment(),
             ActivationCheckpoint {
                 height: REGTEST_V0_ACTIVATION_HEIGHT - 1,
@@ -335,7 +335,7 @@ mod tests {
         .unwrap()
     }
 
-    fn matching_host(reducer: &V1Reducer) -> FakeHost {
+    fn matching_host(reducer: &Reducer) -> FakeHost {
         FakeHost {
             result: Ok(reducer.tip().into()),
         }

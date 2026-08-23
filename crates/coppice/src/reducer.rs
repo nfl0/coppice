@@ -201,7 +201,7 @@ struct StoredReducerUndo {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct StoredV1Reducer {
+struct StoredReducer {
     format_version: u32,
     deployment_id: [u8; 32],
     current: StoredReducerSnapshot,
@@ -277,7 +277,7 @@ fn has_duplicate_keys<K: Ord, V>(values: &[(K, V)]) -> bool {
     values.windows(2).any(|pair| pair[0].0 >= pair[1].0)
 }
 
-pub struct V1Reducer {
+pub struct Reducer {
     deployment: DeploymentParameters,
     deployment_id: [u8; 32],
     state: CoppiceState,
@@ -298,7 +298,7 @@ enum CarrierSemantic {
     Operation(Operation),
 }
 
-impl V1Reducer {
+impl Reducer {
     pub fn new(
         deployment: DeploymentParameters,
         checkpoint: ActivationCheckpoint,
@@ -418,7 +418,7 @@ impl V1Reducer {
             .values()
             .map(Self::store_undo)
             .collect::<Result<Vec<_>, _>>()?;
-        serde_json::to_vec(&StoredV1Reducer {
+        serde_json::to_vec(&StoredReducer {
             format_version: COPPICE_SNAPSHOT_FORMAT_VERSION,
             deployment_id: self.deployment_id,
             current,
@@ -439,7 +439,7 @@ impl V1Reducer {
         let deployment_id = deployment
             .validate()
             .map_err(|_| SnapshotError::DeploymentMismatch)?;
-        let stored: StoredV1Reducer =
+        let stored: StoredReducer =
             serde_json::from_slice(bytes).map_err(|_| SnapshotError::Encoding)?;
         if stored.format_version != COPPICE_SNAPSHOT_FORMAT_VERSION {
             return Err(SnapshotError::UnsupportedFormat);
@@ -1126,7 +1126,7 @@ impl V1Reducer {
                 if !crate::envelope::valid_name(name) {
                     return Ok(TransactionOutcome::Rejected(ProtocolRejection::InvalidName));
                 }
-                if crate::owner::parse_owner_key(*owner_pk).is_err() {
+                if crate::owner::parse_v1_owner_key(*owner_pk).is_err() {
                     return Ok(TransactionOutcome::Rejected(
                         ProtocolRejection::InvalidOwnerKey,
                     ));
@@ -1384,8 +1384,8 @@ mod tests {
         }
     }
 
-    fn reducer() -> V1Reducer {
-        V1Reducer::new(
+    fn reducer() -> Reducer {
+        Reducer::new(
             deployment(),
             ActivationCheckpoint {
                 height: 99,
@@ -1427,7 +1427,7 @@ mod tests {
         BTreeMap<u32, ReducerUndo>,
     );
 
-    fn snapshot(reducer: &V1Reducer) -> TestReducerSnapshot {
+    fn snapshot(reducer: &Reducer) -> TestReducerSnapshot {
         (
             reducer.state.clone(),
             reducer.ironwood_tree.clone(),
@@ -1438,11 +1438,7 @@ mod tests {
         )
     }
 
-    fn empty_block_at(
-        reducer: &V1Reducer,
-        height: u32,
-        block_hash: [u8; 32],
-    ) -> CanonicalBlockInput {
+    fn empty_block_at(reducer: &Reducer, height: u32, block_hash: [u8; 32]) -> CanonicalBlockInput {
         CanonicalBlockInput {
             height,
             block_hash,
@@ -1453,10 +1449,10 @@ mod tests {
     }
 
     fn semantic_block(
-        reducer: &mut V1Reducer,
+        reducer: &mut Reducer,
         height: u32,
         block_hash: [u8; 32],
-        mutate: impl FnOnce(&V1Reducer, &mut CoppiceState),
+        mutate: impl FnOnce(&Reducer, &mut CoppiceState),
     ) -> AppliedBlock {
         let prior_state = reducer.state.clone();
         let mut staged = reducer.state.clone();
@@ -1471,7 +1467,7 @@ mod tests {
     }
 
     fn block_with_effects(
-        reducer: &V1Reducer,
+        reducer: &Reducer,
         height: u32,
         block_hash: [u8; 32],
         nullifiers: Vec<[u8; 32]>,
@@ -1490,12 +1486,12 @@ mod tests {
     }
 
     fn semantic_block_with_effects(
-        reducer: &mut V1Reducer,
+        reducer: &mut Reducer,
         height: u32,
         block_hash: [u8; 32],
         nullifiers: Vec<[u8; 32]>,
         commitments: Vec<[u8; 32]>,
-        mutate: impl FnOnce(&V1Reducer, &mut CoppiceState),
+        mutate: impl FnOnce(&Reducer, &mut CoppiceState),
     ) -> AppliedBlock {
         let prior_state = reducer.state.clone();
         let mut staged = reducer.state.clone();
@@ -1582,7 +1578,7 @@ mod tests {
         commitment
     }
 
-    fn phase6_common_prefix(reducer: &mut V1Reducer) {
+    fn phase6_common_prefix(reducer: &mut Reducer) {
         let active_commitment = [0xa1; 32];
         let released_commitment = [0xa2; 32];
         let spent_commitment = [0xa3; 32];
@@ -1699,7 +1695,7 @@ mod tests {
             .unwrap();
     }
 
-    fn phase6_apply_shared_suffix(reducer: &mut V1Reducer) {
+    fn phase6_apply_shared_suffix(reducer: &mut Reducer) {
         for height in 106..=225 {
             let commitments = vec![valid_commitment((height as u8).wrapping_add(0x20))];
             if height == 120 {
@@ -1739,7 +1735,7 @@ mod tests {
         }
     }
 
-    fn phase6_apply_divergent_suffix(reducer: &mut V1Reducer, branch: u8) {
+    fn phase6_apply_divergent_suffix(reducer: &mut Reducer, branch: u8) {
         for height in 226..=240 {
             let commitments = vec![valid_commitment((height as u8).wrapping_add(branch))];
             if height == 230 {
@@ -1776,7 +1772,7 @@ mod tests {
         }
     }
 
-    fn phase6_apply_long_suffix(reducer: &mut V1Reducer, branch: u8) {
+    fn phase6_apply_long_suffix(reducer: &mut Reducer, branch: u8) {
         for height in 106..=240 {
             let commitments = vec![valid_commitment((height as u8).wrapping_add(branch))];
             if height == 120 && branch == 1 {
@@ -1836,7 +1832,7 @@ mod tests {
         }
     }
 
-    fn assert_phase6_replacement_state(reducer: &V1Reducer, branch: u8) {
+    fn assert_phase6_replacement_state(reducer: &Reducer, branch: u8) {
         assert_eq!(reducer.tip().height, 240);
         assert_eq!(reducer.state.names["phase6-active"].sequence, 1);
         assert_eq!(
@@ -2216,7 +2212,7 @@ mod tests {
         );
     }
 
-    fn install_reorg_common_history(reducer: &mut V1Reducer, commitment: [u8; 32]) {
+    fn install_reorg_common_history(reducer: &mut Reducer, commitment: [u8; 32]) {
         reducer
             .apply_block(&empty_block_at(reducer, 100, [0x10; 32]))
             .unwrap();
@@ -2234,7 +2230,7 @@ mod tests {
     }
 
     fn install_reorg_reveal(
-        reducer: &mut V1Reducer,
+        reducer: &mut Reducer,
         commitment: [u8; 32],
         owner_pk: [u8; 32],
         bond_tag: [u8; 32],
@@ -2593,7 +2589,7 @@ mod tests {
                 && undo["state"]["pending"].as_array().unwrap().is_empty()
                 && undo["state"]["recent_spent"].as_array().unwrap().is_empty()
         }));
-        let restored = V1Reducer::load_snapshot(deployment(), &encoded).unwrap();
+        let restored = Reducer::load_snapshot(deployment(), &encoded).unwrap();
         assert_eq!(restored.tip(), reducer.tip());
         assert_eq!(restored.state(), reducer.state());
         assert_eq!(restored.ironwood_frontier(), reducer.ironwood_frontier());
@@ -2616,21 +2612,21 @@ mod tests {
         phase6_common_prefix(&mut prefix);
         let prefix_snapshot = prefix.save_snapshot().unwrap();
 
-        let mut shared = V1Reducer::load_snapshot(deployment(), &prefix_snapshot).unwrap();
+        let mut shared = Reducer::load_snapshot(deployment(), &prefix_snapshot).unwrap();
         phase6_apply_shared_suffix(&mut shared);
         let shared_snapshot = shared.save_snapshot().unwrap();
 
-        let mut old_within = V1Reducer::load_snapshot(deployment(), &shared_snapshot).unwrap();
+        let mut old_within = Reducer::load_snapshot(deployment(), &shared_snapshot).unwrap();
         phase6_apply_divergent_suffix(&mut old_within, 1);
         let old_within_tip = old_within.tip();
 
-        let mut rewound = V1Reducer::load_snapshot(deployment(), &shared_snapshot).unwrap();
+        let mut rewound = Reducer::load_snapshot(deployment(), &shared_snapshot).unwrap();
         phase6_apply_divergent_suffix(&mut rewound, 1);
         assert!(rewound.has_rewind_snapshot(225));
         rewound.rewind_to(225).unwrap();
         phase6_apply_divergent_suffix(&mut rewound, 2);
 
-        let mut shallow_fresh = V1Reducer::load_snapshot(deployment(), &shared_snapshot).unwrap();
+        let mut shallow_fresh = Reducer::load_snapshot(deployment(), &shared_snapshot).unwrap();
         phase6_apply_divergent_suffix(&mut shallow_fresh, 2);
         assert_eq!(
             rewound.save_snapshot().unwrap(),
@@ -2647,7 +2643,7 @@ mod tests {
 
         // Extend a different old branch beyond the retained undo horizon and
         // prove that the failed rewind is observationally atomic.
-        let mut unrecoverable = V1Reducer::load_snapshot(deployment(), &prefix_snapshot).unwrap();
+        let mut unrecoverable = Reducer::load_snapshot(deployment(), &prefix_snapshot).unwrap();
         phase6_apply_long_suffix(&mut unrecoverable, 1);
         assert_eq!(unrecoverable.tip().height - prefix.tip().height, 135);
         assert!(unrecoverable.tip().height - prefix.tip().height > retention);
@@ -2695,14 +2691,14 @@ mod tests {
         let mut old_format: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
         old_format["format_version"] = serde_json::Value::from(2);
         assert!(matches!(
-            V1Reducer::load_snapshot(deployment(), &serde_json::to_vec(&old_format).unwrap()),
+            Reducer::load_snapshot(deployment(), &serde_json::to_vec(&old_format).unwrap()),
             Err(SnapshotError::UnsupportedFormat)
         ));
 
         let mut wrong_deployment = deployment();
         wrong_deployment.network_id.push(0x42);
         assert!(matches!(
-            V1Reducer::load_snapshot(wrong_deployment, &encoded),
+            Reducer::load_snapshot(wrong_deployment, &encoded),
             Err(SnapshotError::DeploymentMismatch)
         ));
 
@@ -2710,14 +2706,14 @@ mod tests {
         value["current"]["state_root"] =
             serde_json::Value::Array(vec![serde_json::Value::from(0); 32]);
         assert!(matches!(
-            V1Reducer::load_snapshot(deployment(), &serde_json::to_vec(&value).unwrap()),
+            Reducer::load_snapshot(deployment(), &serde_json::to_vec(&value).unwrap()),
             Err(SnapshotError::StateRootMismatch)
         ));
 
         let mut value: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
         value["current"]["ironwood_checkpoints"][0]["root"][0] = serde_json::Value::from(1);
         assert!(matches!(
-            V1Reducer::load_snapshot(deployment(), &serde_json::to_vec(&value).unwrap()),
+            Reducer::load_snapshot(deployment(), &serde_json::to_vec(&value).unwrap()),
             Err(SnapshotError::InvalidCheckpoint)
         ));
     }
@@ -2747,7 +2743,7 @@ mod tests {
         );
         checkpoints[0]["root"][0] = serde_json::Value::from(1);
         assert!(matches!(
-            V1Reducer::load_snapshot(deployment(), &serde_json::to_vec(&stored).unwrap()),
+            Reducer::load_snapshot(deployment(), &serde_json::to_vec(&stored).unwrap()),
             Err(SnapshotError::StateRootMismatch | SnapshotError::InvalidCheckpoint)
         ));
     }

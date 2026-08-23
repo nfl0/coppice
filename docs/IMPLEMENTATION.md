@@ -656,7 +656,7 @@ a missing required full transaction prevents any reducer advance.
 Canonical-chain reconciliation takes host-selected block identities as its sole
 chain authority; Coppice performs no Zcash fork choice. It discovers the highest
 common ancestor without mutation inside the reducer's retained history, invokes
-`V1Reducer::rewind_to`, and replays replacement CompactBlocks exclusively through
+`Reducer::rewind_to`, and replays replacement CompactBlocks exclusively through
 `apply_compact_block`. Reorg depth is bounded by the frozen reducer undo history;
 a deeper divergence requires rebuild. Replay starts no earlier than activation,
 is resumable, and is block-atomic rather than one range transaction. Once a

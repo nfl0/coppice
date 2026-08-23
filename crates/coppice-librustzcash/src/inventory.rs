@@ -2,7 +2,7 @@ use std::{collections::BTreeSet, fmt::Debug};
 
 use coppice::{
     bond_tag::{BondTagError, derive_v1_bond_tag},
-    reducer::V1Reducer,
+    reducer::Reducer,
     state::CoppiceState,
 };
 use zcash_client_backend::wallet::OutputRef;
@@ -149,7 +149,7 @@ pub(crate) fn classify_notes(
 
 /// Returns the canonical active bond tags from reducer state without exposing
 /// reducer mutation or wallet state to the core crate.
-pub fn active_canonical_bond_tags(reducer: &V1Reducer) -> BTreeSet<[u8; 32]> {
+pub fn active_canonical_bond_tags(reducer: &Reducer) -> BTreeSet<[u8; 32]> {
     reducer
         .state()
         .active_bond_index()

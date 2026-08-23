@@ -5,7 +5,7 @@
 //! richer backend may later implement [`IronwoodWitnessSource`] to reconstruct
 //! older witnesses, but callers must never silently substitute another anchor.
 
-use coppice::reducer::V1Reducer;
+use coppice::reducer::Reducer;
 use incrementalmerkletree::Position;
 use orchard::tree::{Anchor, MerklePath};
 use shardtree::{ShardTree, error::ShardTreeError, store::ShardStore};
@@ -48,7 +48,7 @@ pub enum FreshnessContextError {
 }
 
 fn freshness_at(
-    reducer: &V1Reducer,
+    reducer: &Reducer,
     commit_height: u32,
 ) -> Result<BondFreshnessContext, FreshnessContextError> {
     let deployment = reducer.deployment();
@@ -80,7 +80,7 @@ fn freshness_at(
 }
 
 pub fn freshness_for_canonical_commit(
-    reducer: &V1Reducer,
+    reducer: &Reducer,
     commit_height: u32,
 ) -> Result<BondFreshnessContext, FreshnessContextError> {
     let tip_height = reducer.tip().height;
@@ -94,7 +94,7 @@ pub fn freshness_for_canonical_commit(
 }
 
 pub fn freshness_for_next_block_commit(
-    reducer: &V1Reducer,
+    reducer: &Reducer,
     commit_height: u32,
 ) -> Result<BondFreshnessContext, FreshnessContextError> {
     let tip_height = reducer.tip().height;
@@ -246,7 +246,7 @@ pub enum ResolveWitnessError<E> {
 }
 
 pub fn anchor_for_registration(
-    reducer: &V1Reducer,
+    reducer: &Reducer,
     commit_height: u32,
     anchor_height: u32,
 ) -> Result<AnchorContext, ResolveWitnessError<std::convert::Infallible>> {
@@ -277,14 +277,14 @@ pub fn anchor_for_registration(
 }
 
 pub fn choose_current_anchor(
-    reducer: &V1Reducer,
+    reducer: &Reducer,
     commit_height: u32,
 ) -> Result<AnchorContext, ResolveWitnessError<std::convert::Infallible>> {
     anchor_for_registration(reducer, commit_height, reducer.tip().height)
 }
 
 pub fn resolve_canonical_ironwood_witness<S: IronwoodWitnessSource>(
-    reducer: &V1Reducer,
+    reducer: &Reducer,
     source: &mut S,
     position: u32,
     anchor_height: u32,
@@ -355,8 +355,8 @@ mod tests {
         }
     }
 
-    fn reducer(max_age: u32) -> V1Reducer {
-        V1Reducer::new(
+    fn reducer(max_age: u32) -> Reducer {
+        Reducer::new(
             deployment(max_age),
             ActivationCheckpoint {
                 height: 99,
@@ -368,7 +368,7 @@ mod tests {
         .unwrap()
     }
 
-    fn apply_block(reducer: &mut V1Reducer, commitments: usize) {
+    fn apply_block(reducer: &mut Reducer, commitments: usize) {
         let tip = reducer.tip();
         let height = tip.height.checked_add(1).unwrap();
         let transactions = (commitments > 0)
@@ -401,7 +401,7 @@ mod tests {
         Option::from(MerkleHashOrchard::from_bytes(&bytes)).unwrap()
     }
 
-    fn advance_to(reducer: &mut V1Reducer, height: u32) {
+    fn advance_to(reducer: &mut Reducer, height: u32) {
         while reducer.tip().height < height {
             apply_block(reducer, 0);
         }

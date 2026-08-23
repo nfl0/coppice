@@ -9,7 +9,7 @@ use coppice::{
     owner::{self, OwnerSigningKey, owner_key_bytes},
     owner_kdf::{OwnerKdfError, derive_v1_owner_signing_key},
     record::{NameRecord, NameStatus},
-    reducer::V1Reducer,
+    reducer::Reducer,
     reveal::{RevealValidationError, canonical_v1_address},
 };
 use zcash_client_backend::data_api::{
@@ -65,7 +65,7 @@ pub enum OwnerOperationError<HostError> {
 }
 
 fn owner_signing_key<'a>(
-    reducer: &V1Reducer,
+    reducer: &Reducer,
     name: &str,
     record: &NameRecord,
     authority: OwnerAuthority<'a>,
@@ -86,7 +86,7 @@ fn owner_signing_key<'a>(
 }
 
 fn sign_and_frame<HostError>(
-    reducer: &V1Reducer,
+    reducer: &Reducer,
     name: &str,
     previous: &NameRecord,
     mut operation: Operation,
@@ -133,7 +133,7 @@ fn sign_and_frame<HostError>(
 
 pub fn prepare_update<Host: HostCanonicalTipSource>(
     host: &Host,
-    reducer: &V1Reducer,
+    reducer: &Reducer,
     name: &str,
     new_address: &[u8],
     authority: OwnerAuthority<'_>,
@@ -172,7 +172,7 @@ pub fn prepare_update<Host: HostCanonicalTipSource>(
 
 pub fn prepare_release<Host: HostCanonicalTipSource>(
     host: &Host,
-    reducer: &V1Reducer,
+    reducer: &Reducer,
     name: &str,
     authority: OwnerAuthority<'_>,
 ) -> Result<PreparedOwnerOperation, OwnerOperationError<Host::Error>> {
@@ -222,7 +222,7 @@ pub enum PaymentResolutionError<HostError> {
 }
 
 fn verified_destination<HostError>(
-    reducer: &V1Reducer,
+    reducer: &Reducer,
     name: &str,
     record: &NameRecord,
 ) -> Result<VerifiedDestination, PaymentResolutionError<HostError>> {
@@ -240,7 +240,7 @@ fn verified_destination<HostError>(
 
 pub fn resolve_for_payment<Host: HostCanonicalTipSource>(
     host: &Host,
-    reducer: &V1Reducer,
+    reducer: &Reducer,
     name: &str,
 ) -> Result<VerifiedDestination, PaymentResolutionError<Host::Error>> {
     require_exact_canonical_tip(host, reducer).map_err(PaymentResolutionError::Tip)?;
@@ -287,7 +287,7 @@ pub enum BreakBondError<HostError, BackendError: Debug> {
 
 pub fn prepare_break_bond<Host, Backend>(
     host: &Host,
-    reducer: &V1Reducer,
+    reducer: &Reducer,
     name: &str,
     capability: IronwoodViewingCapability,
     backend: &Backend,
@@ -338,8 +338,8 @@ mod tests {
 
     const ADDRESS: &[u8] = b"uregtest15zjdhgeu9vfwkrgxvxyuynkprgryyww0cl668tpj0ykhl7nvvh7v7ln89f0v8c36vwyffxglg24zh5d4622ela80w065cc28mv7gf423";
 
-    fn reducer() -> V1Reducer {
-        V1Reducer::new(
+    fn reducer() -> Reducer {
+        Reducer::new(
             DeploymentParameters {
                 network_id: REGTEST_V0.network_id.to_vec(),
                 address_network: NetworkType::Regtest,
@@ -360,7 +360,7 @@ mod tests {
         .unwrap()
     }
 
-    fn fixture_record(reducer: &V1Reducer, account_key: [u8; 32]) -> (NameRecord, OwnerSigningKey) {
+    fn fixture_record(reducer: &Reducer, account_key: [u8; 32]) -> (NameRecord, OwnerSigningKey) {
         let bond_tag = [0x42; 32];
         let key = derive_v1_owner_signing_key(
             account_key,

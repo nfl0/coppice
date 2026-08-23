@@ -15,7 +15,7 @@ use coppice::{
     owner_kdf::{OwnerKdfError, derive_v1_owner_verification_key},
     pending::PendingTimingError,
     record::{NameRecord, NameStatus},
-    reducer::V1Reducer,
+    reducer::Reducer,
     registration::registration_commitment,
     reveal::{RevealValidationError, canonical_v1_address},
     state::CoppiceState,
@@ -64,7 +64,7 @@ impl PreparedCarrier {
 }
 
 fn prepare_carrier(
-    reducer: &V1Reducer,
+    reducer: &Reducer,
     operation: &Operation,
 ) -> Result<PreparedCarrier, CarrierPreparationError> {
     PreparedCarrier::from_operation(reducer.deployment_id(), operation)
@@ -156,7 +156,7 @@ pub enum BeginRegistrationError<HostError, BackendError: Debug> {
 #[allow(clippy::too_many_arguments)]
 pub fn begin_registration<Host, Backend, R>(
     host_tip_source: &Host,
-    reducer: &V1Reducer,
+    reducer: &Reducer,
     pending_collection: &mut PendingRegistrationCollection,
     account_id: crate::WalletAccountId,
     capability: IronwoodViewingCapability,
@@ -288,7 +288,7 @@ pub fn record_commit_broadcast(
 /// the cached height. Repeated observations follow reorg height changes.
 pub fn observe_canonical_commit<Host: HostCanonicalTipSource>(
     host_tip_source: &Host,
-    reducer: &V1Reducer,
+    reducer: &Reducer,
     pending: &mut PendingRegistrationCollection,
     commitment: &[u8; 32],
 ) -> Result<u32, ObserveCanonicalCommitError<Host::Error>> {
@@ -309,7 +309,7 @@ pub fn observe_canonical_commit<Host: HostCanonicalTipSource>(
 /// the current authenticated reducer state. A reorg that removes a commitment
 /// clears the cached height instead of leaving a misleading canonical stage.
 pub fn reconcile_canonical_commit_cache(
-    reducer: &V1Reducer,
+    reducer: &Reducer,
     pending: &mut PendingRegistrationCollection,
 ) -> Result<(), PendingRegistrationCollectionError> {
     let commitments = pending.commitments().collect::<Vec<_>>();
@@ -384,7 +384,7 @@ pub enum PrepareRevealError<HostError, BackendError: Debug, WitnessError, Materi
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn prepare_reveal<Host, Backend, Witness, Material, R>(
     host_tip_source: &Host,
-    reducer: &V1Reducer,
+    reducer: &Reducer,
     pending_collection: &PendingRegistrationCollection,
     capability: IronwoodViewingCapability,
     lock_backend: &mut Backend,
@@ -573,7 +573,7 @@ pub enum LifecycleError<HostError, BackendError: Debug> {
 }
 
 fn staged_remove_and_reconcile<Backend: CoppiceLockBackend>(
-    reducer: &V1Reducer,
+    reducer: &Reducer,
     pending: &mut PendingRegistrationCollection,
     capability: IronwoodViewingCapability,
     lock_backend: &mut Backend,
@@ -602,7 +602,7 @@ fn staged_remove_and_reconcile<Backend: CoppiceLockBackend>(
 #[allow(clippy::too_many_arguments)]
 pub fn complete_registration<Host, Backend>(
     host_tip_source: &Host,
-    reducer: &V1Reducer,
+    reducer: &Reducer,
     pending: &mut PendingRegistrationCollection,
     capability: IronwoodViewingCapability,
     lock_backend: &mut Backend,
@@ -629,7 +629,7 @@ where
 
 pub fn abandon_registration<Host, Backend>(
     host_tip_source: &Host,
-    reducer: &V1Reducer,
+    reducer: &Reducer,
     pending: &mut PendingRegistrationCollection,
     capability: IronwoodViewingCapability,
     lock_backend: &mut Backend,
@@ -651,7 +651,7 @@ where
 
 pub fn abandon_expired_registration<Host, Backend>(
     host_tip_source: &Host,
-    reducer: &V1Reducer,
+    reducer: &Reducer,
     pending: &mut PendingRegistrationCollection,
     capability: IronwoodViewingCapability,
     lock_backend: &mut Backend,
@@ -728,9 +728,9 @@ mod tests {
         }
     }
 
-    fn reducer() -> V1Reducer {
+    fn reducer() -> Reducer {
         let activation_floor = deployment().activation_height - 1;
-        V1Reducer::new(
+        Reducer::new(
             deployment(),
             ActivationCheckpoint {
                 height: activation_floor,
@@ -742,7 +742,7 @@ mod tests {
         .unwrap()
     }
 
-    fn advance_empty(reducer: &mut V1Reducer, height: u32) {
+    fn advance_empty(reducer: &mut Reducer, height: u32) {
         reducer
             .apply_block(&CanonicalBlockInput {
                 height,
@@ -754,7 +754,7 @@ mod tests {
             .unwrap();
     }
 
-    fn next_height(reducer: &V1Reducer) -> u32 {
+    fn next_height(reducer: &Reducer) -> u32 {
         reducer.tip().height.checked_add(1).unwrap()
     }
 

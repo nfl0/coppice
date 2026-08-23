@@ -8,7 +8,7 @@ use coppice::{
     config::{DeploymentParameters, Rendezvous},
     constants::MAX_TRANSACTION_LEN,
     envelope,
-    reducer::V1Reducer,
+    reducer::Reducer,
 };
 use sapling::prover::{OutputProver, SpendProver};
 use zcash_client_backend::{
@@ -147,7 +147,7 @@ pub enum CarrierProposalError<HostError, LockError: Debug, ProposalError, Cleanu
 pub fn propose_carrier_transaction<'a, Host, DbT, ParamsT, InputsT, ChangeT, CommitmentTreeErrT>(
     mode: CoppiceProtectionMode,
     host_tip_source: &Host,
-    reducer: &V1Reducer,
+    reducer: &Reducer,
     pending: &PendingRegistrationCollection,
     capability: IronwoodViewingCapability,
     wallet_db: &mut DbT,

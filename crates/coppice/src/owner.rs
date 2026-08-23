@@ -6,12 +6,10 @@ pub type OwnerSigningKey = SigningKey<SpendAuth>;
 pub type OwnerVerificationKey = VerificationKey<SpendAuth>;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OwnerKeyError;
-pub fn parse_owner_key(bytes: [u8; 32]) -> Result<OwnerVerificationKey, OwnerKeyError> {
-    OwnerVerificationKey::try_from(bytes).map_err(|_| OwnerKeyError)
-}
+
 /// Parses the canonical v1 owner key and enforces P-OWNER-001's non-identity rule.
 pub fn parse_v1_owner_key(bytes: [u8; 32]) -> Result<OwnerVerificationKey, OwnerKeyError> {
-    let key = parse_owner_key(bytes)?;
+    let key = OwnerVerificationKey::try_from(bytes).map_err(|_| OwnerKeyError)?;
     if key.is_identity() {
         return Err(OwnerKeyError);
     }
@@ -52,14 +50,11 @@ mod name_vectors {
     #[test]
     fn v1_owner_parser_rejects_identity_and_malformed_encodings() {
         let identity = [0; 32];
-        let permissive_identity = parse_owner_key(identity).unwrap();
-        assert!(permissive_identity.is_identity());
         assert_eq!(parse_v1_owner_key(identity), Err(OwnerKeyError));
 
         let signing_key = OwnerSigningKey::try_from([1; 32]).unwrap();
         let valid = owner_key_bytes(&(&signing_key).into());
         assert_eq!(owner_key_bytes(&parse_v1_owner_key(valid).unwrap()), valid);
-        assert_eq!(parse_owner_key([0xff; 32]), Err(OwnerKeyError));
         assert_eq!(parse_v1_owner_key([0xff; 32]), Err(OwnerKeyError));
     }
 }

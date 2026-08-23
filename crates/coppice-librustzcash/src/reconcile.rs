@@ -5,7 +5,7 @@
 
 use std::fmt::Debug;
 
-use coppice::reducer::{ReplayTip, RewindError, V1Reducer};
+use coppice::reducer::{Reducer, ReplayTip, RewindError};
 use zcash_client_backend::proto::compact_formats::CompactBlock;
 use zcash_protocol::consensus::Parameters;
 
@@ -178,7 +178,7 @@ where
 /// block-atomic and resumable rather than range-transactional.
 pub fn reconcile_canonical_chain<P, C, F>(
     params: &P,
-    reducer: &mut V1Reducer,
+    reducer: &mut Reducer,
     canonical_source: &mut C,
     full_tx_source: &mut F,
 ) -> Result<ReconcileOutcome, ReconcileError<C::Error, F::Error>>
@@ -202,10 +202,10 @@ where
 /// state presented to the callback.
 pub fn reconcile_canonical_chain_with_progress<P, C, F>(
     params: &P,
-    reducer: &mut V1Reducer,
+    reducer: &mut Reducer,
     canonical_source: &mut C,
     full_tx_source: &mut F,
-    mut persist_progress: impl FnMut(&V1Reducer) -> bool,
+    mut persist_progress: impl FnMut(&Reducer) -> bool,
 ) -> Result<ReconcileOutcome, ReconcileError<C::Error, F::Error>>
 where
     P: Parameters,
@@ -407,9 +407,9 @@ mod tests {
         }
     }
 
-    fn new_reducer() -> V1Reducer {
+    fn new_reducer() -> Reducer {
         let deployment = deployment();
-        V1Reducer::new(
+        Reducer::new(
             deployment.clone(),
             ActivationCheckpoint {
                 height: deployment.activation_height - 1,
@@ -640,7 +640,7 @@ mod tests {
         }
     }
 
-    fn apply_history(reducer: &mut V1Reducer, blocks: &BTreeMap<u32, CompactBlock>) {
+    fn apply_history(reducer: &mut Reducer, blocks: &BTreeMap<u32, CompactBlock>) {
         let mut full = FullSource::default();
         for block in blocks.values() {
             apply_compact_block(&params(), reducer, block, &mut full).unwrap();
@@ -655,7 +655,7 @@ mod tests {
         }
     }
 
-    fn assert_same_reducer(left: &V1Reducer, right: &V1Reducer) {
+    fn assert_same_reducer(left: &Reducer, right: &Reducer) {
         assert_eq!(left.tip(), right.tip());
         assert_eq!(left.state(), right.state());
         assert_eq!(

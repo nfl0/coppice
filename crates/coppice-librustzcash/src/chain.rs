@@ -8,7 +8,7 @@ use std::fmt::Debug;
 
 use coppice::{
     carrier,
-    reducer::{AppliedBlock, CanonicalBlockInput, CanonicalTxInput, FatalReducerError, V1Reducer},
+    reducer::{AppliedBlock, CanonicalBlockInput, CanonicalTxInput, FatalReducerError, Reducer},
 };
 use orchard::note_encryption::CompactAction;
 use zcash_client_backend::proto::compact_formats::{CompactBlock, CompactTx};
@@ -57,7 +57,7 @@ fn exact_32(bytes: &[u8]) -> Option<[u8; 32]> {
 fn validate_transaction<SourceError: Debug>(
     transaction: usize,
     compact_tx: &CompactTx,
-    reducer: &V1Reducer,
+    reducer: &Reducer,
 ) -> Result<ValidatedCompactTx, CompactBlockAdapterError<SourceError>> {
     let tx_index = u32::try_from(compact_tx.index)
         .map_err(|_| CompactBlockAdapterError::InvalidTxIndex { transaction })?;
@@ -101,7 +101,7 @@ fn validate_transaction<SourceError: Debug>(
 /// then fetches each candidate transaction exactly once in canonical order.
 pub fn prepare_canonical_block<P, S>(
     params: &P,
-    reducer: &V1Reducer,
+    reducer: &Reducer,
     compact_block: &CompactBlock,
     full_tx_source: &mut S,
 ) -> Result<CanonicalBlockInput, CompactBlockAdapterError<S::Error>>
@@ -174,7 +174,7 @@ where
 /// the atomic core reducer.
 pub fn apply_compact_block<P, S>(
     params: &P,
-    reducer: &mut V1Reducer,
+    reducer: &mut Reducer,
     compact_block: &CompactBlock,
     full_tx_source: &mut S,
 ) -> Result<AppliedBlock, CompactBlockApplyError<S::Error>>
@@ -244,9 +244,9 @@ mod tests {
         }
     }
 
-    fn reducer() -> V1Reducer {
+    fn reducer() -> Reducer {
         let deployment = deployment();
-        V1Reducer::new(
+        Reducer::new(
             deployment.clone(),
             ActivationCheckpoint {
                 height: deployment.activation_height - 1,
@@ -302,7 +302,7 @@ mod tests {
         }
     }
 
-    fn block(reducer: &V1Reducer, transactions: Vec<CompactTx>) -> CompactBlock {
+    fn block(reducer: &Reducer, transactions: Vec<CompactTx>) -> CompactBlock {
         CompactBlock {
             height: u64::from(reducer.tip().height + 1),
             hash: vec![7; 32],

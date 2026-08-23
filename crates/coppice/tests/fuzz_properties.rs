@@ -3,7 +3,7 @@ use coppice::{
     config::{DeploymentParameters, REGTEST_V0},
     envelope::decode_operation,
     reducer::{
-        ActivationCheckpoint, CanonicalBlockInput, CanonicalTxInput, IronwoodFrontier, V1Reducer,
+        ActivationCheckpoint, CanonicalBlockInput, CanonicalTxInput, IronwoodFrontier, Reducer,
     },
 };
 use incrementalmerkletree::Hashable;
@@ -33,7 +33,7 @@ fn arbitrary_operation_and_indexed_frame_bytes_are_panic_free() {
     }
 }
 
-fn reducer() -> V1Reducer {
+fn reducer() -> Reducer {
     let deployment = DeploymentParameters {
         network_id: REGTEST_V0.network_id.to_vec(),
         address_network: zcash_protocol::consensus::NetworkType::Regtest,
@@ -44,7 +44,7 @@ fn reducer() -> V1Reducer {
         bond_note_max_age_blocks: 100,
         rendezvous: REGTEST_V0.rendezvous,
     };
-    V1Reducer::new(
+    Reducer::new(
         deployment,
         ActivationCheckpoint {
             height: REGTEST_V0.activation_height - 1,
@@ -56,7 +56,7 @@ fn reducer() -> V1Reducer {
     .unwrap()
 }
 
-fn apply_generated(reducer: &mut V1Reducer, hash: [u8; 32], append: bool) {
+fn apply_generated(reducer: &mut Reducer, hash: [u8; 32], append: bool) {
     let height = reducer.tip().height + 1;
     reducer
         .apply_block(&CanonicalBlockInput {
@@ -93,9 +93,8 @@ fn persisted_delta_reorgs_equal_fresh_replay() {
             apply_generated(&mut local, hash, append);
             prefix.push((hash, append));
         }
-        local =
-            V1Reducer::load_snapshot(local.deployment().clone(), &local.save_snapshot().unwrap())
-                .unwrap();
+        local = Reducer::load_snapshot(local.deployment().clone(), &local.save_snapshot().unwrap())
+            .unwrap();
 
         let rewind_count = 1 + usize::from(seed % 31);
         let common_len = prefix.len() - rewind_count;
@@ -114,7 +113,7 @@ fn persisted_delta_reorgs_equal_fresh_replay() {
         }
 
         let restored =
-            V1Reducer::load_snapshot(local.deployment().clone(), &local.save_snapshot().unwrap())
+            Reducer::load_snapshot(local.deployment().clone(), &local.save_snapshot().unwrap())
                 .unwrap();
         assert_eq!(restored.tip(), fresh.tip());
         assert_eq!(restored.state(), fresh.state());
