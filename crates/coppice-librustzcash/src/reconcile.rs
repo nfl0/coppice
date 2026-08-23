@@ -506,6 +506,26 @@ mod tests {
         result
     }
 
+    fn retained_horizon_chain(branch: u8) -> BTreeMap<u32, CompactBlock> {
+        let mut result = BTreeMap::new();
+        let mut prev = [9; 32];
+        for height in 1..=150 {
+            let hash = if height == 1 {
+                1
+            } else {
+                branch.wrapping_mul(0x40).wrapping_add(height as u8)
+            };
+            let marker = if height == 1 {
+                11
+            } else {
+                branch.wrapping_mul(0x40).wrapping_add(11)
+            };
+            result.insert(height, block(height, hash, prev, marker));
+            prev = [hash; 32];
+        }
+        result
+    }
+
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum SourceError {
         Failed(u32),
@@ -809,6 +829,41 @@ mod tests {
         ));
         assert_eq!(reducer.tip(), before_tip);
         assert_eq!(reducer.ironwood_frontier().root(), before_root);
+    }
+
+    #[test]
+    fn phase6_fork_beyond_retained_horizon_requires_atomic_rebuild() {
+        let old = retained_horizon_chain(1);
+        let replacement = retained_horizon_chain(2);
+        let mut reducer = new_reducer();
+        apply_history(&mut reducer, &old);
+        assert_eq!(reducer.reorg_retention_blocks(), 121);
+        assert_eq!(reducer.oldest_rewind_height(), 29);
+        assert_eq!(reducer.tip().height - 1, 149);
+
+        let before = reducer.save_snapshot().unwrap();
+        let mut source = Source::new(
+            replacement.clone(),
+            tip(150, 2u8.wrapping_mul(0x40).wrapping_add(150u8)),
+        );
+        let mut full = FullSource::default();
+        assert!(matches!(
+            reconcile_canonical_chain(&params(), &mut reducer, &mut source, &mut full),
+            Err(ReconcileError::NoRetainedCommonAncestor)
+        ));
+        assert_eq!(reducer.save_snapshot().unwrap(), before);
+
+        // Rebuild from the activation checkpoint, then independently replay
+        // the same replacement chain to establish deterministic equivalence.
+        let mut rebuilt = new_reducer();
+        apply_history(&mut rebuilt, &replacement);
+        let mut clean = new_reducer();
+        apply_history(&mut clean, &replacement);
+        assert_eq!(
+            rebuilt.save_snapshot().unwrap(),
+            clean.save_snapshot().unwrap()
+        );
+        assert_same_reducer(&rebuilt, &clean);
     }
 
     #[test]

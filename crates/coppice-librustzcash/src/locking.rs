@@ -415,7 +415,9 @@ mod tests {
         config::{DeploymentParameters, REGTEST_V0, Rendezvous},
         constants::REGTEST_V0_ACTIVATION_HEIGHT,
         owner::{OwnerSigningKey, owner_key_bytes},
+        record::{NameRecord, NameStatus},
         registration::registration_commitment,
+        state::CoppiceState,
     };
     use zcash_client_backend::{
         data_api::{OutputLockStore, locking::LockError},
@@ -854,6 +856,78 @@ mod tests {
             backend.locks[&output_id].owner,
             lock_owner_for_bond(old_tag)
         );
+    }
+
+    #[test]
+    fn phase6_rebuilt_state_restores_only_active_bond_locks() {
+        let active_tag = tag(20);
+        let released_tag = tag(21);
+        let spent_tag = tag(22);
+        let mut names = BTreeMap::new();
+        names.insert(
+            "phase6-active".to_owned(),
+            NameRecord {
+                owner_pk: [0x20; 32],
+                bond_tag: active_tag,
+                sequence: 1,
+                address: ADDRESS.to_vec(),
+                status: NameStatus::Active,
+            },
+        );
+        names.insert(
+            "phase6-released".to_owned(),
+            NameRecord {
+                owner_pk: [0x21; 32],
+                bond_tag: released_tag,
+                sequence: 1,
+                address: ADDRESS.to_vec(),
+                status: NameStatus::Released {
+                    terminal_height: 103,
+                },
+            },
+        );
+        names.insert(
+            "phase6-spent".to_owned(),
+            NameRecord {
+                owner_pk: [0x22; 32],
+                bond_tag: spent_tag,
+                sequence: 0,
+                address: ADDRESS.to_vec(),
+                status: NameStatus::BondSpent {
+                    terminal_height: 150,
+                },
+            },
+        );
+        let rebuilt_state = CoppiceState::from_authoritative_parts(
+            names,
+            BTreeMap::new(),
+            BTreeMap::from([(spent_tag, 150)]),
+        )
+        .unwrap();
+        let active_tags = crate::active_canonical_bond_tags_from_state(&rebuilt_state);
+        assert_eq!(active_tags, BTreeSet::from([active_tag]));
+
+        let mut backend = FakeBackend::new(vec![note(20), note(21), note(22)])
+            .with_lock(note(21).output_id, lock_owner_for_bond(released_tag))
+            .with_lock(note(22).output_id, lock_owner_for_bond(spent_tag));
+        let report = reconcile_locks(
+            &active_tags,
+            &empty_pending(),
+            account_id(),
+            IronwoodViewingCapability::FullViewing,
+            &mut backend,
+        )
+        .unwrap();
+
+        assert_eq!(report.desired_tags, BTreeSet::from([active_tag]));
+        assert_eq!(report.ensured_locks, 1);
+        assert_eq!(report.removed_locks, 2);
+        assert_eq!(
+            backend.locks[&note(20).output_id].owner,
+            lock_owner_for_bond(active_tag)
+        );
+        assert!(!backend.locks.contains_key(&note(21).output_id));
+        assert!(!backend.locks.contains_key(&note(22).output_id));
     }
 
     #[test]

@@ -1354,6 +1354,7 @@ mod tests {
         recent_spent,
         record::NameRecord,
     };
+    use orchard::note::Nullifier;
     use std::collections::BTreeMap;
     use zcash_address::unified::{self, Encoding};
     use zcash_protocol::consensus::NetworkType;
@@ -1488,6 +1489,25 @@ mod tests {
         input
     }
 
+    fn semantic_block_with_effects(
+        reducer: &mut V1Reducer,
+        height: u32,
+        block_hash: [u8; 32],
+        nullifiers: Vec<[u8; 32]>,
+        commitments: Vec<[u8; 32]>,
+        mutate: impl FnOnce(&V1Reducer, &mut CoppiceState),
+    ) -> AppliedBlock {
+        let prior_state = reducer.state.clone();
+        let mut staged = reducer.state.clone();
+        mutate(reducer, &mut staged);
+        reducer.state = staged;
+        let input = block_with_effects(reducer, height, block_hash, nullifiers, commitments);
+        let applied = reducer.apply_block(&input).unwrap();
+        reducer.history.get_mut(&height).unwrap().state =
+            StateUndo::between(&prior_state, &reducer.state);
+        applied
+    }
+
     fn valid_commitment(byte: u8) -> [u8; 32] {
         for suffix in 0..=u8::MAX {
             let mut candidate = [byte; 32];
@@ -1526,6 +1546,350 @@ mod tests {
         .unwrap()
         .encode(&NetworkType::Regtest)
         .into_bytes()
+    }
+
+    fn phase6_nullifier(marker: u8) -> [u8; 32] {
+        for suffix in 0..=u8::MAX {
+            let mut candidate = [marker; 32];
+            candidate[31] = suffix;
+            if Option::<Nullifier>::from(Nullifier::from_bytes(&candidate)).is_some() {
+                return candidate;
+            }
+        }
+        panic!("test marker must yield a canonical nullifier")
+    }
+
+    fn phase6_tag(marker: u8) -> [u8; 32] {
+        bond_tag::derive_v1_bond_tag(&phase6_nullifier(marker)).unwrap()
+    }
+
+    fn phase6_owner(marker: u8) -> [u8; 32] {
+        let key = OwnerSigningKey::try_from([marker; 32]).unwrap();
+        owner_key_bytes(&(&key).into())
+    }
+
+    fn phase6_block_hash(branch: u8, height: u32) -> [u8; 32] {
+        let mut hash = [branch; 32];
+        hash[..4].copy_from_slice(&height.to_be_bytes());
+        hash[4] = branch ^ 0x5a;
+        hash
+    }
+
+    fn phase6_pending(branch: u8) -> [u8; 32] {
+        let mut commitment = [0; 32];
+        commitment[0] = 0xd0 ^ branch;
+        commitment[1] = 0x06;
+        commitment
+    }
+
+    fn phase6_common_prefix(reducer: &mut V1Reducer) {
+        let active_commitment = [0xa1; 32];
+        let released_commitment = [0xa2; 32];
+        let spent_commitment = [0xa3; 32];
+        let active_tag = phase6_tag(0x11);
+        let released_tag = phase6_tag(0x12);
+        let spent_tag = phase6_tag(0x13);
+
+        semantic_block_with_effects(
+            reducer,
+            100,
+            phase6_block_hash(0, 100),
+            vec![],
+            vec![valid_commitment(0x01), valid_commitment(0x02)],
+            |_, state| {
+                for commitment in [active_commitment, released_commitment, spent_commitment] {
+                    state
+                        .apply_prevalidated_commit(
+                            commitment,
+                            pending::ChainPosition {
+                                block_height: 100,
+                                tx_index: 0,
+                            },
+                        )
+                        .unwrap();
+                }
+            },
+        );
+
+        semantic_block_with_effects(
+            reducer,
+            101,
+            phase6_block_hash(0, 101),
+            vec![],
+            vec![valid_commitment(0x03)],
+            |_, state| {
+                for (name, owner_pk, bond_tag, commitment) in [
+                    (
+                        "phase6-active",
+                        phase6_owner(0x21),
+                        active_tag,
+                        active_commitment,
+                    ),
+                    (
+                        "phase6-released",
+                        phase6_owner(0x22),
+                        released_tag,
+                        released_commitment,
+                    ),
+                    (
+                        "phase6-spent",
+                        phase6_owner(0x23),
+                        spent_tag,
+                        spent_commitment,
+                    ),
+                ] {
+                    state
+                        .apply_prevalidated_reveal(crate::state::PrevalidatedReveal {
+                            name: name.to_owned(),
+                            owner_pk,
+                            bond_tag,
+                            address: canonical_ua(),
+                            commitment,
+                            path: crate::state::PrevalidatedRevealPath::NewName,
+                        })
+                        .unwrap();
+                }
+            },
+        );
+
+        reducer
+            .apply_block(&block_with_effects(
+                reducer,
+                102,
+                phase6_block_hash(0, 102),
+                vec![],
+                vec![valid_commitment(0x04)],
+            ))
+            .unwrap();
+
+        semantic_block_with_effects(
+            reducer,
+            103,
+            phase6_block_hash(0, 103),
+            vec![],
+            vec![valid_commitment(0x05)],
+            |_, state| {
+                state
+                    .apply_prevalidated_release("phase6-released", 1, 103)
+                    .unwrap();
+            },
+        );
+
+        semantic_block_with_effects(
+            reducer,
+            104,
+            phase6_block_hash(0, 104),
+            vec![],
+            vec![valid_commitment(0x06)],
+            |_, state| {
+                state
+                    .apply_prevalidated_update("phase6-active", 1, canonical_ua())
+                    .unwrap();
+            },
+        );
+
+        reducer
+            .apply_block(&block_with_effects(
+                reducer,
+                105,
+                phase6_block_hash(0, 105),
+                vec![],
+                vec![valid_commitment(0x07)],
+            ))
+            .unwrap();
+    }
+
+    fn phase6_apply_shared_suffix(reducer: &mut V1Reducer) {
+        for height in 106..=225 {
+            let commitments = vec![valid_commitment((height as u8).wrapping_add(0x20))];
+            if height == 120 {
+                semantic_block_with_effects(
+                    reducer,
+                    height,
+                    phase6_block_hash(0, height),
+                    vec![],
+                    commitments,
+                    |_, state| {
+                        state
+                            .apply_prevalidated_update("phase6-active", 2, canonical_ua())
+                            .unwrap();
+                    },
+                );
+            } else if height == 150 {
+                reducer
+                    .apply_block(&block_with_effects(
+                        reducer,
+                        height,
+                        phase6_block_hash(0, height),
+                        vec![phase6_nullifier(0x13)],
+                        commitments,
+                    ))
+                    .unwrap();
+            } else {
+                reducer
+                    .apply_block(&block_with_effects(
+                        reducer,
+                        height,
+                        phase6_block_hash(0, height),
+                        vec![],
+                        commitments,
+                    ))
+                    .unwrap();
+            }
+        }
+    }
+
+    fn phase6_apply_divergent_suffix(reducer: &mut V1Reducer, branch: u8) {
+        for height in 226..=240 {
+            let commitments = vec![valid_commitment((height as u8).wrapping_add(branch))];
+            if height == 230 {
+                let commitment = phase6_pending(branch);
+                semantic_block_with_effects(
+                    reducer,
+                    height,
+                    phase6_block_hash(branch, height),
+                    vec![],
+                    commitments,
+                    |_, state| {
+                        state
+                            .apply_prevalidated_commit(
+                                commitment,
+                                pending::ChainPosition {
+                                    block_height: height,
+                                    tx_index: 0,
+                                },
+                            )
+                            .unwrap();
+                    },
+                );
+            } else {
+                reducer
+                    .apply_block(&block_with_effects(
+                        reducer,
+                        height,
+                        phase6_block_hash(branch, height),
+                        vec![],
+                        commitments,
+                    ))
+                    .unwrap();
+            }
+        }
+    }
+
+    fn phase6_apply_long_suffix(reducer: &mut V1Reducer, branch: u8) {
+        for height in 106..=240 {
+            let commitments = vec![valid_commitment((height as u8).wrapping_add(branch))];
+            if height == 120 && branch == 1 {
+                semantic_block_with_effects(
+                    reducer,
+                    height,
+                    phase6_block_hash(branch, height),
+                    vec![],
+                    commitments,
+                    |_, state| {
+                        state
+                            .apply_prevalidated_update("phase6-active", 2, canonical_ua())
+                            .unwrap();
+                    },
+                );
+            } else if height == 150 {
+                reducer
+                    .apply_block(&block_with_effects(
+                        reducer,
+                        height,
+                        phase6_block_hash(branch, height),
+                        vec![phase6_nullifier(0x13)],
+                        commitments,
+                    ))
+                    .unwrap();
+            } else if height == 230 {
+                let commitment = phase6_pending(branch);
+                semantic_block_with_effects(
+                    reducer,
+                    height,
+                    phase6_block_hash(branch, height),
+                    vec![],
+                    commitments,
+                    |_, state| {
+                        state
+                            .apply_prevalidated_commit(
+                                commitment,
+                                pending::ChainPosition {
+                                    block_height: height,
+                                    tx_index: 0,
+                                },
+                            )
+                            .unwrap();
+                    },
+                );
+            } else {
+                reducer
+                    .apply_block(&block_with_effects(
+                        reducer,
+                        height,
+                        phase6_block_hash(branch, height),
+                        vec![],
+                        commitments,
+                    ))
+                    .unwrap();
+            }
+        }
+    }
+
+    fn assert_phase6_replacement_state(reducer: &V1Reducer, branch: u8) {
+        assert_eq!(reducer.tip().height, 240);
+        assert_eq!(reducer.state.names["phase6-active"].sequence, 1);
+        assert_eq!(
+            reducer.state.names["phase6-active"].status,
+            NameStatus::Active
+        );
+        assert_eq!(
+            reducer.state.names["phase6-released"].status,
+            NameStatus::Released {
+                terminal_height: 103
+            }
+        );
+        assert_eq!(
+            reducer.state.names["phase6-spent"].status,
+            NameStatus::BondSpent {
+                terminal_height: 150
+            }
+        );
+        assert_eq!(
+            reducer.state.pending.get(&phase6_pending(branch)),
+            Some(&pending::ChainPosition {
+                block_height: 230,
+                tx_index: 0,
+            })
+        );
+        assert_eq!(
+            reducer.state.recent_spent.get(&phase6_tag(0x13)),
+            Some(&150)
+        );
+        assert!(
+            reducer
+                .state
+                .active_bond_index()
+                .contains_key(&phase6_tag(0x11))
+        );
+        assert!(
+            !reducer
+                .state
+                .active_bond_index()
+                .contains_key(&phase6_tag(0x12))
+        );
+        assert!(
+            !reducer
+                .state
+                .active_bond_index()
+                .contains_key(&phase6_tag(0x13))
+        );
+        assert_eq!(
+            reducer.ironwood_checkpoints().first_key_value().unwrap().0,
+            &120
+        );
+        assert!(reducer.ironwood_checkpoints().contains_key(&240));
+        assert!(reducer.ironwood_frontier().size() > 120);
     }
 
     #[test]
@@ -2239,6 +2603,85 @@ mod tests {
         );
         assert_eq!(restored.oldest_rewind_height(), 108);
         assert_eq!(restored.history.len(), 121);
+    }
+
+    #[test]
+    fn phase6_retained_reorg_and_deep_rebuild_are_deterministic() {
+        let retention = reducer().reorg_retention_blocks();
+        assert_eq!(retention, 121);
+
+        // The first branch exercises a shallow fork after a realistic state
+        // prefix. Rewinding to height 225 is inside the configured horizon.
+        let mut prefix = reducer();
+        phase6_common_prefix(&mut prefix);
+        let prefix_snapshot = prefix.save_snapshot().unwrap();
+
+        let mut shared = V1Reducer::load_snapshot(deployment(), &prefix_snapshot).unwrap();
+        phase6_apply_shared_suffix(&mut shared);
+        let shared_snapshot = shared.save_snapshot().unwrap();
+
+        let mut old_within = V1Reducer::load_snapshot(deployment(), &shared_snapshot).unwrap();
+        phase6_apply_divergent_suffix(&mut old_within, 1);
+        let old_within_tip = old_within.tip();
+
+        let mut rewound = V1Reducer::load_snapshot(deployment(), &shared_snapshot).unwrap();
+        phase6_apply_divergent_suffix(&mut rewound, 1);
+        assert!(rewound.has_rewind_snapshot(225));
+        rewound.rewind_to(225).unwrap();
+        phase6_apply_divergent_suffix(&mut rewound, 2);
+
+        let mut shallow_fresh = V1Reducer::load_snapshot(deployment(), &shared_snapshot).unwrap();
+        phase6_apply_divergent_suffix(&mut shallow_fresh, 2);
+        assert_eq!(
+            rewound.save_snapshot().unwrap(),
+            shallow_fresh.save_snapshot().unwrap()
+        );
+        assert_eq!(rewound.state_root, shallow_fresh.state_root);
+        assert_eq!(rewound.ironwood_tree, shallow_fresh.ironwood_tree);
+        assert_eq!(
+            rewound.ironwood_checkpoints,
+            shallow_fresh.ironwood_checkpoints
+        );
+        assert_eq!(rewound.tip, shallow_fresh.tip);
+        assert_ne!(old_within_tip.block_hash, rewound.tip.block_hash);
+
+        // Extend a different old branch beyond the retained undo horizon and
+        // prove that the failed rewind is observationally atomic.
+        let mut unrecoverable = V1Reducer::load_snapshot(deployment(), &prefix_snapshot).unwrap();
+        phase6_apply_long_suffix(&mut unrecoverable, 1);
+        assert_eq!(unrecoverable.tip().height - prefix.tip().height, 135);
+        assert!(unrecoverable.tip().height - prefix.tip().height > retention);
+        assert!(prefix.tip().height < unrecoverable.oldest_rewind_height());
+        let before_failed_rewind = unrecoverable.save_snapshot().unwrap();
+        assert_eq!(
+            unrecoverable.rewind_to(prefix.tip().height),
+            Err(RewindError::SnapshotMissing)
+        );
+        assert_eq!(unrecoverable.save_snapshot().unwrap(), before_failed_rewind);
+
+        // The local state is now discarded. Both reducers below start from
+        // the frozen activation checkpoint and independently replay the same
+        // replacement chain; byte equality covers the retained journal as
+        // well as current state, roots, checkpoints, frontier, and tip.
+        drop(unrecoverable);
+        let mut rebuilt = reducer();
+        phase6_common_prefix(&mut rebuilt);
+        phase6_apply_long_suffix(&mut rebuilt, 2);
+        let mut clean = reducer();
+        phase6_common_prefix(&mut clean);
+        phase6_apply_long_suffix(&mut clean, 2);
+
+        assert_phase6_replacement_state(&rebuilt, 2);
+        assert_eq!(
+            rebuilt.save_snapshot().unwrap(),
+            clean.save_snapshot().unwrap()
+        );
+        assert_eq!(rebuilt.state_root, clean.state_root);
+        assert_eq!(rebuilt.state, clean.state);
+        assert_eq!(rebuilt.ironwood_tree, clean.ironwood_tree);
+        assert_eq!(rebuilt.ironwood_checkpoints, clean.ironwood_checkpoints);
+        assert_eq!(rebuilt.tip, clean.tip);
+        assert_eq!(rebuilt.history, clean.history);
     }
 
     #[test]
