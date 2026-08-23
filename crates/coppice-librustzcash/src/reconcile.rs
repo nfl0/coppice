@@ -5,7 +5,7 @@
 
 use std::fmt::Debug;
 
-use coppice::reducer_v1::{ReplayTip, RewindError, V1Reducer};
+use coppice::reducer::{ReplayTip, RewindError, V1Reducer};
 use zcash_client_backend::proto::compact_formats::CompactBlock;
 use zcash_protocol::consensus::Parameters;
 
@@ -359,7 +359,7 @@ mod tests {
 
     use coppice::{
         config::{DeploymentParameters, REGTEST_V0, Rendezvous},
-        reducer_v1::{ActivationCheckpoint, IronwoodFrontier},
+        reducer::{ActivationCheckpoint, IronwoodFrontier},
     };
     use orchard::{
         note::{ExtractedNoteCommitment, Note, NoteVersion, Nullifier, RandomSeed, Rho},

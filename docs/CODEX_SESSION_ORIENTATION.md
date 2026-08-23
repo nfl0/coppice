@@ -27,7 +27,7 @@ test-vectors/
     >
 docs/IMPLEMENTATION.md
     >
-legacy Coppice behavior/docs
+superseded Coppice behavior/docs
 ```
 
 Frozen BondProof anchors include:

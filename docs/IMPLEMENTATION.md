@@ -8,7 +8,7 @@
 
 1. Read `PROTOCOL_SPEC.md` first.
 2. Treat every protocol requirement ID (`P-*`) as authoritative.
-3. Do not infer protocol behavior from legacy Coppice code when it conflicts
+3. Do not infer protocol behavior from superseded Coppice code when it conflicts
    with the new specification.
 4. Reuse existing audited/working cryptographic code where explicitly called
    out below.
@@ -21,28 +21,37 @@
 
 ## 2. Repository starting point
 
-The current repository is a single Rust workspace member:
+The current repository is a Rust workspace containing:
 
 ```text
 crates/coppice
+crates/coppice-librustzcash
 ```
 
 and currently contains modules including:
 
 ```text
+authorization.rs
 bond.rs
+bond_tag.rs
 carrier.rs
+carrier_v1.rs
 config.rs
 constants.rs
+crypto.rs
 envelope.rs
-incremental.rs
 ironwood.rs
 name_tree.rs
 owner.rs
-replay.rs
-spent.rs
+owner_kdf.rs
 state.rs
-vectors.rs
+pending.rs
+recent_spent.rs
+record.rs
+reducer.rs
+registration.rs
+reveal.rs
+state_root.rs
 ```
 
 The workspace already pins `halo2_proofs = 0.3.2`, Pasta/Orchard dependencies,

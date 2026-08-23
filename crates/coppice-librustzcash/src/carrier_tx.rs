@@ -8,7 +8,7 @@ use coppice::{
     config::{DeploymentParameters, Rendezvous},
     constants::MAX_TRANSACTION_LEN,
     envelope,
-    reducer_v1::V1Reducer,
+    reducer::V1Reducer,
 };
 use sapling::prover::{OutputProver, SpendProver};
 use zcash_client_backend::{

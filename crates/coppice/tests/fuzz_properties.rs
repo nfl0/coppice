@@ -2,7 +2,7 @@ use coppice::{
     carrier_v1::reconstruct_frames_v1,
     config::{DeploymentParameters, REGTEST_V0},
     envelope::decode_operation,
-    reducer_v1::{
+    reducer::{
         ActivationCheckpoint, CanonicalBlockInput, CanonicalTxInput, IronwoodFrontier, V1Reducer,
     },
 };

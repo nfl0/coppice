@@ -10,8 +10,6 @@ use zcash_primitives::transaction::Transaction;
 
 #[derive(Debug)]
 pub enum Error {
-    NotFound,
-    Envelope,
     Build,
 }
 
@@ -65,46 +63,7 @@ pub fn compact_action_is_bulletin(
     Ok(try_compact_note_decryption(&domain, &ivk, action).is_some())
 }
 
-pub fn transaction_has_bulletin_output(
-    tx: &Transaction,
-    rendezvous: Rendezvous,
-) -> Result<bool, Error> {
-    let Some(bundle) = tx.ironwood_bundle() else {
-        return Ok(false);
-    };
-    let ivk = bulletin_ivk(rendezvous)?.prepare();
-    Ok(bundle.actions().iter().any(|action| {
-        let domain = IronwoodDomain::for_action(action);
-        try_note_decryption(&domain, &ivk, action).is_some()
-    }))
-}
-pub fn decode_bulletin(tx: &Transaction) -> Result<Operation, Error> {
-    decode_bulletin_for(tx, crate::config::TESTNET_V0.rendezvous)
-}
-
-pub fn decode_bulletin_for(tx: &Transaction, rendezvous: Rendezvous) -> Result<Operation, Error> {
-    let b = tx.ironwood_bundle().ok_or(Error::NotFound)?;
-    let ivk = bulletin_ivk(rendezvous)?.prepare();
-    let mut frames = Vec::new();
-    let mut saw_coppice = false;
-    for action in b.actions() {
-        let domain = IronwoodDomain::for_action(action);
-        if let Some((_, _, memo)) = try_note_decryption(&domain, &ivk, action)
-            && memo.starts_with(crate::DOMAIN)
-        {
-            saw_coppice = true;
-            frames.push(envelope::frame_from_memo(&memo).map_err(|_| Error::Envelope)?);
-        }
-    }
-    if !saw_coppice {
-        return Err(Error::NotFound);
-    }
-    let p = envelope::reconstruct(frames).map_err(|_| Error::Envelope)?;
-    envelope::decode_operation(&p).map_err(|_| Error::Envelope)
-}
-
-/// Decodes the explicit canonical v1 carrier path. The V0 decoder above is
-/// intentionally retained for legacy replay compatibility.
+/// Decodes the explicit canonical CPV1 carrier path.
 pub fn decode_v1_bulletin_for(
     tx: &Transaction,
     rendezvous: Rendezvous,

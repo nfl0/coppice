@@ -139,8 +139,8 @@ pub struct CoppiceConfig {
     pub rendezvous: Rendezvous,
 }
 
-/// Public-testnet POC parameters. `COPPICE_POC_V2` intentionally does not
-/// decode the superseded direct-REGISTER experiment.
+/// Public-testnet parameters. The frozen `COPPICE_POC_V2` identifier does not
+/// decode the superseded direct-REGISTER format.
 pub const TESTNET_V0: CoppiceConfig = CoppiceConfig {
     protocol_id: constants::PROTOCOL_ID,
     network_id: constants::NETWORK_ID,
@@ -153,8 +153,8 @@ pub const TESTNET_V0: CoppiceConfig = CoppiceConfig {
     },
 };
 
-/// Local Z3 regtest parameters. These are playground parameters, not a public
-/// network deployment or proposed production constants.
+/// Local Z3 regtest parameters. These are not a public network deployment or
+/// proposed production constants.
 pub const REGTEST_V0: CoppiceConfig = CoppiceConfig {
     protocol_id: constants::PROTOCOL_ID,
     network_id: constants::NETWORK_ID,

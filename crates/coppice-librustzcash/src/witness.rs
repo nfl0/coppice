@@ -5,7 +5,7 @@
 //! richer backend may later implement [`IronwoodWitnessSource`] to reconstruct
 //! older witnesses, but callers must never silently substitute another anchor.
 
-use coppice::reducer_v1::V1Reducer;
+use coppice::reducer::V1Reducer;
 use incrementalmerkletree::Position;
 use orchard::tree::{Anchor, MerklePath};
 use shardtree::{ShardTree, error::ShardTreeError, store::ShardStore};
@@ -332,9 +332,7 @@ mod tests {
 
     use coppice::{
         config::{DeploymentParameters, Rendezvous},
-        reducer_v1::{
-            ActivationCheckpoint, CanonicalBlockInput, CanonicalTxInput, IronwoodFrontier,
-        },
+        reducer::{ActivationCheckpoint, CanonicalBlockInput, CanonicalTxInput, IronwoodFrontier},
     };
     use incrementalmerkletree::{Hashable, Marking, Retention};
     use orchard::tree::MerkleHashOrchard;

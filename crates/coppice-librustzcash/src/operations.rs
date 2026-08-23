@@ -9,7 +9,7 @@ use coppice::{
     owner::{self, OwnerSigningKey, owner_key_bytes},
     owner_kdf::{OwnerKdfError, derive_v1_owner_signing_key},
     record::{NameRecord, NameStatus},
-    reducer_v1::V1Reducer,
+    reducer::V1Reducer,
     reveal::{RevealValidationError, canonical_v1_address},
 };
 use zcash_client_backend::data_api::{
@@ -331,7 +331,7 @@ mod tests {
     use coppice::{
         config::{DeploymentParameters, REGTEST_V0},
         owner_kdf::derive_v1_owner_signing_key,
-        reducer_v1::{ActivationCheckpoint, IronwoodFrontier},
+        reducer::{ActivationCheckpoint, IronwoodFrontier},
     };
     use std::convert::Infallible;
     use zcash_protocol::consensus::NetworkType;

@@ -15,7 +15,7 @@ use coppice::{
     owner_kdf::{OwnerKdfError, derive_v1_owner_verification_key},
     pending::PendingTimingError,
     record::{NameRecord, NameStatus},
-    reducer_v1::V1Reducer,
+    reducer::V1Reducer,
     registration::registration_commitment,
     reveal::{RevealValidationError, canonical_v1_address},
     state::CoppiceState,
@@ -699,7 +699,7 @@ mod tests {
         pending::{ChainPosition, PendingCommitments},
         recent_spent::RecentSpent,
         record::NameRecord,
-        reducer_v1::{ActivationCheckpoint, CanonicalBlockInput, IronwoodFrontier, ReplayTip},
+        reducer::{ActivationCheckpoint, CanonicalBlockInput, IronwoodFrontier, ReplayTip},
         state::CoppiceState,
     };
     use rand_chacha::ChaCha20Rng;

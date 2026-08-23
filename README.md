@@ -1,6 +1,6 @@
 # Coppice
 
-Coppice is an experimental adminless naming protocol built on Zcash.
+Coppice is a pre-release adminless naming protocol built on Zcash.
 
 ## Protocol authority
 
@@ -20,13 +20,11 @@ Before making changes, read `docs/CODEX_SESSION_ORIENTATION.md`.
 ```bash
 cargo fmt --all -- --check
 cargo test --workspace --locked
-````
+```
 
-Coppice is experimental cryptographic software and has not been independently
+Coppice is pre-release cryptographic software and has not been independently
 audited for production use.
 
 ## License
 
 MIT OR Apache-2.0.
-
-````

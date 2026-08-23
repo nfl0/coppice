@@ -2,7 +2,7 @@ use std::{collections::BTreeSet, fmt::Debug};
 
 use coppice::{
     bond_tag::{BondTagError, derive_v1_bond_tag},
-    reducer_v1::V1Reducer,
+    reducer::V1Reducer,
     state::CoppiceState,
 };
 use zcash_client_backend::wallet::OutputRef;

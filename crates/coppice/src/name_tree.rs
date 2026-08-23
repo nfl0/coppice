@@ -1,155 +1,270 @@
-use crate::{constants, legacy_state::NameRecord, owner};
-use sha2::{Digest, Sha256};
+use crate::{
+    crypto, owner,
+    record::{self, NameRecord},
+};
 use std::collections::BTreeMap;
+
+const TREE_DEPTH: usize = 256;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NameProof {
     pub siblings: Vec<[u8; 32]>,
 }
-fn h(b: &[u8]) -> [u8; 32] {
-    Sha256::digest(b).into()
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NameTreeError {
+    DuplicateNameId,
+    Record(record::RecordEncodingError),
+    Hash(crypto::Error),
 }
-fn node(a: [u8; 32], b: [u8; 32]) -> [u8; 32] {
-    let mut x = constants::NAME_TREE_NODE_DOMAIN.to_vec();
-    x.extend_from_slice(&a);
-    x.extend_from_slice(&b);
-    h(&x)
+
+fn hash(label: &str, message: &[u8]) -> [u8; 32] {
+    crypto::hash(label, message).expect("fixed v1 NameTree hash label")
 }
-fn empty() -> Vec<[u8; 32]> {
-    let mut d = vec![h(constants::NAME_TREE_EMPTY_DOMAIN)];
-    for i in 0..256 {
-        d.push(node(d[i], d[i]));
+
+pub fn node_hash(left: [u8; 32], right: [u8; 32]) -> [u8; 32] {
+    let mut message = [0u8; 64];
+    message[..32].copy_from_slice(&left);
+    message[32..].copy_from_slice(&right);
+    hash("CoppiceNNodeV1", &message)
+}
+
+pub fn empty_hashes() -> Vec<[u8; 32]> {
+    let mut empty = Vec::with_capacity(TREE_DEPTH + 1);
+    empty.push(hash("CoppiceNEmptyV1", &[]));
+    for i in 0..TREE_DEPTH {
+        let previous = empty[i];
+        empty.push(node_hash(previous, previous));
     }
-    d
+    empty
 }
-fn bit(k: &[u8; 32], i: usize) -> bool {
-    k[i / 8] & (1 << (7 - i % 8)) != 0
+
+pub fn empty_root() -> [u8; 32] {
+    empty_hashes()[TREE_DEPTH]
 }
-fn parent(mut k: [u8; 32], i: usize) -> [u8; 32] {
-    k[i / 8] &= !(1 << (7 - i % 8));
-    k
+
+pub fn leaf_hash(record: &NameRecord) -> Result<[u8; 32], NameTreeError> {
+    let record_hash = record::record_hash(record).map_err(NameTreeError::Record)?;
+    Ok(hash("CoppiceNLeafV1", &record_hash))
 }
-pub fn name_id(name: &str) -> [u8; 32] {
-    owner::name_id(name)
+
+fn bit(key: &[u8; 32], depth: usize) -> bool {
+    key[depth / 8] & (1 << (7 - depth % 8)) != 0
 }
-pub fn leaf_hash(r: &NameRecord) -> [u8; 32] {
-    let mut b = constants::NAME_TREE_LEAF_DOMAIN.to_vec();
-    b.extend_from_slice(&owner::record_hash(r));
-    h(&b)
+
+fn parent(mut key: [u8; 32], depth: usize) -> [u8; 32] {
+    key[depth / 8] &= !(1 << (7 - depth % 8));
+    key
 }
-fn levels(records: &BTreeMap<String, NameRecord>) -> Vec<BTreeMap<[u8; 32], [u8; 32]>> {
-    let d = empty();
-    let mut all = Vec::new();
-    let mut cur = BTreeMap::new();
-    for (n, r) in records {
-        cur.insert(name_id(n), leaf_hash(r));
+
+fn sibling(mut key: [u8; 32], depth: usize) -> [u8; 32] {
+    key[depth / 8] ^= 1 << (7 - depth % 8);
+    key
+}
+
+fn leaves(
+    records: &BTreeMap<String, NameRecord>,
+) -> Result<BTreeMap<[u8; 32], [u8; 32]>, NameTreeError> {
+    let mut leaves = BTreeMap::new();
+    for (name, record) in records {
+        let name_id = owner::name_id(name);
+        let leaf = leaf_hash(record)?;
+        if leaves.insert(name_id, leaf).is_some() {
+            return Err(NameTreeError::DuplicateNameId);
+        }
     }
-    all.push(cur.clone());
-    for i in (0..256).rev() {
+    Ok(leaves)
+}
+
+fn levels(
+    leaves: &BTreeMap<[u8; 32], [u8; 32]>,
+    empty: &[[u8; 32]],
+) -> Vec<BTreeMap<[u8; 32], [u8; 32]>> {
+    let mut all = Vec::with_capacity(TREE_DEPTH + 1);
+    let mut current = leaves.clone();
+    all.push(current.clone());
+    for depth in (0..TREE_DEPTH).rev() {
         let mut next = BTreeMap::new();
-        let mut done = BTreeMap::new();
-        for (k, v) in &cur {
-            let p = parent(*k, i);
-            if done.contains_key(&p) {
+        for (key, value) in &current {
+            let parent_key = parent(*key, depth);
+            if next.contains_key(&parent_key) {
                 continue;
             }
-            let mut sibling = *k;
-            sibling[i / 8] ^= 1 << (7 - i % 8);
-            let other = *cur.get(&sibling).unwrap_or(&d[255 - i]);
-            let (l, r) = if bit(k, i) { (other, *v) } else { (*v, other) };
-            done.insert(p, ());
-            next.insert(p, node(l, r));
+            let sibling_value = current
+                .get(&sibling(*key, depth))
+                .copied()
+                .unwrap_or(empty[TREE_DEPTH - 1 - depth]);
+            let (left, right) = if bit(key, depth) {
+                (sibling_value, *value)
+            } else {
+                (*value, sibling_value)
+            };
+            next.insert(parent_key, node_hash(left, right));
         }
-        cur = next;
-        all.push(cur.clone());
+        current = next;
+        all.push(current.clone());
     }
     all
 }
-pub fn root(records: &BTreeMap<String, NameRecord>) -> [u8; 32] {
-    let d = empty();
-    levels(records)
-        .last()
-        .and_then(|x| x.get(&[0; 32]))
+
+pub fn root(records: &BTreeMap<String, NameRecord>) -> Result<[u8; 32], NameTreeError> {
+    let empty = empty_hashes();
+    let leaves = leaves(records)?;
+    let all = levels(&leaves, &empty);
+    Ok(all[TREE_DEPTH]
+        .get(&[0; 32])
         .copied()
-        .unwrap_or(d[256])
+        .unwrap_or(empty[TREE_DEPTH]))
 }
-pub fn prove(records: &BTreeMap<String, NameRecord>, name: &str) -> NameProof {
-    let d = empty();
-    let mut k = name_id(name);
-    let ls = levels(records);
-    let mut siblings = Vec::with_capacity(256);
-    for (level, map) in ls.iter().take(256).enumerate() {
-        let i = 255 - level;
-        let mut s = k;
-        s[i / 8] ^= 1 << (7 - i % 8);
-        siblings.push(*map.get(&s).unwrap_or(&d[level]));
-        k = parent(k, i);
+
+pub fn prove(
+    records: &BTreeMap<String, NameRecord>,
+    name: &str,
+) -> Result<NameProof, NameTreeError> {
+    let empty = empty_hashes();
+    let leaves = leaves(records)?;
+    let all = levels(&leaves, &empty);
+    let mut key = owner::name_id(name);
+    let mut siblings = Vec::with_capacity(TREE_DEPTH);
+    for level in 0..TREE_DEPTH {
+        let depth = TREE_DEPTH - 1 - level;
+        siblings.push(
+            all[level]
+                .get(&sibling(key, depth))
+                .copied()
+                .unwrap_or(empty[level]),
+        );
+        key = parent(key, depth);
     }
-    NameProof { siblings }
+    Ok(NameProof { siblings })
 }
-pub fn verify(root: [u8; 32], name: &str, record: Option<&NameRecord>, p: &NameProof) -> bool {
-    if !crate::envelope::valid_name(name) || p.siblings.len() != 256 {
+
+pub fn verify(
+    expected_root: [u8; 32],
+    name: &str,
+    record: Option<&NameRecord>,
+    proof: &NameProof,
+) -> bool {
+    if proof.siblings.len() != TREE_DEPTH {
         return false;
     }
-    let mut cur = record.map(leaf_hash).unwrap_or_else(|| empty()[0]);
-    let k = name_id(name);
-    for (level, s) in p.siblings.iter().enumerate() {
-        let i = 255 - level;
-        cur = if bit(&k, i) {
-            node(*s, cur)
+    let empty = empty_hashes();
+    let mut current = match record {
+        Some(record) => match leaf_hash(record) {
+            Ok(leaf) => leaf,
+            Err(_) => return false,
+        },
+        None => empty[0],
+    };
+    let key = owner::name_id(name);
+    for (level, sibling_hash) in proof.siblings.iter().enumerate() {
+        let depth = TREE_DEPTH - 1 - level;
+        current = if bit(&key, depth) {
+            node_hash(*sibling_hash, current)
         } else {
-            node(cur, *s)
+            node_hash(current, *sibling_hash)
         };
     }
-    cur == root
+    current == expected_root
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::legacy_state::{NameRecord, Status};
-    #[test]
-    fn member_and_absent_proofs() {
-        let mut m = BTreeMap::new();
-        let r = NameRecord {
-            owner_pk: [1; 32],
-            bond_tag: [1; 32],
+    use serde_json::Value;
+
+    fn fixed32(hex: &str) -> [u8; 32] {
+        hex::decode(hex).unwrap().try_into().unwrap()
+    }
+
+    fn name_tree_fixture() -> Value {
+        serde_json::from_str(include_str!("../../../test-vectors/name_tree.json")).unwrap()
+    }
+
+    fn active_record() -> NameRecord {
+        NameRecord {
+            owner_pk: core::array::from_fn(|index| index as u8),
+            bond_tag: [0x42; 32],
             sequence: 0,
-            address: b"UA".to_vec(),
-            status: Status::Active,
-        };
-        m.insert("alice".into(), r.clone());
-        let initial_root = root(&m);
-        assert!(verify(initial_root, "alice", Some(&r), &prove(&m, "alice")));
-        assert!(verify(initial_root, "bob", None, &prove(&m, "bob")));
-        assert!(!verify(initial_root, "bob", Some(&r), &prove(&m, "bob")));
-        let mut malformed = prove(&m, "alice");
+            address: b"u1synthetic-conformance-address".to_vec(),
+            status: record::NameStatus::Active,
+        }
+    }
+
+    fn frozen_active_record_hash() -> [u8; 32] {
+        let fixture: Value =
+            serde_json::from_str(include_str!("../../../test-vectors/records.json")).unwrap();
+        let vector = fixture["vectors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|vector| vector["id"].as_str() == Some("active"))
+            .unwrap();
+        fixed32(vector["record_hash_hex"].as_str().unwrap())
+    }
+
+    #[test]
+    fn name_tree_vectors_and_proofs_match() {
+        let fixture = name_tree_fixture();
+        let one_leaf = &fixture["one_leaf"];
+        let empty = empty_hashes();
+        assert_eq!(empty.len(), TREE_DEPTH + 1);
+        assert_eq!(
+            empty[0],
+            fixed32(fixture["empty_leaf_hex"].as_str().unwrap())
+        );
+        assert_eq!(
+            empty_root(),
+            fixed32(fixture["empty_root_hex"].as_str().unwrap())
+        );
+
+        let record = active_record();
+        assert_eq!(
+            record::record_hash(&record).unwrap(),
+            frozen_active_record_hash()
+        );
+        assert_eq!(
+            owner::name_id("alice"),
+            fixed32(one_leaf["name_id_hex"].as_str().unwrap())
+        );
+        assert_eq!(
+            leaf_hash(&record).unwrap(),
+            fixed32(one_leaf["leaf_hex"].as_str().unwrap())
+        );
+
+        let mut records = BTreeMap::new();
+        records.insert("alice".to_owned(), record.clone());
+        let one_leaf_root = root(&records).unwrap();
+        assert_eq!(
+            one_leaf_root,
+            fixed32(one_leaf["root_hex"].as_str().unwrap())
+        );
+
+        let proof = prove(&records, "alice").unwrap();
+        let expected_siblings = one_leaf["siblings_bottom_up_hex"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|sibling| fixed32(sibling.as_str().unwrap()))
+            .collect::<Vec<_>>();
+        assert_eq!(expected_siblings.len(), TREE_DEPTH);
+        assert_eq!(proof.siblings, expected_siblings);
+        assert!(verify(one_leaf_root, "alice", Some(&record), &proof));
+
+        let mut wrong_record = record.clone();
+        wrong_record.address.push(b'!');
+        assert!(!verify(one_leaf_root, "alice", Some(&wrong_record), &proof));
+        assert!(!verify([0; 32], "alice", Some(&record), &proof));
+
+        let absent_proof = prove(&records, "bob").unwrap();
+        assert!(verify(one_leaf_root, "bob", None, &absent_proof));
+        assert!(!verify(one_leaf_root, "bob", Some(&record), &absent_proof));
+
+        let mut malformed = proof.clone();
         malformed.siblings.pop();
-        assert!(!verify(initial_root, "alice", Some(&r), &malformed));
-        let mut wrong = r.clone();
-        wrong.address.push(1);
-        assert!(!verify(
-            initial_root,
-            "alice",
-            Some(&wrong),
-            &prove(&m, "alice")
-        ));
-        assert!(!verify([0; 32], "alice", Some(&r), &prove(&m, "alice")));
-        assert!(!verify(initial_root, "bob", Some(&r), &prove(&m, "alice")));
-        let released = NameRecord {
-            status: Status::Released,
-            ..r.clone()
-        };
-        m.insert("alice".into(), released.clone());
-        let rr = root(&m);
-        assert!(verify(rr, "alice", Some(&released), &prove(&m, "alice")));
-        let mut a = BTreeMap::new();
-        let mut b = BTreeMap::new();
-        a.insert("alice".into(), r.clone());
-        a.insert("bob".into(), released.clone());
-        b.insert("bob".into(), released);
-        b.insert("alice".into(), r);
-        assert_eq!(root(&a), root(&b));
-        assert_eq!(prove(&a, "alice").siblings.len() * 32, 8192);
+        assert!(!verify(one_leaf_root, "alice", Some(&record), &malformed));
+        malformed.siblings.push([0; 32]);
+        malformed.siblings.push([0; 32]);
+        assert!(!verify(one_leaf_root, "alice", Some(&record), &malformed));
     }
 }

@@ -1,6 +1,6 @@
 //! Canonical v1 reducer state and replay-independent, prevalidated mutations.
 
-use crate::{name_tree_v1, pending, recent_spent, record};
+use crate::{name_tree, pending, recent_spent, record};
 use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -275,8 +275,8 @@ impl CoppiceState {
         Ok((oldest, removed))
     }
 
-    pub fn name_tree_root(&self) -> Result<[u8; 32], name_tree_v1::NameTreeError> {
-        name_tree_v1::root(&self.names)
+    pub fn name_tree_root(&self) -> Result<[u8; 32], name_tree::NameTreeError> {
+        name_tree::root(&self.names)
     }
 
     pub fn pending_root(&self) -> Result<[u8; 32], pending::PendingEncodingError> {
@@ -635,7 +635,7 @@ mod tests {
             },
         );
         state.recent_spent.insert([4; 32], 110);
-        assert_eq!(state.name_tree_root(), name_tree_v1::root(&state.names));
+        assert_eq!(state.name_tree_root(), name_tree::root(&state.names));
         assert_eq!(state.pending_root(), pending::root(&state.pending));
         assert_eq!(
             state.recent_spent_root(100),

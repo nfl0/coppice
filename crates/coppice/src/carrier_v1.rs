@@ -1,8 +1,8 @@
 //! Canonical Coppice v1 carrier framing over raw Ironwood memo plaintexts.
 //!
-//! This module is deliberately separate from the V0 compatibility framing in
-//! [`crate::envelope`]. V1 has an explicit frame index, but no nonce or
-//! per-frame length. Reconstruction is scoped to one transaction.
+//! Operation serialization is provided by [`crate::envelope`]. The carrier has
+//! an explicit frame index, but no nonce or per-frame length; reconstruction is
+//! scoped to one transaction.
 
 use crate::{constants, crypto};
 

@@ -8,9 +8,7 @@ use std::fmt::Debug;
 
 use coppice::{
     carrier,
-    reducer_v1::{
-        AppliedBlock, CanonicalBlockInput, CanonicalTxInput, FatalReducerError, V1Reducer,
-    },
+    reducer::{AppliedBlock, CanonicalBlockInput, CanonicalTxInput, FatalReducerError, V1Reducer},
 };
 use orchard::note_encryption::CompactAction;
 use zcash_client_backend::proto::compact_formats::{CompactBlock, CompactTx};
@@ -198,7 +196,7 @@ mod tests {
     use coppice::{
         config::{DeploymentParameters, REGTEST_V0, Rendezvous},
         constants::REGTEST_V0_ACTIVATION_HEIGHT,
-        reducer_v1::{ActivationCheckpoint, IronwoodFrontier, TransactionOutcome},
+        reducer::{ActivationCheckpoint, IronwoodFrontier, TransactionOutcome},
     };
     use orchard::{
         note::{ExtractedNoteCommitment, Note, NoteVersion, Nullifier, RandomSeed, Rho},

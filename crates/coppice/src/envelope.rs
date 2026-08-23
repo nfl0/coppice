@@ -1,9 +1,4 @@
-use crate::{DOMAIN, constants};
-use sha2::{Digest, Sha256};
-
-pub const MAX_FRAMES: u8 = constants::MAX_FRAMES;
-pub const MAX_PAYLOAD: usize = constants::MAX_PAYLOAD_LEN;
-const HEADER: usize = DOMAIN.len() + 1 + 1 + 1 + 1 + 2 + 32 + 8 + 2;
+use crate::constants;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Operation {
@@ -38,9 +33,6 @@ pub enum Error {
     Length,
     Name,
     Trailing,
-    Duplicate,
-    Missing,
-    Hash,
 }
 
 pub fn valid_name(n: &str) -> bool {
@@ -151,13 +143,13 @@ pub fn encode_operation(op: &Operation) -> Result<Vec<u8>, Error> {
             o.extend_from_slice(signature)
         }
     }
-    if o.len() > MAX_PAYLOAD {
+    if o.len() > constants::MAX_PAYLOAD_LEN {
         return Err(Error::Length);
     }
     Ok(o)
 }
 pub fn decode_operation(mut p: &[u8]) -> Result<Operation, Error> {
-    if p.len() > MAX_PAYLOAD {
+    if p.len() > constants::MAX_PAYLOAD_LEN {
         return Err(Error::Length);
     }
     let ty = *take(&mut p, 1)?.first().ok_or(Error::Malformed)?;
@@ -219,108 +211,11 @@ fn take_name(p: &mut &[u8]) -> Result<String, Error> {
     }
     Ok(name)
 }
-pub fn payload_hash(p: &[u8]) -> [u8; 32] {
-    Sha256::digest(p).into()
-}
-pub fn frames(payload: &[u8], nonce: u64, chunk: usize) -> Result<Vec<Vec<u8>>, Error> {
-    if payload.len() > MAX_PAYLOAD || chunk == 0 {
-        return Err(Error::Length);
-    }
-    let count = payload.len().div_ceil(chunk);
-    if count == 0 || count > MAX_FRAMES as usize {
-        return Err(Error::Length);
-    }
-    let hash = payload_hash(payload);
-    let mut r = Vec::new();
-    for i in 0..count {
-        let a = i * chunk;
-        let b = (a + chunk).min(payload.len());
-        let mut f = Vec::with_capacity(HEADER + b - a);
-        f.extend_from_slice(DOMAIN);
-        f.push(1);
-        f.push(1);
-        f.push(i as u8);
-        f.push(count as u8);
-        f.extend_from_slice(&(payload.len() as u16).to_be_bytes());
-        f.extend_from_slice(&hash);
-        f.extend_from_slice(&nonce.to_be_bytes());
-        f.extend_from_slice(
-            &u16::try_from(b - a)
-                .map_err(|_| Error::Length)?
-                .to_be_bytes(),
-        );
-        f.extend_from_slice(&payload[a..b]);
-        r.push(f)
-    }
-    Ok(r)
-}
-pub fn reconstruct(fs: Vec<Vec<u8>>) -> Result<Vec<u8>, Error> {
-    if fs.is_empty() || fs.len() > MAX_FRAMES as usize {
-        return Err(Error::Missing);
-    }
-    let mut parsed = Vec::new();
-    let m = DOMAIN.len();
-    for f in &fs {
-        if f.len() < HEADER || &f[..m] != DOMAIN || f[m] != 1 || f[m + 1] != 1 {
-            return Err(Error::Malformed);
-        }
-        let i = f[m + 2];
-        let n = f[m + 3];
-        let len = u16::from_be_bytes([f[m + 4], f[m + 5]]) as usize;
-        if n == 0 || n > MAX_FRAMES || i >= n || len > MAX_PAYLOAD {
-            return Err(Error::Length);
-        }
-        let h: [u8; 32] = f[m + 6..m + 38].try_into().map_err(|_| Error::Malformed)?;
-        let chunk_len = u16::from_be_bytes([f[m + 46], f[m + 47]]) as usize;
-        if chunk_len > MAX_PAYLOAD || f.len() != HEADER + chunk_len {
-            return Err(Error::Length);
-        }
-        parsed.push((i, n, len, h, f[m + 48..].to_vec()));
-    }
-    let n = parsed[0].1;
-    let len = parsed[0].2;
-    let h = parsed[0].3;
-    if n as usize != fs.len() || parsed.iter().any(|x| x.1 != n || x.2 != len || x.3 != h) {
-        return Err(Error::Malformed);
-    }
-    parsed.sort_by_key(|x| x.0);
-    if parsed.iter().enumerate().any(|(i, x)| x.0 != i as u8) {
-        return Err(Error::Duplicate);
-    }
-    let p = parsed.into_iter().flat_map(|x| x.4).collect::<Vec<_>>();
-    if p.len() != len {
-        return Err(Error::Length);
-    }
-    if payload_hash(&p) != h {
-        return Err(Error::Hash);
-    }
-    Ok(p)
-}
-
-/// Removes standard memo padding using the explicit canonical frame chunk length.
-pub fn frame_from_memo(memo: &[u8; 512]) -> Result<Vec<u8>, Error> {
-    if memo.len() < HEADER {
-        return Err(Error::Malformed);
-    }
-    let m = DOMAIN.len();
-    if &memo[..m] != DOMAIN {
-        return Err(Error::Malformed);
-    }
-    let n = u16::from_be_bytes([memo[m + 46], memo[m + 47]]) as usize;
-    if n > MAX_PAYLOAD || HEADER + n > memo.len() {
-        return Err(Error::Length);
-    }
-    if memo[HEADER + n..].iter().any(|b| *b != 0) {
-        return Err(Error::Trailing);
-    }
-    Ok(memo[..HEADER + n].to_vec())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn wire_and_frames() {
+    fn operation_wire_round_trip() {
         let key = crate::owner::OwnerSigningKey::try_from([1; 32]).unwrap();
         let x = Operation::Reveal {
             name: "alice".into(),
@@ -333,69 +228,13 @@ mod tests {
             secret: [9; 32],
         };
         let p = encode_operation(&x).unwrap();
-        assert_eq!(decode_operation(&p).unwrap(), x);
-        let f = frames(&p, 9, 400).unwrap();
-        assert_eq!(decode_operation(&reconstruct(f).unwrap()).unwrap(), x)
+        assert_eq!(decode_operation(&p).unwrap(), x)
     }
     #[test]
     fn bad_name() {
         assert!(!valid_name("-a"));
         assert!(!valid_name("A"));
         assert!(valid_name("a-9"));
-    }
-    #[test]
-    fn malformed_and_ambiguous_frames_are_rejected() {
-        let payload = vec![0x55; 900];
-        let valid = frames(&payload, 1, 400).unwrap();
-        let mut reversed = valid.clone();
-        reversed.reverse();
-        assert_eq!(reconstruct(reversed).unwrap(), payload);
-        let mut x = valid.clone();
-        x.pop();
-        assert!(reconstruct(x).is_err());
-        let mut x = valid.clone();
-        x[1] = x[0].clone();
-        assert!(reconstruct(x).is_err());
-        let mut x = valid.clone();
-        x[0][16] = 32;
-        assert!(reconstruct(x).is_err());
-        let mut x = valid.clone();
-        x[0][17] = 0;
-        assert!(reconstruct(x).is_err());
-        let mut x = valid.clone();
-        x[0][17] = 33;
-        assert!(reconstruct(x).is_err());
-        let mut x = valid.clone();
-        x[0][15] = 2;
-        assert!(reconstruct(x).is_err());
-        let mut x = valid.clone();
-        x[0][20] ^= 1;
-        assert!(reconstruct(x).is_err());
-        let mut x = valid.clone();
-        x[0][18] ^= 1;
-        assert!(reconstruct(x).is_err());
-        let mut x = valid.clone();
-        x[2].pop();
-        assert!(reconstruct(x).is_err());
-        let mut x = valid.clone();
-        x[2].push(0);
-        assert!(reconstruct(x).is_err());
-        let mut x = valid.clone();
-        x[2][62] ^= 1;
-        assert!(reconstruct(x).is_err());
-        let one = frames(b"one", 0, 400).unwrap();
-        assert!(reconstruct(vec![one[0].clone(), one[0].clone()]).is_err());
-    }
-    #[test]
-    fn transport_nonce_does_not_change_logical_payload() {
-        let payload = b"logical bytes stay fixed";
-        let a = frames(payload, 1, 400).unwrap();
-        let b = frames(payload, 2, 400).unwrap();
-        assert_ne!(a, b);
-        assert_eq!(&a[0][..52], &b[0][..52]);
-        assert_ne!(&a[0][52..60], &b[0][52..60]);
-        assert_eq!(&a[0][60..], &b[0][60..]);
-        assert_eq!(reconstruct(a).unwrap(), reconstruct(b).unwrap());
     }
     #[test]
     fn operation_decoder_is_strict() {
@@ -457,7 +296,7 @@ mod tests {
             Err(Error::Length)
         );
 
-        let mut oversized_operation = vec![0; MAX_PAYLOAD + 1];
+        let mut oversized_operation = vec![0; constants::MAX_PAYLOAD_LEN + 1];
         oversized_operation[0] = 1;
         assert_eq!(decode_operation(&oversized_operation), Err(Error::Length));
 

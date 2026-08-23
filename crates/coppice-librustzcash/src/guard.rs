@@ -1,6 +1,6 @@
 use std::fmt::Debug;
 
-use coppice::reducer_v1::{ReplayTip, V1Reducer};
+use coppice::reducer::{ReplayTip, V1Reducer};
 
 use crate::{
     CoppiceLockBackend, IronwoodViewingCapability, PendingRegistrationCollection,
@@ -174,7 +174,7 @@ mod tests {
         config::{DeploymentParameters, REGTEST_V0, Rendezvous},
         constants::REGTEST_V0_ACTIVATION_HEIGHT,
         owner::{OwnerSigningKey, owner_key_bytes},
-        reducer_v1::{ActivationCheckpoint, IronwoodFrontier, V1Reducer},
+        reducer::{ActivationCheckpoint, IronwoodFrontier, V1Reducer},
         registration::registration_commitment,
     };
     use zcash_client_backend::wallet::LockOwner;

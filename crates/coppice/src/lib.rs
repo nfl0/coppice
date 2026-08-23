@@ -1,4 +1,4 @@
-//! Coppice POC: strict envelope and deterministic replay. No consensus code is modified.
+//! Canonical Coppice protocol state, replay, and wallet-integration primitives.
 pub mod authorization;
 pub mod bond;
 pub mod bond_tag;
@@ -8,23 +8,15 @@ pub mod config;
 pub mod constants;
 pub mod crypto;
 pub mod envelope;
-pub mod incremental;
 pub mod ironwood;
-#[doc(hidden)]
-pub mod legacy_state;
 pub mod name_tree;
-pub mod name_tree_v1;
 pub mod owner;
 pub mod owner_kdf;
 pub mod pending;
 pub mod recent_spent;
 pub mod record;
-pub mod reducer_v1;
+pub mod reducer;
 pub mod registration;
-pub mod replay;
 pub mod reveal;
-pub mod spent;
 pub mod state;
 pub mod state_root;
-
-pub const DOMAIN: &[u8] = constants::PROTOCOL_ID;
