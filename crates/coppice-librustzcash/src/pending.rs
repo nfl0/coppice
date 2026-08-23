@@ -200,7 +200,7 @@ pub enum PendingRegistrationCollectionError {
     Transition(PendingRegistrationTransitionError),
 }
 
-pub const PENDING_REGISTRATION_FORMAT_VERSION: u32 = 2;
+pub const PENDING_REGISTRATION_FORMAT_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PendingRegistrationPersistenceError {
@@ -628,6 +628,16 @@ mod tests {
         let bytes = collection.save_local(&deployment).unwrap();
         let restored = PendingRegistrationCollection::load_local(&deployment, &bytes).unwrap();
         assert!(restored == collection);
+
+        let mut old_format: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        old_format["format_version"] = serde_json::Value::from(2);
+        assert!(matches!(
+            PendingRegistrationCollection::load_local(
+                &deployment,
+                &serde_json::to_vec(&old_format).unwrap()
+            ),
+            Err(PendingRegistrationPersistenceError::UnsupportedFormat)
+        ));
 
         let mut wrong = deployment.clone();
         wrong.network_id.push(1);

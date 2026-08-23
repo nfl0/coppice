@@ -27,7 +27,7 @@ use zcash_protocol::consensus::BranchId;
 
 pub type IronwoodFrontier = CommitmentTree<MerkleHashOrchard, 32>;
 
-pub const COPPICE_SNAPSHOT_FORMAT_VERSION: u32 = 2;
+pub const COPPICE_SNAPSHOT_FORMAT_VERSION: u32 = 1;
 
 fn required_reorg_retention_blocks(
     deployment: &DeploymentParameters,
@@ -2248,6 +2248,13 @@ mod tests {
             .apply_block(&empty_block_at(&reducer, 100, [0x10; 32]))
             .unwrap();
         let encoded = reducer.save_snapshot().unwrap();
+
+        let mut old_format: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        old_format["format_version"] = serde_json::Value::from(2);
+        assert!(matches!(
+            V1Reducer::load_snapshot(deployment(), &serde_json::to_vec(&old_format).unwrap()),
+            Err(SnapshotError::UnsupportedFormat)
+        ));
 
         let mut wrong_deployment = deployment();
         wrong_deployment.network_id.push(0x42);

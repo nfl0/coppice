@@ -12,7 +12,7 @@ use orchard::tree::MerkleHashOrchard;
 use serde::{Deserialize, Serialize};
 use zcash_primitives::transaction::TxId;
 
-const LOCAL_STATE_VERSION: u8 = 6;
+const LOCAL_STATE_VERSION: u8 = 1;
 pub type IronwoodTree = CommitmentTree<MerkleHashOrchard, 32>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -71,7 +71,6 @@ struct LocalWalletState {
     fixture_context: [u8; 32],
     names: CoppiceState,
     spent: SpentTagTree,
-    #[serde(default)]
     accepted_bond_anchors: std::collections::BTreeSet<[u8; 32]>,
     ironwood_tree: Vec<u8>,
     initial_ironwood_tree: Vec<u8>,
@@ -591,13 +590,23 @@ mod tests {
     }
 
     #[test]
-    fn corrupted_local_state_is_rejected() {
+    fn old_development_local_state_is_rejected() {
         let wallet = IncrementalWallet::new(10, [0; 32]);
         let encoded = wallet.save_local().unwrap();
-        let mut value: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
-        value["version"] = 0.into();
+        let mut old_version: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        old_version["version"] = 6.into();
         assert!(matches!(
-            IncrementalWallet::load_local(&serde_json::to_vec(&value).unwrap()),
+            IncrementalWallet::load_local(&serde_json::to_vec(&old_version).unwrap()),
+            Err(IncrementalError::InvalidLocalState)
+        ));
+
+        let mut old_schema: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        old_schema
+            .as_object_mut()
+            .unwrap()
+            .remove("accepted_bond_anchors");
+        assert!(matches!(
+            IncrementalWallet::load_local(&serde_json::to_vec(&old_schema).unwrap()),
             Err(IncrementalError::InvalidLocalState)
         ));
     }
