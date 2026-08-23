@@ -43,7 +43,7 @@ impl V1BulletinInspection {
         &self.frames
     }
 }
-/// Returns the deployment's public incoming capability. It contains no spending authority.
+/// Returns the configured public incoming capability. It contains no spending authority.
 pub fn bulletin_ivk(rendezvous: Rendezvous) -> Result<IncomingViewingKey, Error> {
     Option::from(IncomingViewingKey::from_bytes(&rendezvous.orchard_ivk)).ok_or(Error::Build)
 }

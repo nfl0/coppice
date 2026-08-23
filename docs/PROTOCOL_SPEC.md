@@ -142,6 +142,10 @@ BLAKE2b, without changing the protocol version.
 
 Coppice protocol logic is parameterized by a validated deployment.
 
+The repository's Testnet and Regtest values are qualification/development
+parameters; no public Coppice Testnet or Mainnet deployment has been
+announced.
+
 Recommended Rust shape:
 
 ```rust
@@ -199,7 +203,8 @@ The public 1 ZEC candidate uses:
 minimum_bond_value = 100_000_000 zatoshis
 ```
 
-The implementation MUST keep this a deployment parameter so local regtest/test deployments can be configured separately if desired.
+The implementation MUST keep this a deployment parameter so the local Regtest
+and Zcash Testnet qualification environments can be configured separately.
 
 ## P-DEP-002 — Deployment identifier
 
@@ -1634,7 +1639,10 @@ Properties:
 - clients can trial-decrypt compact outputs;
 - full transactions are fetched only for matching candidate transactions.
 
-A production deployment SHOULD generate the rendezvous capability through a transparent no-known-spending-key procedure, but protocol correctness does not depend on a secret spending key because bulletin outputs are zero-valued and authorization comes from Coppice cryptography/state.
+If Coppice is later deployed, its rendezvous capability SHOULD be generated
+through a transparent no-known-spending-key procedure, but protocol correctness
+does not depend on a secret spending key because bulletin outputs are
+zero-valued and authorization comes from Coppice cryptography/state.
 
 The integration suite MUST include a Zebra/Z3 test proving that a zero-valued
 Ironwood rendezvous output with a correctly calculated conventional ZIP-317 fee
@@ -2176,7 +2184,8 @@ The KDF relation is not externally visible.
 
 ## P-PRIV-003 — Carrier visibility
 
-Coppice bulletin outputs are intentionally publicly decryptable by anyone with the published rendezvous incoming key.
+Coppice bulletin outputs are intentionally publicly decryptable by anyone with
+the configured rendezvous incoming key.
 
 Therefore Coppice operation contents are public protocol data once their transaction is visible.
 

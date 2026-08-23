@@ -1,15 +1,16 @@
 /// Coppice v1 protocol identity bytes.
 pub const PROTOCOL_ID: &[u8] = b"COPPICE_V1";
-/// Coppice v1 deployment-domain bytes. Regtest and Testnet are deliberately
-/// separate domains so their derived deployment identities cannot collide.
+/// Coppice v1 network-domain bytes for the qualification configurations.
+/// Regtest and Testnet are deliberately separate domains so their derived
+/// deployment identities cannot collide.
 pub const TESTNET_NETWORK_ID: &[u8] = b"coppice-testnet-v1";
 pub const REGTEST_NETWORK_ID: &[u8] = b"coppice-regtest-v1";
 pub const TESTNET_ACTIVATION_HEIGHT: u32 = 4_288_414;
 pub const TESTNET_IRONWOOD_ACTIVATION_HEIGHT: u32 = 4_134_000;
-/// Local Z3 regtest deployment activation height.
+/// Local Z3 Regtest qualification activation height.
 pub const REGTEST_ACTIVATION_HEIGHT: u32 = 10;
 pub const REGTEST_IRONWOOD_ACTIVATION_HEIGHT: u32 = 2;
-/// Public incoming capability used by the Coppice v1 Testnet deployment.
+/// Public incoming capability used by Coppice v1 Testnet qualification.
 pub const TESTNET_RENDEZVOUS_IVK: [u8; 64] = [
     60, 110, 200, 22, 89, 123, 10, 179, 86, 236, 86, 74, 9, 74, 180, 100, 154, 119, 14, 20, 91,
     195, 39, 241, 22, 142, 0, 180, 92, 12, 70, 20, 106, 14, 250, 173, 108, 54, 103, 71, 161, 187,
@@ -21,7 +22,7 @@ pub const TESTNET_RENDEZVOUS_RECEIVER: [u8; 43] = [
     208, 158, 34, 242, 57, 252, 119, 100, 85, 70, 131, 1, 223, 204, 149, 64, 197, 229, 157, 210,
     201, 131,
 ];
-/// Public incoming capability for the local Z3 regtest deployment.
+/// Public incoming capability for local Z3 Regtest qualification.
 pub const REGTEST_RENDEZVOUS_IVK: [u8; 64] = [
     101, 222, 178, 179, 238, 122, 198, 144, 32, 84, 63, 64, 242, 17, 34, 203, 109, 193, 244, 32,
     26, 50, 159, 205, 249, 213, 227, 187, 45, 251, 186, 190, 41, 213, 66, 53, 47, 227, 108, 60,

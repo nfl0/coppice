@@ -1,4 +1,8 @@
-//! Frozen protocol parameters exposed to wallet integrations.
+//! Frozen Coppice v1 protocol parameters exposed to wallet integrations.
+//!
+//! The Testnet and Regtest values below are qualification/development
+//! parameters; no public Coppice Testnet or Mainnet deployment has been
+//! announced.
 
 use crate::{constants, crypto};
 use orchard::keys::IncomingViewingKey;
@@ -139,7 +143,7 @@ pub struct CoppiceConfig {
     pub rendezvous: Rendezvous,
 }
 
-/// Coppice v1 public Testnet parameters.
+/// Coppice v1 Testnet qualification parameters.
 pub const TESTNET: CoppiceConfig = CoppiceConfig {
     protocol_id: constants::PROTOCOL_ID,
     network_id: constants::TESTNET_NETWORK_ID,
@@ -152,7 +156,7 @@ pub const TESTNET: CoppiceConfig = CoppiceConfig {
     },
 };
 
-/// Coppice v1 local Z3 Regtest parameters.
+/// Coppice v1 local Z3 Regtest qualification parameters.
 pub const REGTEST: CoppiceConfig = CoppiceConfig {
     protocol_id: constants::PROTOCOL_ID,
     network_id: constants::REGTEST_NETWORK_ID,

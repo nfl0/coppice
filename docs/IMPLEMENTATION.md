@@ -781,7 +781,8 @@ pub struct CoppiceSnapshotV1 {
 The reference reducer exposes a versioned local snapshot containing its current
 authoritative state plus a bounded rewind journal. The journal retains one
 full current state and the deployment-derived proof/checkpoint horizon of
-per-block undo entries (121 for the current deployments). Each undo entry stores
+per-block undo entries (121 for the current qualification configurations).
+Each undo entry stores
 only previous values for registry keys changed by that block, together with the
 previous compact Ironwood frontier and checkpoint-map changes; it does not copy
 the complete registry state. Loading rejects a wrong deployment, non-contiguous
