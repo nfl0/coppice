@@ -303,6 +303,25 @@ pub fn observe_canonical_commit<Host: HostCanonicalTipSource>(
     Ok(height)
 }
 
+/// Reconciles every local canonical-COMMIT cache entry bidirectionally with
+/// the current authenticated reducer state. A reorg that removes a commitment
+/// clears the cached height instead of leaving a misleading canonical stage.
+pub fn reconcile_canonical_commit_cache(
+    reducer: &V1Reducer,
+    pending: &mut PendingRegistrationCollection,
+) -> Result<(), PendingRegistrationCollectionError> {
+    let commitments = pending.commitments().collect::<Vec<_>>();
+    for commitment in commitments {
+        match reducer.state().pending.get(&commitment) {
+            Some(position) => {
+                pending.observe_canonical_commit_height(&commitment, position.block_height)?
+            }
+            None => pending.clear_canonical_commit_height(&commitment)?,
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug)]
 pub enum ObserveCanonicalCommitError<HostError> {
     Tip(ExactCanonicalTipError<HostError>),
@@ -1092,6 +1111,11 @@ mod tests {
         assert_eq!(
             registration_stage(collection.get(&commitment).unwrap()),
             RegistrationStage::CommitCanonical
+        );
+        reconcile_canonical_commit_cache(&reducer, &mut collection).unwrap();
+        assert_eq!(
+            registration_stage(collection.get(&commitment).unwrap()),
+            RegistrationStage::CommitBroadcast
         );
         collection
             .observe_canonical_commit_height(&commitment, 111)

@@ -44,7 +44,7 @@ pub use pending::{
 };
 pub use reconcile::{
     CanonicalBlockSource, CanonicalTip, ReconcileError, ReconcileKind, ReconcileOutcome,
-    reconcile_canonical_chain,
+    reconcile_canonical_chain, reconcile_canonical_chain_with_progress,
 };
 pub use register::{
     BeginRegistrationError, CanonicalCommitMissing, CarrierPreparationError, CommitTransitionError,
@@ -52,8 +52,8 @@ pub use register::{
     PreparedCarrier, PreparedCommit, PreparedReveal, RegistrationBondMaterialSource,
     RegistrationOwner, RegistrationStage, abandon_expired_registration, abandon_registration,
     begin_registration, canonical_commit_height, complete_registration, observe_canonical_commit,
-    prepare_reveal, record_commit_broadcast, registration_matches_active_record,
-    registration_stage,
+    prepare_reveal, reconcile_canonical_commit_cache, record_commit_broadcast,
+    registration_matches_active_record, registration_stage,
 };
 pub use selection::{FreshnessEligibility, SelectedBondNote, select_bond_note};
 pub use source::{

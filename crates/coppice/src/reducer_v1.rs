@@ -367,6 +367,22 @@ impl V1Reducer {
                 return Err(SnapshotError::NonCanonicalHistory);
             }
         }
+        // A checkpoint embedded in a later retained snapshot must agree with
+        // the authenticated tip checkpoint from the retained snapshot at that
+        // height. Tip state roots alone do not bind older checkpoint entries.
+        for snapshot in history.values() {
+            for (height, checkpoint) in &snapshot.ironwood_checkpoints {
+                if let Some(historical) = history.get(height) {
+                    let authenticated = historical
+                        .ironwood_checkpoints
+                        .get(height)
+                        .ok_or(SnapshotError::InvalidCheckpoint)?;
+                    if checkpoint != authenticated {
+                        return Err(SnapshotError::InvalidCheckpoint);
+                    }
+                }
+            }
+        }
         let current = history
             .last_key_value()
             .map(|(_, snapshot)| snapshot.clone())
@@ -1945,6 +1961,13 @@ mod tests {
         assert!(matches!(
             V1Reducer::load_snapshot(deployment(), &serde_json::to_vec(&value).unwrap()),
             Err(SnapshotError::StateRootMismatch)
+        ));
+
+        let mut value: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        value["snapshots"][1]["ironwood_checkpoints"][0]["root"][0] = serde_json::Value::from(1);
+        assert!(matches!(
+            V1Reducer::load_snapshot(deployment(), &serde_json::to_vec(&value).unwrap()),
+            Err(SnapshotError::InvalidCheckpoint)
         ));
     }
 }

@@ -72,6 +72,7 @@ pub enum ReconcileError<CanonicalError: Debug, FullTxError: Debug> {
         height: u32,
         error: CompactBlockApplyError<FullTxError>,
     },
+    ProgressPersistenceFailed,
     ArithmeticOverflow,
 }
 
@@ -150,6 +151,31 @@ where
     C: CanonicalBlockSource,
     F: FullTransactionSource,
 {
+    reconcile_canonical_chain_with_progress(
+        params,
+        reducer,
+        canonical_source,
+        full_tx_source,
+        |_| true,
+    )
+}
+
+/// Reconciles while invoking `persist_progress` after a successful rewind and
+/// after each successfully applied canonical block. Returning `false` stops
+/// immediately at that durable boundary; the reducer remains at exactly the
+/// state presented to the callback.
+pub fn reconcile_canonical_chain_with_progress<P, C, F>(
+    params: &P,
+    reducer: &mut V1Reducer,
+    canonical_source: &mut C,
+    full_tx_source: &mut F,
+    mut persist_progress: impl FnMut(&V1Reducer) -> bool,
+) -> Result<ReconcileOutcome, ReconcileError<C::Error, F::Error>>
+where
+    P: Parameters,
+    C: CanonicalBlockSource,
+    F: FullTransactionSource,
+{
     let original_tip = reducer.tip();
     let observed_host_tip = canonical_source
         .canonical_tip()
@@ -212,6 +238,9 @@ where
         reducer
             .rewind_to(common.height)
             .map_err(ReconcileError::Rewind)?;
+        if !persist_progress(reducer) {
+            return Err(ReconcileError::ProgressPersistenceFailed);
+        }
         (ReconcileKind::Reorg, Some(common), rewound)
     };
 
@@ -241,6 +270,9 @@ where
             }
             apply_compact_block(params, reducer, &block, full_tx_source)
                 .map_err(|error| ReconcileError::CompactBlockApply { height, error })?;
+            if !persist_progress(reducer) {
+                return Err(ReconcileError::ProgressPersistenceFailed);
+            }
             blocks_applied = blocks_applied
                 .checked_add(1)
                 .ok_or(ReconcileError::ArithmeticOverflow)?;
@@ -578,6 +610,30 @@ mod tests {
         assert_eq!(outcome.kind, ReconcileKind::Forward);
         assert_eq!(outcome.blocks_applied, 1);
         assert_eq!(reducer.tip().height, 4);
+    }
+
+    #[test]
+    fn progress_callback_exposes_each_durable_block_boundary_and_can_stop() {
+        let history = chain(&[(1, 1, 11), (2, 2, 12), (3, 3, 13)]);
+        let mut reducer = new_reducer();
+        let mut source = Source::new(history, tip(3, 3));
+        let mut full = FullSource::default();
+        let mut persisted = vec![];
+        let error = reconcile_canonical_chain_with_progress(
+            &params(),
+            &mut reducer,
+            &mut source,
+            &mut full,
+            |progress| {
+                persisted.push(progress.tip().height);
+                progress.tip().height < 2
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(error, ReconcileError::ProgressPersistenceFailed));
+        assert_eq!(persisted, vec![1, 2]);
+        assert_eq!(reducer.tip().height, 2);
+        assert!(!source.block_calls.contains(&3));
     }
 
     #[test]

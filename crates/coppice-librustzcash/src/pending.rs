@@ -150,6 +150,10 @@ impl PendingRegistration {
     pub(crate) fn observe_canonical_commit_height(&mut self, height: u32) {
         self.commit_height = Some(height);
     }
+
+    pub(crate) fn clear_canonical_commit_height(&mut self) {
+        self.commit_height = None;
+    }
 }
 
 /// Errors for the wallet-local pending-registration collection.
@@ -343,6 +347,17 @@ impl PendingRegistrationCollection {
             .get_mut(commitment)
             .ok_or(PendingRegistrationCollectionError::UnknownCommitment)?
             .observe_canonical_commit_height(height);
+        Ok(())
+    }
+
+    pub(crate) fn clear_canonical_commit_height(
+        &mut self,
+        commitment: &[u8; 32],
+    ) -> Result<(), PendingRegistrationCollectionError> {
+        self.by_commitment
+            .get_mut(commitment)
+            .ok_or(PendingRegistrationCollectionError::UnknownCommitment)?
+            .clear_canonical_commit_height();
         Ok(())
     }
 
