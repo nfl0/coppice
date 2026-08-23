@@ -2291,7 +2291,10 @@ mod tests {
         let checkpoints = stored["current"]["ironwood_checkpoints"]
             .as_array_mut()
             .unwrap();
-        assert_eq!(checkpoints[0]["height"].as_u64(), Some(u64::from(oldest_checkpoint)));
+        assert_eq!(
+            checkpoints[0]["height"].as_u64(),
+            Some(u64::from(oldest_checkpoint))
+        );
         checkpoints[0]["root"][0] = serde_json::Value::from(1);
         assert!(matches!(
             V1Reducer::load_snapshot(deployment(), &serde_json::to_vec(&stored).unwrap()),

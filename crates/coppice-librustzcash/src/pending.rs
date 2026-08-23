@@ -4,8 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use coppice::{
     config::{DeploymentEncodingError, DeploymentParameters, DeploymentValidationError},
-    crypto,
-    envelope,
+    crypto, envelope,
     owner::parse_v1_owner_key,
     pending::PendingTimingError,
     registration::registration_commitment,
@@ -77,6 +76,9 @@ pub enum PendingRegistrationTransitionError {
 
 impl PendingRegistration {
     /// Constructs a validated wallet-local registration intent.
+    // Account ownership and each commitment fact remain explicit so callers
+    // cannot accidentally persist an intent under a different wallet account.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         deployment: &DeploymentParameters,
         account_id: WalletAccountId,
@@ -269,10 +271,7 @@ impl PendingRegistrationCollection {
         self.by_commitment.is_empty()
     }
 
-    pub fn pending_bond_tags_for_account(
-        &self,
-        account_id: WalletAccountId,
-    ) -> BTreeSet<[u8; 32]> {
+    pub fn pending_bond_tags_for_account(&self, account_id: WalletAccountId) -> BTreeSet<[u8; 32]> {
         self.by_commitment
             .values()
             .filter(|pending| pending.account_id() == account_id)
@@ -501,18 +500,16 @@ mod tests {
         .unwrap()
     }
 
-    fn pending_for(account_id: WalletAccountId, name: &str, bond_tag: [u8; 32]) -> PendingRegistration {
+    fn pending_for(
+        account_id: WalletAccountId,
+        name: &str,
+        bond_tag: [u8; 32],
+    ) -> PendingRegistration {
         let deployment = deployment();
         let secret = [name.as_bytes()[0]; 32];
-        let commitment = registration_commitment(
-            &deployment,
-            name,
-            owner_pk(),
-            bond_tag,
-            ADDRESS,
-            secret,
-        )
-        .unwrap();
+        let commitment =
+            registration_commitment(&deployment, name, owner_pk(), bond_tag, ADDRESS, secret)
+                .unwrap();
         PendingRegistration::new(
             &deployment,
             account_id,
@@ -661,11 +658,15 @@ mod tests {
         assert_eq!(restored.get(&commitment_a).unwrap().account_id(), account_a);
         assert_eq!(restored.get(&commitment_b).unwrap().account_id(), account_b);
         assert_eq!(
-            restored.commitments_for_account(account_a).collect::<Vec<_>>(),
+            restored
+                .commitments_for_account(account_a)
+                .collect::<Vec<_>>(),
             vec![commitment_a]
         );
         assert_eq!(
-            restored.commitments_for_account(account_b).collect::<Vec<_>>(),
+            restored
+                .commitments_for_account(account_b)
+                .collect::<Vec<_>>(),
             vec![commitment_b]
         );
         assert_eq!(

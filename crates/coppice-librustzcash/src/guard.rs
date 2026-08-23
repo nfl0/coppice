@@ -117,6 +117,9 @@ pub enum SpendGuardError<HostError, BackendError: Debug> {
 /// The callback receives that same reconciled mutable backend, allowing one
 /// concrete wallet object to continue directly into proposal construction.
 #[allow(clippy::type_complexity)]
+// The explicit account/capability/backend arguments are security boundaries;
+// grouping them would make it easier to compose facts from different accounts.
+#[allow(clippy::too_many_arguments)]
 pub fn with_coppice_spend_guard<Host, Backend, Proposal>(
     mode: CoppiceProtectionMode,
     host_tip_source: &Host,

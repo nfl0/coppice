@@ -432,14 +432,10 @@ where
         capability,
         lock_backend,
     )
-    .map_err(
-        |error| match error {
-            ReconciliationError::MissingPendingBond { .. } => {
-                PrepareRevealError::MissingPendingBond
-            }
-            other => PrepareRevealError::Reconciliation(other),
-        },
-    )?;
+    .map_err(|error| match error {
+        ReconciliationError::MissingPendingBond { .. } => PrepareRevealError::MissingPendingBond,
+        other => PrepareRevealError::Reconciliation(other),
+    })?;
     let notes = lock_backend
         .owned_unspent_ironwood_notes()
         .map_err(PrepareRevealError::Inventory)?;
