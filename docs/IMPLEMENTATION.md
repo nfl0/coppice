@@ -657,6 +657,10 @@ Historical replay holds only the currently validated CompactBlock, not the full
 catch-up range. A pass targets the canonical tip observed at its start. Normal
 extension beyond that tip does not invalidate success when the observed tip is
 still canonical; a later invocation catches up the newly arrived suffix.
+After wallet scanning, the concrete host MUST freeze that wallet-selected
+`(height, block_hash)` and supply it as reconciliation authority. A remote
+lightwalletd/Zaino server remains untrusted block/full-transaction transport;
+its newer tip must not replace or extend the frozen target during the pass.
 
 The Orchard/Ironwood builder may randomize Action positions. Wallet carrier
 construction MUST NOT rely on output insertion order to preserve frame order.

@@ -44,8 +44,8 @@ pub use pending::{
     pending_commit_expired,
 };
 pub use reconcile::{
-    CanonicalBlockSource, CanonicalTip, ReconcileError, ReconcileKind, ReconcileOutcome,
-    reconcile_canonical_chain, reconcile_canonical_chain_with_progress,
+    CanonicalBlockSource, CanonicalTip, FrozenCanonicalBlockSource, ReconcileError, ReconcileKind,
+    ReconcileOutcome, reconcile_canonical_chain, reconcile_canonical_chain_with_progress,
 };
 pub use register::{
     BeginRegistrationError, CanonicalCommitMissing, CarrierPreparationError, CommitTransitionError,

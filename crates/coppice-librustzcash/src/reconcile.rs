@@ -35,6 +35,42 @@ pub trait CanonicalBlockSource {
     fn compact_block(&mut self, height: u32) -> Result<Option<CompactBlock>, Self::Error>;
 }
 
+/// Freezes canonical authority to a host-selected tip while retaining an
+/// untrusted source only as block transport.
+///
+/// This prevents a transport server's advancing tip from changing the target
+/// of a reconciliation pass after the host wallet has completed scanning.
+pub struct FrozenCanonicalBlockSource<S> {
+    source: S,
+    tip: CanonicalTip,
+}
+
+impl<S> FrozenCanonicalBlockSource<S> {
+    pub const fn new(source: S, tip: CanonicalTip) -> Self {
+        Self { source, tip }
+    }
+
+    pub fn source(&self) -> &S {
+        &self.source
+    }
+
+    pub fn into_source(self) -> S {
+        self.source
+    }
+}
+
+impl<S: CanonicalBlockSource> CanonicalBlockSource for FrozenCanonicalBlockSource<S> {
+    type Error = S::Error;
+
+    fn canonical_tip(&mut self) -> Result<CanonicalTip, Self::Error> {
+        Ok(self.tip)
+    }
+
+    fn compact_block(&mut self, height: u32) -> Result<Option<CompactBlock>, Self::Error> {
+        self.source.compact_block(height)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReconcileKind {
     AlreadyCurrent,
@@ -814,6 +850,29 @@ mod tests {
         assert_eq!(outcome.observed_host_tip, tip(1, 1));
         assert_eq!(reducer.tip().height, 1);
         assert!(!source.block_calls.contains(&2));
+    }
+
+    #[test]
+    fn frozen_host_tip_never_chases_an_advancing_transport() {
+        let history = chain(&[(1, 1, 131), (2, 2, 132), (3, 3, 133), (4, 4, 134)]);
+        let mut reducer = new_reducer();
+        let mut transport = Source::new(history.clone(), tip(4, 4));
+        transport.later_tip = Some(tip(5, 5));
+        let mut source = FrozenCanonicalBlockSource::new(transport, tip(3, 3));
+        let mut full = FullSource::default();
+        let outcome =
+            reconcile_canonical_chain(&params(), &mut reducer, &mut source, &mut full).unwrap();
+        assert_eq!(outcome.observed_host_tip, tip(3, 3));
+        assert_eq!(reducer.tip().height, 3);
+        assert!(!source.source().block_calls.contains(&4));
+        assert_eq!(source.source().tip_calls, 0);
+
+        let transport = Source::new(history, tip(4, 4));
+        let mut source = FrozenCanonicalBlockSource::new(transport, tip(4, 4));
+        let outcome =
+            reconcile_canonical_chain(&params(), &mut reducer, &mut source, &mut full).unwrap();
+        assert_eq!(outcome.blocks_applied, 1);
+        assert_eq!(reducer.tip().height, 4);
     }
 
     #[test]
