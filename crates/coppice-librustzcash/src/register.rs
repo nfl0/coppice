@@ -176,9 +176,7 @@ where
     deployment
         .validate()
         .map_err(BeginRegistrationError::InvalidDeployment)?;
-    if !envelope::valid_name(name) {
-        return Err(BeginRegistrationError::InvalidName);
-    }
+    let name = envelope::normalize_name(name).map_err(|_| BeginRegistrationError::InvalidName)?;
     let address = canonical_v1_address(canonical_address, deployment)
         .map_err(BeginRegistrationError::InvalidAddress)?;
     if address != canonical_address {
@@ -213,7 +211,7 @@ where
             &derive_v1_owner_verification_key(
                 *spending_key,
                 reducer.deployment_id(),
-                name_id(name),
+                name_id(&name),
                 selected_bond.bond_tag,
             )
             .map_err(BeginRegistrationError::OwnerDerivation)?,
@@ -223,7 +221,7 @@ where
     rng.fill_bytes(&mut secret);
     let commitment = registration_commitment(
         deployment,
-        name,
+        &name,
         owner_pk,
         selected_bond.bond_tag,
         &address,
@@ -233,7 +231,7 @@ where
     let pending = PendingRegistration::new(
         deployment,
         account_id,
-        name.to_owned(),
+        name,
         address,
         owner_pk,
         selected_bond.bond_tag,
@@ -885,7 +883,7 @@ mod tests {
             account_id(),
             IronwoodViewingCapability::FullViewing,
             &mut backend,
-            "alice",
+            "alice.zec",
             ADDRESS,
             RegistrationOwner::External(owner()),
             ChaCha20Rng::from_seed([3; 32]),
@@ -899,6 +897,7 @@ mod tests {
                 .contains_key(&prepared.selected_bond.output_id)
         );
         let local = pending.get(&prepared.commitment).unwrap();
+        assert_eq!(local.name(), "alice");
         assert_eq!(registration_stage(local), RegistrationStage::Prepared);
         assert_eq!(
             registration_commitment(

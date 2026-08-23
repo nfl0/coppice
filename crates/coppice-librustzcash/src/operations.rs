@@ -139,13 +139,11 @@ pub fn prepare_update<Host: HostCanonicalTipSource>(
     authority: OwnerAuthority<'_>,
 ) -> Result<PreparedOwnerOperation, OwnerOperationError<Host::Error>> {
     require_exact_canonical_tip(host, reducer).map_err(OwnerOperationError::Tip)?;
-    if !envelope::valid_name(name) {
-        return Err(OwnerOperationError::InvalidName);
-    }
+    let name = envelope::normalize_name(name).map_err(|_| OwnerOperationError::InvalidName)?;
     let previous = reducer
         .state()
         .names
-        .get(name)
+        .get(&name)
         .ok_or(OwnerOperationError::NameNotFound)?;
     if previous.status != NameStatus::Active {
         return Err(OwnerOperationError::NameNotActive);
@@ -158,10 +156,10 @@ pub fn prepare_update<Host: HostCanonicalTipSource>(
         .ok_or(OwnerOperationError::SequenceOverflow)?;
     sign_and_frame(
         reducer,
-        name,
+        &name,
         previous,
         Operation::Update {
-            name: name.to_owned(),
+            name: name.clone(),
             sequence,
             address,
             signature: vec![],
@@ -177,13 +175,11 @@ pub fn prepare_release<Host: HostCanonicalTipSource>(
     authority: OwnerAuthority<'_>,
 ) -> Result<PreparedOwnerOperation, OwnerOperationError<Host::Error>> {
     require_exact_canonical_tip(host, reducer).map_err(OwnerOperationError::Tip)?;
-    if !envelope::valid_name(name) {
-        return Err(OwnerOperationError::InvalidName);
-    }
+    let name = envelope::normalize_name(name).map_err(|_| OwnerOperationError::InvalidName)?;
     let previous = reducer
         .state()
         .names
-        .get(name)
+        .get(&name)
         .ok_or(OwnerOperationError::NameNotFound)?;
     if previous.status != NameStatus::Active {
         return Err(OwnerOperationError::NameNotActive);
@@ -194,10 +190,10 @@ pub fn prepare_release<Host: HostCanonicalTipSource>(
         .ok_or(OwnerOperationError::SequenceOverflow)?;
     sign_and_frame(
         reducer,
-        name,
+        &name,
         previous,
         Operation::Release {
-            name: name.to_owned(),
+            name: name.clone(),
             sequence,
             signature: vec![],
         },
@@ -244,15 +240,13 @@ pub fn resolve_for_payment<Host: HostCanonicalTipSource>(
     name: &str,
 ) -> Result<VerifiedDestination, PaymentResolutionError<Host::Error>> {
     require_exact_canonical_tip(host, reducer).map_err(PaymentResolutionError::Tip)?;
-    if !envelope::valid_name(name) {
-        return Err(PaymentResolutionError::InvalidName);
-    }
+    let name = envelope::normalize_name(name).map_err(|_| PaymentResolutionError::InvalidName)?;
     let record = reducer
         .state()
         .names
-        .get(name)
+        .get(&name)
         .ok_or(PaymentResolutionError::NameNotFound)?;
-    verified_destination(reducer, name, record)
+    verified_destination(reducer, &name, record)
 }
 
 /// Exact note and owner-scoped policy for an explicit Break Bond transaction.
@@ -297,13 +291,11 @@ where
     Backend: CoppiceLockBackend,
 {
     require_exact_canonical_tip(host, reducer).map_err(BreakBondError::Tip)?;
-    if !envelope::valid_name(name) {
-        return Err(BreakBondError::InvalidName);
-    }
+    let name = envelope::normalize_name(name).map_err(|_| BreakBondError::InvalidName)?;
     let record = reducer
         .state()
         .names
-        .get(name)
+        .get(&name)
         .ok_or(BreakBondError::NameNotFound)?;
     if record.status != NameStatus::Active {
         return Err(BreakBondError::NameNotActive);
@@ -317,7 +309,7 @@ where
     match matching.as_slice() {
         [] => Err(BreakBondError::MissingBondNote),
         [bond] => Ok(BreakBondPlan {
-            name: name.to_owned(),
+            name,
             output_id: bond.output_id,
             bond_tag: bond.bond_tag,
         }),

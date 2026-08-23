@@ -35,6 +35,13 @@ pub enum Error {
     Trailing,
 }
 
+/// The wallet/frontend presentation suffix for a canonical Coppice name.
+///
+/// This is deliberately not part of the protocol name grammar or any
+/// serialized Coppice value. Callers that accept user-facing names should
+/// strip it with `normalize_name` before entering protocol state.
+pub const PRESENTATION_SUFFIX: &str = ".zec";
+
 pub fn valid_name(n: &str) -> bool {
     let b = n.as_bytes();
     !b.is_empty()
@@ -44,11 +51,45 @@ pub fn valid_name(n: &str) -> bool {
         && b.iter()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-')
 }
+
+/// Removes the optional presentation suffix without otherwise changing the
+/// supplied bytes.
+pub fn strip_presentation_suffix(name: &str) -> &str {
+    name.strip_suffix(PRESENTATION_SUFFIX).unwrap_or(name)
+}
+
+/// Converts a wallet/frontend name into the canonical bare protocol label.
+///
+/// Coppice v1 performs no case folding or Unicode normalization. The only
+/// presentation conversion is removal of one terminal `.zec` suffix before
+/// applying the existing canonical-name rules.
+pub fn normalize_name(name: &str) -> Result<String, Error> {
+    let canonical = strip_presentation_suffix(name);
+    if valid_name(canonical) {
+        Ok(canonical.to_owned())
+    } else {
+        Err(Error::Name)
+    }
+}
+
+/// Formats a canonical bare name for wallet/frontend presentation.
+pub fn display_name(canonical_name: &str) -> String {
+    format!("{canonical_name}{PRESENTATION_SUFFIX}")
+}
+
 fn put_len(out: &mut Vec<u8>, n: usize) -> Result<(), Error> {
     let n = u16::try_from(n).map_err(|_| Error::Length)?;
     out.extend_from_slice(&n.to_be_bytes());
     Ok(())
 }
+
+fn put_name(out: &mut Vec<u8>, name: &str) -> Result<(), Error> {
+    let canonical = normalize_name(name)?;
+    put_len(out, canonical.len())?;
+    out.extend_from_slice(canonical.as_bytes());
+    Ok(())
+}
+
 fn take<'a>(p: &mut &'a [u8], n: usize) -> Result<&'a [u8], Error> {
     if p.len() < n {
         return Err(Error::Malformed);
@@ -81,17 +122,13 @@ pub fn encode_operation(op: &Operation) -> Result<Vec<u8>, Error> {
             address,
             secret,
         } => {
-            if !valid_name(name) {
-                return Err(Error::Name);
-            }
             if address.len() > constants::MAX_ADDRESS_LEN
                 || bond_proof.len() > constants::MAX_BOND_PROOF_LEN
             {
                 return Err(Error::Length);
             }
             o.push(2);
-            put_len(&mut o, name.len())?;
-            o.extend_from_slice(name.as_bytes());
+            put_name(&mut o, name)?;
             o.extend_from_slice(owner_pk);
             o.extend_from_slice(bond_tag);
             o.extend_from_slice(&bond_anchor_height.to_be_bytes());
@@ -108,15 +145,11 @@ pub fn encode_operation(op: &Operation) -> Result<Vec<u8>, Error> {
             address,
             signature,
         } => {
-            if !valid_name(name) {
-                return Err(Error::Name);
-            }
             if address.len() > constants::MAX_ADDRESS_LEN {
                 return Err(Error::Length);
             }
             o.push(3);
-            put_len(&mut o, name.len())?;
-            o.extend_from_slice(name.as_bytes());
+            put_name(&mut o, name)?;
             o.extend_from_slice(&sequence.to_be_bytes());
             put_len(&mut o, address.len())?;
             o.extend_from_slice(address);
@@ -130,15 +163,11 @@ pub fn encode_operation(op: &Operation) -> Result<Vec<u8>, Error> {
             sequence,
             signature,
         } => {
-            if !valid_name(name) {
-                return Err(Error::Name);
-            }
             if signature.len() != 64 {
                 return Err(Error::Malformed);
             }
             o.push(4);
-            put_len(&mut o, name.len())?;
-            o.extend_from_slice(name.as_bytes());
+            put_name(&mut o, name)?;
             o.extend_from_slice(&sequence.to_be_bytes());
             o.extend_from_slice(signature)
         }
@@ -234,7 +263,42 @@ mod tests {
     fn bad_name() {
         assert!(!valid_name("-a"));
         assert!(!valid_name("A"));
+        assert!(!valid_name("alice.zec"));
         assert!(valid_name("a-9"));
+    }
+
+    #[test]
+    fn presentation_suffix_is_removed_before_protocol_validation_and_encoding() {
+        assert_eq!(normalize_name("alice").unwrap(), "alice");
+        assert_eq!(normalize_name("alice.zec").unwrap(), "alice");
+        assert_eq!(display_name("alice"), "alice.zec");
+        assert!(normalize_name("alice.zec.zec").is_err());
+        assert!(normalize_name("ALICE.zec").is_err());
+        assert!(normalize_name(".zec").is_err());
+
+        let maximum = "a".repeat(constants::MAX_NAME_LEN);
+        assert_eq!(normalize_name(&format!("{maximum}.zec")).unwrap(), maximum);
+
+        let bare = Operation::Update {
+            name: "alice".to_owned(),
+            sequence: 1,
+            address: b"UA".to_vec(),
+            signature: vec![0; 64],
+        };
+        let presented = Operation::Update {
+            name: "alice.zec".to_owned(),
+            sequence: 1,
+            address: b"UA".to_vec(),
+            signature: vec![0; 64],
+        };
+        assert_eq!(
+            encode_operation(&presented).unwrap(),
+            encode_operation(&bare).unwrap()
+        );
+        assert_eq!(
+            decode_operation(&encode_operation(&presented).unwrap()).unwrap(),
+            bare
+        );
     }
     #[test]
     fn operation_decoder_is_strict() {

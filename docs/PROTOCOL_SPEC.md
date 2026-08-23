@@ -324,6 +324,14 @@ Uppercase is invalid.
 
 The canonical string is the exact accepted byte sequence.
 
+The standardized `.zec` suffix is presentation-only. Wallets and frontends
+SHOULD display the canonical label `alice` as `alice.zec` and MAY accept either
+form from users. They MUST remove one terminal `.zec` before applying the
+canonical-name rules. The suffix MUST NOT appear in commitments, signatures,
+operation bytes, NameTree keys, hashes, or stored protocol/wallet records.
+Consequently, `alice` and `alice.zec` always identify the same canonical name;
+they MUST NOT create distinct Coppice state.
+
 Name ID:
 
 ```text

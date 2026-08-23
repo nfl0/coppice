@@ -51,6 +51,9 @@ impl CoppiceState {
         pending: pending::PendingCommitments,
         recent_spent: recent_spent::RecentSpent,
     ) -> Result<Self, StateMutationError> {
+        if names.keys().any(|name| !crate::envelope::valid_name(name)) {
+            return Err(StateMutationError::InvariantInconsistency);
+        }
         let active_bond_index = Self::rebuild_active_bond_index(&names)?;
         Ok(Self {
             names,
@@ -103,6 +106,9 @@ impl CoppiceState {
         &mut self,
         reveal: PrevalidatedReveal,
     ) -> Result<(), StateMutationError> {
+        if !crate::envelope::valid_name(&reveal.name) {
+            return Err(StateMutationError::InvariantInconsistency);
+        }
         self.verify_active_bond_index()?;
         if !self.pending.contains_key(&reveal.commitment) {
             return Err(StateMutationError::UnknownCommitment);
@@ -389,6 +395,38 @@ mod tests {
             ),
             Err(StateMutationError::DuplicateActiveBondTag)
         );
+    }
+
+    #[test]
+    fn presentation_suffix_can_never_enter_authoritative_name_state() {
+        let mut names = BTreeMap::new();
+        names.insert("alice.zec".to_owned(), active([1; 32], 0));
+        assert_eq!(
+            CoppiceState::from_authoritative_parts(
+                names,
+                pending::PendingCommitments::new(),
+                recent_spent::RecentSpent::new(),
+            ),
+            Err(StateMutationError::InvariantInconsistency)
+        );
+
+        let mut state = CoppiceState::default();
+        state
+            .apply_prevalidated_commit(
+                [3; 32],
+                pending::ChainPosition {
+                    block_height: 100,
+                    tx_index: 0,
+                },
+            )
+            .unwrap();
+        let mut presented = reveal([3; 32], [4; 32]);
+        presented.name = "alice.zec".to_owned();
+        assert_eq!(
+            state.apply_prevalidated_reveal(presented),
+            Err(StateMutationError::InvariantInconsistency)
+        );
+        assert!(state.names.is_empty());
     }
 
     #[test]

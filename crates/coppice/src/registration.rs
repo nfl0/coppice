@@ -177,6 +177,18 @@ mod tests {
                     .unwrap()
             )
         );
+        assert_eq!(
+            commitment,
+            registration_commitment(
+                &deployment,
+                "alice.zec",
+                *owner_pk,
+                *bond_tag,
+                address,
+                *secret,
+            )
+            .unwrap()
+        );
 
         assert_eq!(
             encode_operation(&Operation::Commit { commitment }).unwrap(),

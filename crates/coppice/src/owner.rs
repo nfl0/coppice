@@ -19,7 +19,8 @@ pub fn owner_key_bytes(key: &OwnerVerificationKey) -> [u8; 32] {
     key.into()
 }
 pub fn name_id(name: &str) -> [u8; 32] {
-    crypto::hash("CoppiceNameV1", name.as_bytes()).expect("fixed v1 name hash label")
+    let canonical = crate::envelope::strip_presentation_suffix(name);
+    crypto::hash("CoppiceNameV1", canonical.as_bytes()).expect("fixed v1 name hash label")
 }
 
 #[cfg(test)]
@@ -56,5 +57,10 @@ mod name_vectors {
         let valid = owner_key_bytes(&(&signing_key).into());
         assert_eq!(owner_key_bytes(&parse_v1_owner_key(valid).unwrap()), valid);
         assert_eq!(parse_v1_owner_key([0xff; 32]), Err(OwnerKeyError));
+    }
+
+    #[test]
+    fn presentation_suffix_does_not_change_name_id() {
+        assert_eq!(name_id("alice"), name_id("alice.zec"));
     }
 }

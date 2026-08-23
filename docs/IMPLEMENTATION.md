@@ -153,6 +153,12 @@ The wallet layer is responsible for:
 - persistence integration;
 - user-facing safety behavior.
 
+User-facing name inputs belong at this wallet boundary. Accept a bare label or
+one terminal `.zec` presentation suffix, normalize to the bare label before
+lookup, signing, commitment construction, or pending-record persistence, and
+format the bare label with `.zec` only when presenting it. The core reducer and
+wire decoder must continue to admit and store bare canonical labels only.
+
 ## I-001 — Wallet-owned bond reconstruction
 
 At a canonical tip:

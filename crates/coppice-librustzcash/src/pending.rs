@@ -92,9 +92,8 @@ impl PendingRegistration {
         deployment
             .validate()
             .map_err(PendingRegistrationValidationError::InvalidDeployment)?;
-        if !envelope::valid_name(&name) {
-            return Err(PendingRegistrationValidationError::InvalidName);
-        }
+        let name = envelope::normalize_name(&name)
+            .map_err(|_| PendingRegistrationValidationError::InvalidName)?;
         parse_v1_owner_key(owner_pk)
             .map_err(|_| PendingRegistrationValidationError::InvalidOwnerKey)?;
 
@@ -547,6 +546,40 @@ mod tests {
             ),
             Err(PendingRegistrationValidationError::CommitmentMismatch)
         ));
+    }
+
+    #[test]
+    fn constructor_canonicalizes_presentation_suffix_before_storage() {
+        let deployment = deployment();
+        let name = "alice.zec";
+        let secret = [0xa5; 32];
+        let commitment =
+            registration_commitment(&deployment, name, owner_pk(), [0x42; 32], ADDRESS, secret)
+                .unwrap();
+        let pending = PendingRegistration::new(
+            &deployment,
+            account_id(),
+            name.to_owned(),
+            ADDRESS.to_vec(),
+            owner_pk(),
+            [0x42; 32],
+            secret,
+            commitment,
+        )
+        .unwrap();
+        assert_eq!(pending.name(), "alice");
+        assert_eq!(
+            pending.commitment(),
+            registration_commitment(
+                &deployment,
+                "alice",
+                owner_pk(),
+                [0x42; 32],
+                ADDRESS,
+                secret,
+            )
+            .unwrap()
+        );
     }
 
     #[test]

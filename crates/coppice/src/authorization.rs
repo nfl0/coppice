@@ -239,6 +239,20 @@ mod tests {
     }
 
     #[test]
+    fn presentation_suffix_does_not_change_owner_authorization_bytes() {
+        let deployment_id = fixed32(DEPLOYMENT_ID);
+        let previous_hash = previous_record_hash();
+        assert_eq!(
+            update_authorization_message(deployment_id, "alice", previous_hash, 0, 1, b"UA_B",),
+            update_authorization_message(deployment_id, "alice.zec", previous_hash, 0, 1, b"UA_B",)
+        );
+        assert_eq!(
+            release_authorization_message(deployment_id, "alice", previous_hash, 0, 1),
+            release_authorization_message(deployment_id, "alice.zec", previous_hash, 0, 1)
+        );
+    }
+
+    #[test]
     fn v1_update_signature_round_trip() {
         let deployment_id = fixed32(DEPLOYMENT_ID);
         let key = owner::OwnerSigningKey::try_from([1; 32]).unwrap();

@@ -946,6 +946,10 @@ mod tests {
         expected_preimage.extend_from_slice(address);
         assert_eq!(preimage, expected_preimage);
         assert_eq!(
+            v1_context_binding(name, address),
+            v1_context_binding("bonded.zec", address)
+        );
+        assert_eq!(
             v1_registration_digest(name, address).unwrap(),
             crypto::hash(V1_REGISTRATION_DOMAIN, &expected_preimage).unwrap()
         );
