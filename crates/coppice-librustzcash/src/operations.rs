@@ -329,7 +329,7 @@ where
 mod tests {
     use super::*;
     use coppice::{
-        config::{DeploymentParameters, REGTEST_V0},
+        config::{DeploymentParameters, REGTEST},
         owner_kdf::derive_v1_owner_signing_key,
         reducer::{ActivationCheckpoint, IronwoodFrontier},
     };
@@ -341,14 +341,14 @@ mod tests {
     fn reducer() -> Reducer {
         Reducer::new(
             DeploymentParameters {
-                network_id: REGTEST_V0.network_id.to_vec(),
+                network_id: REGTEST.network_id.to_vec(),
                 address_network: NetworkType::Regtest,
                 activation_height: 100,
-                minimum_bond_value: REGTEST_V0.minimum_bond_value,
+                minimum_bond_value: REGTEST.minimum_bond_value,
                 commit_ttl_blocks: 20,
                 reuse_delay_blocks: 10,
                 bond_note_max_age_blocks: 100,
-                rendezvous: REGTEST_V0.rendezvous,
+                rendezvous: REGTEST.rendezvous,
             },
             ActivationCheckpoint {
                 height: 99,

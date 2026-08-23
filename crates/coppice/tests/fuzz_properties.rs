@@ -1,6 +1,6 @@
 use coppice::{
     carrier_v1::reconstruct_frames_v1,
-    config::{DeploymentParameters, REGTEST_V0},
+    config::{DeploymentParameters, REGTEST},
     envelope::decode_operation,
     reducer::{
         ActivationCheckpoint, CanonicalBlockInput, CanonicalTxInput, IronwoodFrontier, Reducer,
@@ -35,19 +35,19 @@ fn arbitrary_operation_and_indexed_frame_bytes_are_panic_free() {
 
 fn reducer() -> Reducer {
     let deployment = DeploymentParameters {
-        network_id: REGTEST_V0.network_id.to_vec(),
+        network_id: REGTEST.network_id.to_vec(),
         address_network: zcash_protocol::consensus::NetworkType::Regtest,
-        activation_height: REGTEST_V0.activation_height,
-        minimum_bond_value: REGTEST_V0.minimum_bond_value,
+        activation_height: REGTEST.activation_height,
+        minimum_bond_value: REGTEST.minimum_bond_value,
         commit_ttl_blocks: 20,
         reuse_delay_blocks: 10,
         bond_note_max_age_blocks: 100,
-        rendezvous: REGTEST_V0.rendezvous,
+        rendezvous: REGTEST.rendezvous,
     };
     Reducer::new(
         deployment,
         ActivationCheckpoint {
-            height: REGTEST_V0.activation_height - 1,
+            height: REGTEST.activation_height - 1,
             block_hash: [0x99; 32],
             ironwood_frontier: IronwoodFrontier::empty(),
             ironwood_tree_size: 0,
@@ -98,7 +98,7 @@ fn persisted_delta_reorgs_equal_fresh_replay() {
 
         let rewind_count = 1 + usize::from(seed % 31);
         let common_len = prefix.len() - rewind_count;
-        let common_height = (REGTEST_V0.activation_height - 1) + common_len as u32;
+        let common_height = (REGTEST.activation_height - 1) + common_len as u32;
         local.rewind_to(common_height).unwrap();
 
         let mut fresh = reducer();

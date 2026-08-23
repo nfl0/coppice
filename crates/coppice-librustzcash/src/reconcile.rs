@@ -358,7 +358,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use coppice::{
-        config::{DeploymentParameters, REGTEST_V0, Rendezvous},
+        config::{DeploymentParameters, REGTEST, Rendezvous},
         reducer::{ActivationCheckpoint, IronwoodFrontier},
     };
     use orchard::{
@@ -393,16 +393,16 @@ mod tests {
 
     fn deployment() -> DeploymentParameters {
         DeploymentParameters {
-            network_id: REGTEST_V0.network_id.to_vec(),
+            network_id: REGTEST.network_id.to_vec(),
             address_network: NetworkType::Regtest,
             activation_height: 1,
-            minimum_bond_value: REGTEST_V0.minimum_bond_value,
+            minimum_bond_value: REGTEST.minimum_bond_value,
             commit_ttl_blocks: 20,
             reuse_delay_blocks: 10,
             bond_note_max_age_blocks: 100,
             rendezvous: Rendezvous {
-                orchard_ivk: REGTEST_V0.rendezvous.orchard_ivk,
-                orchard_receiver: REGTEST_V0.rendezvous.orchard_receiver,
+                orchard_ivk: REGTEST.rendezvous.orchard_ivk,
+                orchard_receiver: REGTEST.rendezvous.orchard_receiver,
             },
         }
     }
@@ -454,8 +454,7 @@ mod tests {
 
     fn candidate_action() -> CompactOrchardAction {
         let recipient =
-            orchard::Address::from_raw_address_bytes(&REGTEST_V0.rendezvous.orchard_receiver)
-                .unwrap();
+            orchard::Address::from_raw_address_bytes(&REGTEST.rendezvous.orchard_receiver).unwrap();
         let nf = Nullifier::from_bytes(&[0; 32]).unwrap();
         let rho = Rho::from_bytes(&nf.to_bytes()).unwrap();
         let rseed = (0u8..=u8::MAX)

@@ -421,7 +421,7 @@ where
 mod tests {
     use coppice::{
         config::DeploymentParameters,
-        constants::{MAX_ADDRESS_LEN, MAX_BOND_PROOF_LEN, REGTEST_V0_ACTIVATION_HEIGHT},
+        constants::{MAX_ADDRESS_LEN, MAX_BOND_PROOF_LEN, REGTEST_ACTIVATION_HEIGHT},
         envelope::Operation,
     };
     use std::cell::Cell;
@@ -437,7 +437,7 @@ mod tests {
         DeploymentParameters {
             network_id: hex::decode(input["network_id_hex"].as_str().unwrap()).unwrap(),
             address_network: NetworkType::Regtest,
-            activation_height: REGTEST_V0_ACTIVATION_HEIGHT,
+            activation_height: REGTEST_ACTIVATION_HEIGHT,
             minimum_bond_value: input["minimum_bond_value"].as_u64().unwrap(),
             commit_ttl_blocks: input["commit_ttl_blocks"].as_u64().unwrap() as u32,
             reuse_delay_blocks: input["reuse_delay_blocks"].as_u64().unwrap() as u32,

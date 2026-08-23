@@ -14,8 +14,7 @@
     "expected_pallas_scalar_hex": "901a508ef3ce3434c02d57c2b4087afbd3e4d7505bbcec10ea1e6e7194819b0c",
     "expected_redpallas_verification_key_hex": "4a2130d359513478362bf3c4e7d9c42ec501f6d62424db91d7ee6b66e8bf3da3"
   },
-  "supplemental_redpallas_reference_file": "owner_keys_redpallas_reference.json",
-  "note": "The Codex-returned owner_keys.json only maps a preselected Pallas scalar to a RedPallas SpendAuth verification key. It does not execute P-OWNER-002's keyed-BLAKE2b-512 KDF / FromUniformBytes<64> path, so this v1 KDF vector remains incomplete.",
+  "note": "P-OWNER-002 freezes the complete keyed BLAKE2b-512 / FromUniformBytes<64> owner-key derivation vector.",
   "native_rust_test": "PASS",
   "completion_note": "Completed by native Rust using the repository's pinned dependencies: ff::FromUniformBytes<64> for pallas::Scalar, PrimeField::to_repr(), and RedPallas SpendAuth verification-key derivation."
 }

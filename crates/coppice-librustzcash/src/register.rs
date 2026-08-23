@@ -693,8 +693,8 @@ mod tests {
 
     use coppice::{
         bond::V1BondProver,
-        config::{DeploymentParameters, REGTEST_V0, Rendezvous},
-        constants::REGTEST_V0_ACTIVATION_HEIGHT,
+        config::{DeploymentParameters, REGTEST, Rendezvous},
+        constants::REGTEST_ACTIVATION_HEIGHT,
         owner::{OwnerSigningKey, owner_key_bytes},
         pending::{ChainPosition, PendingCommitments},
         recent_spent::RecentSpent,
@@ -714,16 +714,16 @@ mod tests {
 
     fn deployment() -> DeploymentParameters {
         DeploymentParameters {
-            network_id: REGTEST_V0.network_id.to_vec(),
+            network_id: REGTEST.network_id.to_vec(),
             address_network: NetworkType::Regtest,
-            activation_height: REGTEST_V0_ACTIVATION_HEIGHT,
-            minimum_bond_value: REGTEST_V0.minimum_bond_value,
+            activation_height: REGTEST_ACTIVATION_HEIGHT,
+            minimum_bond_value: REGTEST.minimum_bond_value,
             commit_ttl_blocks: 20,
             reuse_delay_blocks: 10,
             bond_note_max_age_blocks: 100,
             rendezvous: Rendezvous {
-                orchard_ivk: REGTEST_V0.rendezvous.orchard_ivk,
-                orchard_receiver: REGTEST_V0.rendezvous.orchard_receiver,
+                orchard_ivk: REGTEST.rendezvous.orchard_ivk,
+                orchard_receiver: REGTEST.rendezvous.orchard_receiver,
             },
         }
     }

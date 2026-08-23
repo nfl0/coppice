@@ -194,8 +194,8 @@ mod tests {
     use std::collections::BTreeMap;
 
     use coppice::{
-        config::{DeploymentParameters, REGTEST_V0, Rendezvous},
-        constants::REGTEST_V0_ACTIVATION_HEIGHT,
+        config::{DeploymentParameters, REGTEST, Rendezvous},
+        constants::REGTEST_ACTIVATION_HEIGHT,
         reducer::{ActivationCheckpoint, IronwoodFrontier, TransactionOutcome},
     };
     use orchard::{
@@ -230,16 +230,16 @@ mod tests {
 
     fn deployment() -> DeploymentParameters {
         DeploymentParameters {
-            network_id: REGTEST_V0.network_id.to_vec(),
+            network_id: REGTEST.network_id.to_vec(),
             address_network: NetworkType::Regtest,
-            activation_height: REGTEST_V0_ACTIVATION_HEIGHT,
-            minimum_bond_value: REGTEST_V0.minimum_bond_value,
+            activation_height: REGTEST_ACTIVATION_HEIGHT,
+            minimum_bond_value: REGTEST.minimum_bond_value,
             commit_ttl_blocks: 20,
             reuse_delay_blocks: 10,
             bond_note_max_age_blocks: 100,
             rendezvous: Rendezvous {
-                orchard_ivk: REGTEST_V0.rendezvous.orchard_ivk,
-                orchard_receiver: REGTEST_V0.rendezvous.orchard_receiver,
+                orchard_ivk: REGTEST.rendezvous.orchard_ivk,
+                orchard_receiver: REGTEST.rendezvous.orchard_receiver,
             },
         }
     }
@@ -260,8 +260,7 @@ mod tests {
 
     fn real_rendezvous_action() -> CompactOrchardAction {
         let recipient =
-            orchard::Address::from_raw_address_bytes(&REGTEST_V0.rendezvous.orchard_receiver)
-                .unwrap();
+            orchard::Address::from_raw_address_bytes(&REGTEST.rendezvous.orchard_receiver).unwrap();
         let nf = Nullifier::from_bytes(&[0; 32]).unwrap();
         let rho = Rho::from_bytes(&nf.to_bytes()).unwrap();
         let rseed = (0u8..=u8::MAX)
@@ -330,9 +329,9 @@ mod tests {
     #[test]
     fn real_public_rendezvous_detector_distinguishes_a_foreign_compact_action() {
         let hit = CompactAction::try_from(&real_rendezvous_action()).unwrap();
-        assert!(carrier::compact_action_is_bulletin(&hit, REGTEST_V0.rendezvous).unwrap());
+        assert!(carrier::compact_action_is_bulletin(&hit, REGTEST.rendezvous).unwrap());
         let miss = CompactAction::try_from(&noncandidate_action()).unwrap();
-        assert!(!carrier::compact_action_is_bulletin(&miss, REGTEST_V0.rendezvous).unwrap());
+        assert!(!carrier::compact_action_is_bulletin(&miss, REGTEST.rendezvous).unwrap());
     }
 
     #[test]

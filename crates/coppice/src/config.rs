@@ -125,7 +125,7 @@ impl DeploymentParameters {
 
 impl Default for Rendezvous {
     fn default() -> Self {
-        TESTNET_V0.rendezvous
+        TESTNET.rendezvous
     }
 }
 
@@ -139,12 +139,11 @@ pub struct CoppiceConfig {
     pub rendezvous: Rendezvous,
 }
 
-/// Public-testnet parameters. The frozen `COPPICE_POC_V2` identifier does not
-/// decode the superseded direct-REGISTER format.
-pub const TESTNET_V0: CoppiceConfig = CoppiceConfig {
+/// Coppice v1 public Testnet parameters.
+pub const TESTNET: CoppiceConfig = CoppiceConfig {
     protocol_id: constants::PROTOCOL_ID,
-    network_id: constants::NETWORK_ID,
-    activation_height: constants::TESTNET_V0_ACTIVATION_HEIGHT,
+    network_id: constants::TESTNET_NETWORK_ID,
+    activation_height: constants::TESTNET_ACTIVATION_HEIGHT,
     ironwood_activation_height: constants::TESTNET_IRONWOOD_ACTIVATION_HEIGHT,
     minimum_bond_value: constants::MINIMUM_BOND_VALUE,
     rendezvous: Rendezvous {
@@ -153,12 +152,11 @@ pub const TESTNET_V0: CoppiceConfig = CoppiceConfig {
     },
 };
 
-/// Local Z3 regtest parameters. These are not a public network deployment or
-/// proposed production constants.
-pub const REGTEST_V0: CoppiceConfig = CoppiceConfig {
+/// Coppice v1 local Z3 Regtest parameters.
+pub const REGTEST: CoppiceConfig = CoppiceConfig {
     protocol_id: constants::PROTOCOL_ID,
-    network_id: constants::NETWORK_ID,
-    activation_height: constants::REGTEST_V0_ACTIVATION_HEIGHT,
+    network_id: constants::REGTEST_NETWORK_ID,
+    activation_height: constants::REGTEST_ACTIVATION_HEIGHT,
     ironwood_activation_height: constants::REGTEST_IRONWOOD_ACTIVATION_HEIGHT,
     minimum_bond_value: constants::MINIMUM_BOND_VALUE,
     rendezvous: Rendezvous {
@@ -298,14 +296,14 @@ mod tests {
     #[test]
     fn deployment_rejects_checkpoint_horizon_plus_one_overflow() {
         let mut parameters = DeploymentParameters {
-            network_id: REGTEST_V0.network_id.to_vec(),
+            network_id: REGTEST.network_id.to_vec(),
             address_network: NetworkType::Regtest,
             activation_height: 10,
             minimum_bond_value: 100_000_000,
             commit_ttl_blocks: 2,
             reuse_delay_blocks: 10,
             bond_note_max_age_blocks: u32::MAX - 2,
-            rendezvous: REGTEST_V0.rendezvous,
+            rendezvous: REGTEST.rendezvous,
         };
         assert_eq!(
             parameters.validate(),

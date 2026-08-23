@@ -1,15 +1,15 @@
-/// Frozen protocol identifier bytes. The historical spelling is protocol
-/// material and must not be changed by source cleanup.
-pub const PROTOCOL_ID: &[u8] = b"COPPICE_POC_V2";
-/// Frozen network-domain bytes used by the qualified local/test deployment.
-/// The value is protocol material and must not be changed.
-pub const NETWORK_ID: &[u8] = b"poc-local";
-pub const TESTNET_V0_ACTIVATION_HEIGHT: u32 = 4_288_414;
+/// Coppice v1 protocol identity bytes.
+pub const PROTOCOL_ID: &[u8] = b"COPPICE_V1";
+/// Coppice v1 deployment-domain bytes. Regtest and Testnet are deliberately
+/// separate domains so their derived deployment identities cannot collide.
+pub const TESTNET_NETWORK_ID: &[u8] = b"coppice-testnet-v1";
+pub const REGTEST_NETWORK_ID: &[u8] = b"coppice-regtest-v1";
+pub const TESTNET_ACTIVATION_HEIGHT: u32 = 4_288_414;
 pub const TESTNET_IRONWOOD_ACTIVATION_HEIGHT: u32 = 4_134_000;
-/// Local-only Z3 regtest deployment. This is independent from Testnet V0.
-pub const REGTEST_V0_ACTIVATION_HEIGHT: u32 = 10;
+/// Local Z3 regtest deployment activation height.
+pub const REGTEST_ACTIVATION_HEIGHT: u32 = 10;
 pub const REGTEST_IRONWOOD_ACTIVATION_HEIGHT: u32 = 2;
-/// Public incoming capability used by the Testnet V0 deployment.
+/// Public incoming capability used by the Coppice v1 Testnet deployment.
 pub const TESTNET_RENDEZVOUS_IVK: [u8; 64] = [
     60, 110, 200, 22, 89, 123, 10, 179, 86, 236, 86, 74, 9, 74, 180, 100, 154, 119, 14, 20, 91,
     195, 39, 241, 22, 142, 0, 180, 92, 12, 70, 20, 106, 14, 250, 173, 108, 54, 103, 71, 161, 187,
