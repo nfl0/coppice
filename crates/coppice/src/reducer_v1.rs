@@ -285,6 +285,7 @@ pub struct V1Reducer {
     history: BTreeMap<u32, ReducerUndo>,
 }
 
+#[allow(clippy::large_enum_variant)]
 enum CarrierSemantic {
     NoOperation,
     Rejected(ProtocolRejection),
@@ -1403,16 +1404,16 @@ mod tests {
         }
     }
 
-    fn snapshot(
-        reducer: &V1Reducer,
-    ) -> (
+    type TestReducerSnapshot = (
         CoppiceState,
         IronwoodFrontier,
         BTreeMap<u32, AuthenticatedIronwoodCheckpoint>,
         ReplayTip,
         [u8; 32],
         BTreeMap<u32, ReducerUndo>,
-    ) {
+    );
+
+    fn snapshot(reducer: &V1Reducer) -> TestReducerSnapshot {
         (
             reducer.state.clone(),
             reducer.ironwood_tree.clone(),

@@ -379,7 +379,7 @@ pub enum PrepareRevealError<HostError, BackendError: Debug, WitnessError, Materi
     Carrier(CarrierPreparationError),
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn prepare_reveal<Host, Backend, Witness, Material, R>(
     host_tip_source: &Host,
     reducer: &V1Reducer,

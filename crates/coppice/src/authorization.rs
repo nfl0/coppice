@@ -173,7 +173,7 @@ mod tests {
 
     fn valid_record(key: &owner::OwnerSigningKey) -> NameRecord {
         NameRecord {
-            owner_pk: owner::owner_key_bytes(&(&*key).into()),
+            owner_pk: owner::owner_key_bytes(&key.into()),
             bond_tag: [0x42; 32],
             sequence: 0,
             address: b"u1synthetic-conformance-address".to_vec(),

@@ -1828,6 +1828,17 @@ wallet backend MUST reconcile active and pending Coppice output locks at the
 next-block target height; the ordinary locked-input exclusion policy then keeps
 those notes out of fee selection.
 
+The enhanced reference `zcash-devtool` persists `Enabled`, `GuardOnly`, or
+`Off` independently of reducer snapshots. Protected mode with missing or
+unusable state fails closed until sync rebuilds from activation. Successful
+sync reconciles locks for every account, and ordinary send, ordinary proposal,
+and automatic PCZT proposal paths all pass through the same guard. Its
+`wallet coppice` command group composes the library controllers with the normal
+proposal/construction/storage/submission path for REGISTER/REVEAL, UPDATE,
+RELEASE, canonical name payment, completion/abandonment, and explicit Break
+Bond. Manual transparent-only PCZT construction does not select shielded bond
+notes.
+
 
 ## I-905 — Specification readiness
 

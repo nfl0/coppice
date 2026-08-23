@@ -12,6 +12,7 @@ use zcash_primitives::transaction::Transaction;
 use zcash_protocol::consensus::BranchId;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
 pub enum ReplayOutcome {
     NotCandidate,
     CandidateNoOperation,

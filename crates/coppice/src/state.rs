@@ -3,7 +3,7 @@
 use crate::{name_tree_v1, pending, recent_spent, record};
 use std::collections::BTreeMap;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CoppiceState {
     pub names: BTreeMap<String, record::NameRecord>,
     pub pending: pending::PendingCommitments,
@@ -43,17 +43,6 @@ pub enum StateMutationError {
     InvariantInconsistency,
     PendingArithmetic(pending::PendingTimingError),
     RecentSpentArithmetic(recent_spent::RecentSpentArithmeticError),
-}
-
-impl Default for CoppiceState {
-    fn default() -> Self {
-        Self {
-            names: BTreeMap::new(),
-            pending: pending::PendingCommitments::new(),
-            recent_spent: recent_spent::RecentSpent::new(),
-            active_bond_index: BTreeMap::new(),
-        }
-    }
 }
 
 impl CoppiceState {

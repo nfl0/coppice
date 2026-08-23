@@ -23,10 +23,6 @@ use crate::{
 /// material.
 #[derive(Debug)]
 pub enum IronwoodNoteConversionError {
-    InvalidOutputIndex {
-        txid: [u8; 32],
-        output_index: u16,
-    },
     InvalidValue {
         output_id: IronwoodOutputId,
         source: BalanceError,
@@ -165,8 +161,7 @@ where
 
         let mut notes = Vec::with_capacity(received.ironwood().len());
         for received_note in received.ironwood() {
-            let output_id = output_id_from_received(received_note)
-                .map_err(IronwoodNoteSourceError::NoteConversion)?;
+            let output_id = output_id_from_received(received_note);
             let spendable = self
                 .input_source
                 .get_spendable_note(
@@ -210,15 +205,9 @@ where
 
 fn output_id_from_received<NoteRef, NoteT>(
     received: &ReceivedNote<NoteRef, NoteT>,
-) -> Result<IronwoodOutputId, IronwoodNoteConversionError> {
+) -> IronwoodOutputId {
     let txid = *received.txid().as_ref();
-    let output_index = u32::try_from(received.output_index()).map_err(|_| {
-        IronwoodNoteConversionError::InvalidOutputIndex {
-            txid,
-            output_index: received.output_index(),
-        }
-    })?;
-    Ok(IronwoodOutputId::new(txid, output_index))
+    IronwoodOutputId::new(txid, u32::from(received.output_index()))
 }
 
 fn convert_ironwood_received_note<NoteRef>(
@@ -227,7 +216,7 @@ fn convert_ironwood_received_note<NoteRef>(
     locked: bool,
     spendable: bool,
 ) -> Result<OwnedIronwoodNote, IronwoodNoteConversionError> {
-    let output_id = output_id_from_received(received)?;
+    let output_id = output_id_from_received(received);
     let value_zat = received
         .note_value()
         .map_err(|source| IronwoodNoteConversionError::InvalidValue { output_id, source })?

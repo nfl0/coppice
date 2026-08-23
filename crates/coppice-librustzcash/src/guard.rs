@@ -115,6 +115,7 @@ pub enum SpendGuardError<HostError, BackendError: Debug> {
 /// locks that were cleared by an external generic wallet recovery operation.
 /// The callback receives that same reconciled mutable backend, allowing one
 /// concrete wallet object to continue directly into proposal construction.
+#[allow(clippy::type_complexity)]
 pub fn with_coppice_spend_guard<Host, Backend, Proposal>(
     mode: CoppiceProtectionMode,
     host_tip_source: &Host,

@@ -358,10 +358,10 @@ mod tests {
             address: b"UA_B".to_vec(),
             signature: vec![],
         };
-        if let Some(sig) = sign_operation(&key, &update, &previous) {
-            if let Operation::Update { signature, .. } = &mut update {
-                *signature = sig;
-            }
+        if let Some(sig) = sign_operation(&key, &update, &previous)
+            && let Operation::Update { signature, .. } = &mut update
+        {
+            *signature = sig;
         }
         assert_eq!(
             apply_operation(
@@ -380,10 +380,10 @@ mod tests {
             sequence: 2,
             signature: vec![],
         };
-        if let Some(sig) = sign_operation(&key, &release, &previous) {
-            if let Operation::Release { signature, .. } = &mut release {
-                *signature = sig;
-            }
+        if let Some(sig) = sign_operation(&key, &release, &previous)
+            && let Operation::Release { signature, .. } = &mut release
+        {
+            *signature = sig;
         }
         assert_eq!(
             apply_operation(

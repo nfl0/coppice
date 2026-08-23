@@ -299,8 +299,9 @@ pub struct V1BondVerifier {
     verifier_id: [u8; 32],
 }
 
-fn v1_key_material()
--> Result<(Params<vesta::Affine>, VerifyingKey<vesta::Affine>, [u8; 32]), V1BondVerifierError> {
+type V1KeyMaterial = (Params<vesta::Affine>, VerifyingKey<vesta::Affine>, [u8; 32]);
+
+fn v1_key_material() -> Result<V1KeyMaterial, V1BondVerifierError> {
     let params = Params::<vesta::Affine>::new(COPPICE_BOND_K);
     let circuit = CoppiceBondCircuit::verifier_only(v1_bond_tag_domain_field());
     let verifying_key =
@@ -585,6 +586,7 @@ fn circuit_for_witness(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn fixture(
     value: u64,
     minimum: u64,
@@ -665,6 +667,7 @@ fn fixture_witness(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn minimal_fixture(
     value: u64,
     minimum: u64,

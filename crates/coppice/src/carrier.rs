@@ -89,11 +89,11 @@ pub fn decode_bulletin_for(tx: &Transaction, rendezvous: Rendezvous) -> Result<O
     let mut saw_coppice = false;
     for action in b.actions() {
         let domain = IronwoodDomain::for_action(action);
-        if let Some((_, _, memo)) = try_note_decryption(&domain, &ivk, action) {
-            if memo.starts_with(crate::DOMAIN) {
-                saw_coppice = true;
-                frames.push(envelope::frame_from_memo(&memo).map_err(|_| Error::Envelope)?);
-            }
+        if let Some((_, _, memo)) = try_note_decryption(&domain, &ivk, action)
+            && memo.starts_with(crate::DOMAIN)
+        {
+            saw_coppice = true;
+            frames.push(envelope::frame_from_memo(&memo).map_err(|_| Error::Envelope)?);
         }
     }
     if !saw_coppice {
@@ -166,7 +166,7 @@ fn reconstruct_v1_memos_for(
         return Err(V1CarrierError::NotFound);
     }
 
-    let payload = match carrier_v1::reconstruct_frames_v1(&frames, deployment_id) {
+    let payload = match carrier_v1::reconstruct_frames_v1(frames, deployment_id) {
         Ok(payload) => payload,
         Err(carrier_v1::Error::WrongDeployment) => return Err(V1CarrierError::NotFound),
         Err(_) => return Err(V1CarrierError::Malformed),
