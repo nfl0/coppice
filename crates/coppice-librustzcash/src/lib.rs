@@ -40,7 +40,8 @@ pub use operations::{
 pub use pending::{
     PendingRegistration, PendingRegistrationCollection, PendingRegistrationCollectionError,
     PendingRegistrationPersistenceError, PendingRegistrationTransitionError,
-    PendingRegistrationValidationError, pending_attempt_expired, pending_commit_expired,
+    PendingRegistrationValidationError, WalletAccountId, pending_attempt_expired,
+    pending_commit_expired,
 };
 pub use reconcile::{
     CanonicalBlockSource, CanonicalTip, ReconcileError, ReconcileKind, ReconcileOutcome,

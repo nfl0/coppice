@@ -4,7 +4,8 @@ use coppice::reducer_v1::{ReplayTip, V1Reducer};
 
 use crate::{
     CoppiceLockBackend, IronwoodViewingCapability, PendingRegistrationCollection,
-    ReconciliationError, ReconciliationReport, active_canonical_bond_tags, reconcile_locks,
+    ReconciliationError, ReconciliationReport, WalletAccountId, active_canonical_bond_tags,
+    reconcile_locks,
 };
 
 /// The host wallet's selected canonical chain tip.
@@ -121,6 +122,7 @@ pub fn with_coppice_spend_guard<Host, Backend, Proposal>(
     host_tip_source: &Host,
     reducer: &V1Reducer,
     pending: &PendingRegistrationCollection,
+    account_id: WalletAccountId,
     capability: IronwoodViewingCapability,
     lock_backend: &mut Backend,
     proposal_fn: impl FnOnce(&mut Backend) -> Proposal,
@@ -156,7 +158,7 @@ where
     })?;
 
     let active_tags = active_canonical_bond_tags(reducer);
-    let report = reconcile_locks(&active_tags, pending, capability, lock_backend)
+    let report = reconcile_locks(&active_tags, pending, account_id, capability, lock_backend)
         .map_err(SpendGuardError::ReconciliationFailed)?;
     Ok((proposal_fn(lock_backend), Some(report)))
 }
@@ -336,6 +338,10 @@ mod tests {
         }
     }
 
+    fn account_id() -> WalletAccountId {
+        WalletAccountId::from_bytes([0x11; 32])
+    }
+
     fn note(id: u8) -> OwnedIronwoodNote {
         OwnedIronwoodNote {
             output_id: IronwoodOutputId::new([id; 32], u32::from(id)),
@@ -357,6 +363,7 @@ mod tests {
                 .unwrap();
         PendingRegistration::new(
             &deployment,
+            account_id(),
             "alice".to_owned(),
             ADDRESS.to_vec(),
             owner_pk,
@@ -395,6 +402,7 @@ mod tests {
             host,
             &reducer,
             pending,
+            account_id(),
             IronwoodViewingCapability::FullViewing,
             backend,
             proposal,
@@ -562,6 +570,7 @@ mod tests {
             &host,
             &reducer,
             &empty_pending(),
+            account_id(),
             IronwoodViewingCapability::IncomingOnly,
             &mut backend,
             |_| called.set(called.get() + 1),
@@ -587,6 +596,7 @@ mod tests {
             &host,
             &reducer,
             &pending,
+            account_id(),
             IronwoodViewingCapability::FullViewing,
             &mut backend,
             |_| called.set(called.get() + 1),
@@ -643,6 +653,7 @@ mod tests {
             &host,
             &reducer,
             &pending,
+            account_id(),
             IronwoodViewingCapability::FullViewing,
             &mut backend,
             |_| called.set(called.get() + 1),
@@ -669,6 +680,7 @@ mod tests {
             &host,
             &reducer,
             &empty_pending(),
+            account_id(),
             IronwoodViewingCapability::FullViewing,
             &mut backend,
             |backend| assert_eq!(backend.locks[&output_id].owner, foreign),
@@ -690,6 +702,7 @@ mod tests {
             &host,
             &reducer,
             &pending,
+            account_id(),
             IronwoodViewingCapability::FullViewing,
             &mut backend,
             |_| (),
@@ -707,6 +720,7 @@ mod tests {
             &host,
             &reducer,
             &pending,
+            account_id(),
             IronwoodViewingCapability::FullViewing,
             &mut backend,
             |backend| {

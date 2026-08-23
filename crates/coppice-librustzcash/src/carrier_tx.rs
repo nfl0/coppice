@@ -208,11 +208,13 @@ where
         capability,
     );
     let reconcile_capability = backend.capability();
+    let account_id = crate::WalletAccountId::from_orchard_fvk(orchard_fvk);
     let (proposal_result, _) = with_coppice_spend_guard(
         mode,
         host_tip_source,
         reducer,
         pending,
+        account_id,
         reconcile_capability,
         &mut backend,
         |backend| {

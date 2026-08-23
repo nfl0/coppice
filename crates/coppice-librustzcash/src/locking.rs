@@ -10,7 +10,7 @@ use zcash_protocol::consensus::BlockHeight;
 use crate::{
     InputSourceIronwoodNoteSource, InventoryError, IronwoodNoteSourceError, IronwoodOutputId,
     IronwoodViewingCapability, OwnedBond, OwnedIronwoodNote, OwnedIronwoodNoteSource,
-    PendingRegistrationCollection,
+    PendingRegistrationCollection, WalletAccountId,
     inventory::{ClassifiedNote, classify_notes},
 };
 
@@ -286,23 +286,25 @@ pub enum DesiredLockSetError {
 pub fn desired_lock_tags(
     active_tags: &BTreeSet<[u8; 32]>,
     pending: &PendingRegistrationCollection,
+    account_id: WalletAccountId,
     notes: &[OwnedIronwoodNote],
     capability: IronwoodViewingCapability,
 ) -> Result<BTreeSet<[u8; 32]>, DesiredLockSetError> {
     let classified = classify_notes(notes, capability).map_err(DesiredLockSetError::Inventory)?;
-    desired_lock_tags_from_classified(active_tags, pending, &classified)
+    desired_lock_tags_from_classified(active_tags, pending, account_id, &classified)
 }
 
 fn desired_lock_tags_from_classified(
     active_tags: &BTreeSet<[u8; 32]>,
     pending: &PendingRegistrationCollection,
+    account_id: WalletAccountId,
     classified: &[ClassifiedNote],
 ) -> Result<BTreeSet<[u8; 32]>, DesiredLockSetError> {
     let owned_tags: BTreeSet<[u8; 32]> = classified
         .iter()
         .map(|classified| classified.bond_tag)
         .collect();
-    let pending_tags = pending.pending_bond_tags();
+    let pending_tags = pending.pending_bond_tags_for_account(account_id);
     for bond_tag in &pending_tags {
         if !owned_tags.contains(bond_tag) {
             return Err(DesiredLockSetError::MissingPendingBond {
@@ -348,6 +350,7 @@ fn map_desired_error<E: Debug>(error: DesiredLockSetError) -> ReconciliationErro
 pub fn reconcile_locks<B: CoppiceLockBackend>(
     active_tags: &BTreeSet<[u8; 32]>,
     pending: &PendingRegistrationCollection,
+    account_id: WalletAccountId,
     capability: IronwoodViewingCapability,
     backend: &mut B,
 ) -> Result<ReconciliationReport, ReconciliationError<B::Error>> {
@@ -360,7 +363,7 @@ pub fn reconcile_locks<B: CoppiceLockBackend>(
         .owned_unspent_ironwood_notes()
         .map_err(ReconciliationError::Backend)?;
     let classified = classify_notes(&notes, capability).map_err(ReconciliationError::Inventory)?;
-    let desired = desired_lock_tags_from_classified(active_tags, pending, &classified)
+    let desired = desired_lock_tags_from_classified(active_tags, pending, account_id, &classified)
         .map_err(map_desired_error::<B::Error>)?;
 
     let owned_active_bonds = classified
@@ -562,7 +565,19 @@ mod tests {
         }
     }
 
+    fn account_id() -> WalletAccountId {
+        WalletAccountId::from_bytes([0x11; 32])
+    }
+
     fn pending_for(name: &str, bond_tag: [u8; 32]) -> PendingRegistration {
+        pending_for_account(account_id(), name, bond_tag)
+    }
+
+    fn pending_for_account(
+        account_id: WalletAccountId,
+        name: &str,
+        bond_tag: [u8; 32],
+    ) -> PendingRegistration {
         let deployment = deployment();
         let key = OwnerSigningKey::try_from([1; 32]).unwrap();
         let owner_pk = owner_key_bytes(&(&key).into());
@@ -572,6 +587,7 @@ mod tests {
                 .unwrap();
         PendingRegistration::new(
             &deployment,
+            account_id,
             name.to_owned(),
             ADDRESS.to_vec(),
             owner_pk,
@@ -599,6 +615,7 @@ mod tests {
         let report = reconcile_locks(
             &active,
             &empty_pending(),
+            account_id(),
             IronwoodViewingCapability::FullViewing,
             &mut backend,
         )
@@ -615,12 +632,57 @@ mod tests {
     }
 
     #[test]
+    fn pending_registrations_are_reconciled_only_with_their_owning_account() {
+        let account_a = WalletAccountId::from_bytes([0xa1; 32]);
+        let account_b = WalletAccountId::from_bytes([0xb2; 32]);
+        let tag_a = tag(1);
+        let tag_b = tag(2);
+        let mut pending = PendingRegistrationCollection::new();
+        pending
+            .insert(pending_for_account(account_a, "alice", tag_a))
+            .unwrap();
+
+        let mut backend_a = FakeBackend::new(vec![note(1)]);
+        let mut backend_b = FakeBackend::new(vec![note(2)]);
+        let active = BTreeSet::from([tag_b]);
+
+        let report_b = reconcile_locks(
+            &active,
+            &pending,
+            account_b,
+            IronwoodViewingCapability::FullViewing,
+            &mut backend_b,
+        )
+        .unwrap();
+        assert_eq!(report_b.desired_tags, BTreeSet::from([tag_b]));
+        assert_eq!(
+            backend_b.locks[&note(2).output_id].owner,
+            lock_owner_for_bond(tag_b)
+        );
+
+        let report_a = reconcile_locks(
+            &active,
+            &pending,
+            account_a,
+            IronwoodViewingCapability::FullViewing,
+            &mut backend_a,
+        )
+        .unwrap();
+        assert_eq!(report_a.desired_tags, BTreeSet::from([tag_a]));
+        assert_eq!(
+            backend_a.locks[&note(1).output_id].owner,
+            lock_owner_for_bond(tag_a)
+        );
+    }
+
+    #[test]
     fn owned_pending_bond_is_locked() {
         let pending = pending_for("alice", tag(2));
         let mut backend = FakeBackend::new(vec![note(2)]);
         let report = reconcile_locks(
             &BTreeSet::new(),
             &collection_with(pending),
+            account_id(),
             IronwoodViewingCapability::Spending,
             &mut backend,
         )
@@ -639,6 +701,7 @@ mod tests {
         let report = reconcile_locks(
             &BTreeSet::from([tag(3)]),
             &collection_with(pending),
+            account_id(),
             IronwoodViewingCapability::FullViewing,
             &mut backend,
         )
@@ -656,6 +719,7 @@ mod tests {
         let report = reconcile_locks(
             &BTreeSet::new(),
             &empty_pending(),
+            account_id(),
             IronwoodViewingCapability::FullViewing,
             &mut backend,
         )
@@ -672,6 +736,7 @@ mod tests {
         reconcile_locks(
             &BTreeSet::new(),
             &empty_pending(),
+            account_id(),
             IronwoodViewingCapability::FullViewing,
             &mut backend,
         )
@@ -686,6 +751,7 @@ mod tests {
         let report = reconcile_locks(
             &active,
             &empty_pending(),
+            account_id(),
             IronwoodViewingCapability::FullViewing,
             &mut backend,
         )
@@ -703,6 +769,7 @@ mod tests {
             reconcile_locks(
                 &BTreeSet::new(),
                 &collection_with(pending),
+                account_id(),
                 IronwoodViewingCapability::FullViewing,
                 &mut backend,
             ),
@@ -718,6 +785,7 @@ mod tests {
         let first = reconcile_locks(
             &active,
             &empty_pending(),
+            account_id(),
             IronwoodViewingCapability::FullViewing,
             &mut backend,
         )
@@ -726,6 +794,7 @@ mod tests {
         let second = reconcile_locks(
             &active,
             &empty_pending(),
+            account_id(),
             IronwoodViewingCapability::FullViewing,
             &mut backend,
         )
@@ -743,6 +812,7 @@ mod tests {
         reconcile_locks(
             &BTreeSet::new(),
             &empty_pending(),
+            account_id(),
             IronwoodViewingCapability::FullViewing,
             &mut backend,
         )
@@ -754,6 +824,7 @@ mod tests {
         reconcile_locks(
             &BTreeSet::new(),
             &collection_with(pending_for("alice", old_tag)),
+            account_id(),
             IronwoodViewingCapability::FullViewing,
             &mut backend,
         )
@@ -774,6 +845,7 @@ mod tests {
             reconcile_locks(
                 &BTreeSet::from([tag(10)]),
                 &empty_pending(),
+                account_id(),
                 IronwoodViewingCapability::IncomingOnly,
                 &mut backend,
             ),
@@ -791,6 +863,7 @@ mod tests {
             desired_lock_tags(
                 &BTreeSet::new(),
                 &collection_with(pending),
+                account_id(),
                 &[],
                 IronwoodViewingCapability::FullViewing,
             ),
@@ -1044,6 +1117,7 @@ mod tests {
         let report = reconcile_locks(
             &BTreeSet::new(),
             &empty_pending(),
+            account_id(),
             IronwoodViewingCapability::FullViewing,
             &mut bridge,
         )

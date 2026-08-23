@@ -4,12 +4,39 @@ use serde::{Deserialize, Serialize};
 
 use coppice::{
     config::{DeploymentEncodingError, DeploymentParameters, DeploymentValidationError},
+    crypto,
     envelope,
     owner::parse_v1_owner_key,
     pending::PendingTimingError,
     registration::registration_commitment,
     reveal::{RevealValidationError, canonical_v1_address},
 };
+
+/// Stable wallet-local identity for the Orchard account that owns a pending
+/// registration bond.
+///
+/// This is derived from the canonical Orchard full viewing key rather than a
+/// backend row identifier. In particular, librustzcash `AccountUuid` values
+/// may change when the same account is restored into a new wallet database.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct WalletAccountId([u8; 32]);
+
+impl WalletAccountId {
+    pub fn from_orchard_fvk(fvk: &orchard::keys::FullViewingKey) -> Self {
+        Self(
+            crypto::hash("CoppiceAcctV1", &fvk.to_bytes())
+                .expect("fixed ASCII account-identity domain"),
+        )
+    }
+
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    pub const fn to_bytes(self) -> [u8; 32] {
+        self.0
+    }
+}
 
 /// Wallet-local metadata for one registration attempt.
 ///
@@ -18,6 +45,7 @@ use coppice::{
 /// signing key, spending key, proof, anchor, or reducer state.
 #[derive(Clone, PartialEq, Eq)]
 pub struct PendingRegistration {
+    account_id: WalletAccountId,
     name: String,
     address: Vec<u8>,
     owner_pk: [u8; 32],
@@ -51,6 +79,7 @@ impl PendingRegistration {
     /// Constructs a validated wallet-local registration intent.
     pub fn new(
         deployment: &DeploymentParameters,
+        account_id: WalletAccountId,
         name: String,
         address: Vec<u8>,
         owner_pk: [u8; 32],
@@ -83,6 +112,7 @@ impl PendingRegistration {
         }
 
         Ok(Self {
+            account_id,
             name,
             address,
             owner_pk,
@@ -92,6 +122,10 @@ impl PendingRegistration {
             commit_txid: None,
             commit_height: None,
         })
+    }
+
+    pub const fn account_id(&self) -> WalletAccountId {
+        self.account_id
     }
 
     pub fn name(&self) -> &str {
@@ -164,7 +198,7 @@ pub enum PendingRegistrationCollectionError {
     Transition(PendingRegistrationTransitionError),
 }
 
-pub const PENDING_REGISTRATION_FORMAT_VERSION: u32 = 1;
+pub const PENDING_REGISTRATION_FORMAT_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PendingRegistrationPersistenceError {
@@ -178,6 +212,7 @@ pub enum PendingRegistrationPersistenceError {
 
 #[derive(Serialize, Deserialize)]
 struct StoredPendingRegistration {
+    account_id: WalletAccountId,
     name: String,
     address: Vec<u8>,
     owner_pk: [u8; 32],
@@ -234,21 +269,31 @@ impl PendingRegistrationCollection {
         self.by_commitment.is_empty()
     }
 
-    pub fn pending_bond_tags(&self) -> BTreeSet<[u8; 32]> {
+    pub fn pending_bond_tags_for_account(
+        &self,
+        account_id: WalletAccountId,
+    ) -> BTreeSet<[u8; 32]> {
         self.by_commitment
             .values()
+            .filter(|pending| pending.account_id() == account_id)
             .map(PendingRegistration::bond_tag)
             .collect()
-    }
-
-    pub fn iter_pending_bond_tags(&self) -> impl Iterator<Item = [u8; 32]> {
-        self.pending_bond_tags().into_iter()
     }
 
     /// Iterates public semantic commitment identifiers without exposing the
     /// secret-bearing pending values.
     pub fn commitments(&self) -> impl Iterator<Item = [u8; 32]> + '_ {
         self.by_commitment.keys().copied()
+    }
+
+    pub fn commitments_for_account(
+        &self,
+        account_id: WalletAccountId,
+    ) -> impl Iterator<Item = [u8; 32]> + '_ {
+        self.by_commitment
+            .iter()
+            .filter(move |(_, pending)| pending.account_id() == account_id)
+            .map(|(commitment, _)| *commitment)
     }
 
     /// Serializes secret-bearing pending intents for trusted local wallet
@@ -264,6 +309,7 @@ impl PendingRegistrationCollection {
             .by_commitment
             .values()
             .map(|pending| StoredPendingRegistration {
+                account_id: pending.account_id,
                 name: pending.name.clone(),
                 address: pending.address.clone(),
                 owner_pk: pending.owner_pk,
@@ -303,6 +349,7 @@ impl PendingRegistrationCollection {
         for stored in stored.registrations {
             let mut pending = PendingRegistration::new(
                 deployment,
+                stored.account_id,
                 stored.name,
                 stored.address,
                 stored.owner_pk,
@@ -421,6 +468,10 @@ mod tests {
         }
     }
 
+    fn account_id() -> WalletAccountId {
+        WalletAccountId::from_bytes([0x11; 32])
+    }
+
     fn owner_pk() -> [u8; 32] {
         let key = OwnerSigningKey::try_from([1; 32]).unwrap();
         owner_key_bytes(&(&key).into())
@@ -439,11 +490,37 @@ mod tests {
         .unwrap();
         PendingRegistration::new(
             &deployment,
+            account_id(),
             "alice".to_owned(),
             ADDRESS.to_vec(),
             owner_pk(),
             [0x42; 32],
             [0xa5; 32],
+            commitment,
+        )
+        .unwrap()
+    }
+
+    fn pending_for(account_id: WalletAccountId, name: &str, bond_tag: [u8; 32]) -> PendingRegistration {
+        let deployment = deployment();
+        let secret = [name.as_bytes()[0]; 32];
+        let commitment = registration_commitment(
+            &deployment,
+            name,
+            owner_pk(),
+            bond_tag,
+            ADDRESS,
+            secret,
+        )
+        .unwrap();
+        PendingRegistration::new(
+            &deployment,
+            account_id,
+            name.to_owned(),
+            ADDRESS.to_vec(),
+            owner_pk(),
+            bond_tag,
+            secret,
             commitment,
         )
         .unwrap()
@@ -463,6 +540,7 @@ mod tests {
         assert!(matches!(
             PendingRegistration::new(
                 &deployment,
+                account_id(),
                 "alice".to_owned(),
                 ADDRESS.to_vec(),
                 owner_pk(),
@@ -490,6 +568,7 @@ mod tests {
         assert!(matches!(
             PendingRegistration::new(
                 &deployment,
+                account_id(),
                 "alice".to_owned(),
                 ADDRESS.to_vec(),
                 identity,
@@ -559,5 +638,43 @@ mod tests {
             PendingRegistrationCollection::load_local(&wrong, &bytes),
             Err(PendingRegistrationPersistenceError::DeploymentMismatch)
         ));
+    }
+
+    #[test]
+    fn account_ownership_survives_restart_and_filters_exactly() {
+        let deployment = deployment();
+        let account_a = WalletAccountId::from_bytes([0xa1; 32]);
+        let account_b = WalletAccountId::from_bytes([0xb2; 32]);
+        let pending_a = pending_for(account_a, "alice", [0x41; 32]);
+        let pending_b = pending_for(account_b, "bob", [0x42; 32]);
+        let commitment_a = pending_a.commitment();
+        let commitment_b = pending_b.commitment();
+        let mut collection = PendingRegistrationCollection::new();
+        collection.insert(pending_a).unwrap();
+        collection.insert(pending_b).unwrap();
+
+        let restored = PendingRegistrationCollection::load_local(
+            &deployment,
+            &collection.save_local(&deployment).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(restored.get(&commitment_a).unwrap().account_id(), account_a);
+        assert_eq!(restored.get(&commitment_b).unwrap().account_id(), account_b);
+        assert_eq!(
+            restored.commitments_for_account(account_a).collect::<Vec<_>>(),
+            vec![commitment_a]
+        );
+        assert_eq!(
+            restored.commitments_for_account(account_b).collect::<Vec<_>>(),
+            vec![commitment_b]
+        );
+        assert_eq!(
+            restored.pending_bond_tags_for_account(account_a),
+            BTreeSet::from([[0x41; 32]])
+        );
+        assert_eq!(
+            restored.pending_bond_tags_for_account(account_b),
+            BTreeSet::from([[0x42; 32]])
+        );
     }
 }

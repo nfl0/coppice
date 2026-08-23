@@ -158,6 +158,7 @@ pub fn begin_registration<Host, Backend, R>(
     host_tip_source: &Host,
     reducer: &V1Reducer,
     pending_collection: &mut PendingRegistrationCollection,
+    account_id: crate::WalletAccountId,
     capability: IronwoodViewingCapability,
     lock_backend: &mut Backend,
     name: &str,
@@ -231,6 +232,7 @@ where
     .map_err(BeginRegistrationError::Commitment)?;
     let pending = PendingRegistration::new(
         deployment,
+        account_id,
         name.to_owned(),
         address,
         owner_pk,
@@ -423,7 +425,14 @@ where
         .map_err(PrepareRevealError::Freshness)?;
 
     let active_tags = active_canonical_bond_tags(reducer);
-    reconcile_locks(&active_tags, pending_collection, capability, lock_backend).map_err(
+    reconcile_locks(
+        &active_tags,
+        pending_collection,
+        pending.account_id(),
+        capability,
+        lock_backend,
+    )
+    .map_err(
         |error| match error {
             ReconciliationError::MissingPendingBond { .. } => {
                 PrepareRevealError::MissingPendingBond
@@ -574,6 +583,10 @@ fn staged_remove_and_reconcile<Backend: CoppiceLockBackend>(
     lock_backend: &mut Backend,
     commitment: &[u8; 32],
 ) -> Result<(), LifecycleError<Infallible, Backend::Error>> {
+    let account_id = pending
+        .get(commitment)
+        .ok_or(LifecycleError::UnknownPending)?
+        .account_id();
     let mut staged = pending.clone();
     staged
         .remove(commitment)
@@ -581,6 +594,7 @@ fn staged_remove_and_reconcile<Backend: CoppiceLockBackend>(
     reconcile_locks(
         &active_canonical_bond_tags(reducer),
         &staged,
+        account_id,
         capability,
         lock_backend,
     )
@@ -857,6 +871,10 @@ mod tests {
         owner_key_bytes(&(&OwnerSigningKey::try_from([1; 32]).unwrap()).into())
     }
 
+    fn account_id() -> crate::WalletAccountId {
+        crate::WalletAccountId::from_bytes([0x11; 32])
+    }
+
     #[test]
     fn begin_locks_then_persists_and_builds_exact_commit_carrier() {
         let reducer = reducer();
@@ -868,6 +886,7 @@ mod tests {
             &host,
             &reducer,
             &mut pending,
+            account_id(),
             IronwoodViewingCapability::FullViewing,
             &mut backend,
             "alice",
@@ -951,6 +970,7 @@ mod tests {
             &host,
             &reducer,
             &mut pending,
+            account_id(),
             IronwoodViewingCapability::Spending,
             &mut backend,
             "alice",
@@ -994,6 +1014,7 @@ mod tests {
             .insert(
                 PendingRegistration::new(
                     reducer.deployment(),
+                    account_id(),
                     "alice".to_owned(),
                     ADDRESS.to_vec(),
                     owner(),
@@ -1010,6 +1031,7 @@ mod tests {
                 &host,
                 &reducer,
                 &mut pending,
+                account_id(),
                 IronwoodViewingCapability::FullViewing,
                 &mut backend,
                 "alice",
@@ -1026,6 +1048,7 @@ mod tests {
         reconcile_locks(
             &active_canonical_bond_tags(&reducer),
             &pending,
+            account_id(),
             IronwoodViewingCapability::FullViewing,
             &mut backend,
         )
@@ -1047,6 +1070,7 @@ mod tests {
                 &bad_host,
                 &reducer,
                 &mut pending,
+                account_id(),
                 IronwoodViewingCapability::FullViewing,
                 &mut backend,
                 "alice",
@@ -1067,6 +1091,7 @@ mod tests {
                 &host,
                 &reducer,
                 &mut pending,
+                account_id(),
                 IronwoodViewingCapability::FullViewing,
                 &mut backend,
                 "-bad",
@@ -1089,6 +1114,7 @@ mod tests {
             &host,
             &reducer,
             &mut collection,
+            account_id(),
             IronwoodViewingCapability::FullViewing,
             &mut backend,
             "alice",
@@ -1213,6 +1239,7 @@ mod tests {
             &initial_host,
             &reducer,
             &mut collection,
+            account_id(),
             IronwoodViewingCapability::FullViewing,
             &mut backend,
             "alice",
@@ -1266,6 +1293,7 @@ mod tests {
         .unwrap();
         let pending = PendingRegistration::new(
             reducer.deployment(),
+            account_id(),
             "alice".to_owned(),
             ADDRESS.to_vec(),
             owner(),
@@ -1309,6 +1337,7 @@ mod tests {
             &host,
             &reducer,
             &mut pending,
+            account_id(),
             IronwoodViewingCapability::FullViewing,
             &mut backend,
             "alice",

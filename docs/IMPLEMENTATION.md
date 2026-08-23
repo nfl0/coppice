@@ -412,6 +412,7 @@ Suggested shape:
 
 ```rust
 pub struct PendingRegistration {
+    pub wallet_account_id: [u8; 32],
     pub name: String,
     pub address: String,
     pub owner_pk: [u8; 32],
@@ -423,6 +424,13 @@ pub struct PendingRegistration {
     pub commit_height: Option<u32>,
 }
 ```
+
+`wallet_account_id` is local wallet metadata derived from the canonical
+Orchard full viewing key, not a wallet-database row identifier. It therefore
+survives restart and same-seed/import restoration. A wallet-global pending
+collection MUST filter pending bond tags by this account identity before
+reconciling one account's notes; another account's pending bond is not a
+missing note in the account currently being reconciled.
 
 Do not rely on persisting the old `OutputRef`.
 
