@@ -77,6 +77,7 @@ impl DeploymentParameters {
         }
         self.bond_note_max_age_blocks
             .checked_add(self.commit_ttl_blocks)
+            .and_then(|value| value.checked_add(1))
             .ok_or(DeploymentValidationError::RetentionOverflow)?;
         let ivk = Option::<IncomingViewingKey>::from(IncomingViewingKey::from_bytes(
             &self.rendezvous.orchard_ivk,
@@ -292,5 +293,25 @@ mod tests {
             parameters.canonical_preimage(),
             Err(DeploymentEncodingError::LengthTooLarge)
         );
+    }
+
+    #[test]
+    fn deployment_rejects_checkpoint_horizon_plus_one_overflow() {
+        let mut parameters = DeploymentParameters {
+            network_id: REGTEST_V0.network_id.to_vec(),
+            address_network: NetworkType::Regtest,
+            activation_height: 10,
+            minimum_bond_value: 100_000_000,
+            commit_ttl_blocks: 2,
+            reuse_delay_blocks: 10,
+            bond_note_max_age_blocks: u32::MAX - 2,
+            rendezvous: REGTEST_V0.rendezvous,
+        };
+        assert_eq!(
+            parameters.validate(),
+            Err(DeploymentValidationError::RetentionOverflow)
+        );
+        parameters.bond_note_max_age_blocks -= 1;
+        assert!(parameters.validate().is_ok());
     }
 }

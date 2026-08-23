@@ -718,11 +718,16 @@ Record the old value only once per mutated key per block.
 
 Reorg retention is a local storage policy, not protocol semantics.
 
-Recommended default:
+The reference wallet derives its minimum retained undo depth from the same
+deployment parameters as the authenticated Ironwood checkpoint horizon:
 
 ```text
-100 blocks or greater
+bond_note_max_age_blocks + commit_ttl_blocks + 1
 ```
+
+This ensures every still-usable retained freshness/REVEAL checkpoint is also
+authenticated by the persisted backward-walkable undo journal. A host may
+retain more history, but not less than this proof-input horizon.
 
 If the host requests a rewind deeper than locally retained undo state:
 
@@ -761,8 +766,9 @@ pub struct CoppiceSnapshotV1 {
 `active_bond_index` should be reconstructed rather than trusted as independent persisted authority.
 
 The reference reducer exposes a versioned local snapshot containing its current
-authoritative state plus a bounded rewind journal. The default journal retains
-one full current state and 100 per-block undo entries. Each undo entry stores
+authoritative state plus a bounded rewind journal. The journal retains one
+full current state and the deployment-derived proof/checkpoint horizon of
+per-block undo entries (121 for the current deployments). Each undo entry stores
 only previous values for registry keys changed by that block, together with the
 previous compact Ironwood frontier and checkpoint-map changes; it does not copy
 the complete registry state. Loading rejects a wrong deployment, non-contiguous

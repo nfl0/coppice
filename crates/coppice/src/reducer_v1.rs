@@ -27,11 +27,17 @@ use zcash_protocol::consensus::BranchId;
 
 pub type IronwoodFrontier = CommitmentTree<MerkleHashOrchard, 32>;
 
-/// Number of previously-applied blocks retained for local bounded rewinds.
-///
-/// This is wallet-local recovery policy, not a protocol consensus parameter.
-pub const DEFAULT_REORG_RETENTION_BLOCKS: u32 = 100;
 pub const COPPICE_SNAPSHOT_FORMAT_VERSION: u32 = 2;
+
+fn required_reorg_retention_blocks(
+    deployment: &DeploymentParameters,
+) -> Result<u32, SnapshotError> {
+    deployment
+        .bond_note_max_age_blocks
+        .checked_add(deployment.commit_ttl_blocks)
+        .and_then(|value| value.checked_add(1))
+        .ok_or(SnapshotError::HistoryTooLarge)
+}
 
 #[derive(Clone, Debug)]
 pub struct CanonicalBlockInput {
@@ -377,6 +383,13 @@ impl V1Reducer {
             .map_or(self.tip.height, |(_, undo)| undo.prior_tip.height)
     }
 
+    /// Wallet-local rewind depth aligned with the authenticated checkpoint
+    /// horizon required by freshness and REVEAL preparation.
+    pub fn reorg_retention_blocks(&self) -> u32 {
+        required_reorg_retention_blocks(&self.deployment)
+            .expect("validated deployment has a bounded checkpoint horizon")
+    }
+
     pub fn has_rewind_snapshot(&self, height: u32) -> bool {
         height == self.tip.height
             || (height >= self.oldest_rewind_height() && height < self.tip.height)
@@ -434,7 +447,7 @@ impl V1Reducer {
         if stored.deployment_id != deployment_id {
             return Err(SnapshotError::DeploymentMismatch);
         }
-        if stored.undo.len() > DEFAULT_REORG_RETENTION_BLOCKS as usize {
+        if stored.undo.len() > required_reorg_retention_blocks(&deployment)? as usize {
             return Err(SnapshotError::HistoryTooLarge);
         }
 
@@ -678,7 +691,7 @@ impl V1Reducer {
         self.history.insert(block.height, undo);
         let oldest_undo = block
             .height
-            .saturating_sub(DEFAULT_REORG_RETENTION_BLOCKS)
+            .saturating_sub(self.reorg_retention_blocks())
             .saturating_add(1);
         self.history.retain(|height, _| *height >= oldest_undo);
         Ok(AppliedBlock {
@@ -2201,15 +2214,16 @@ mod tests {
                 .unwrap();
         }
 
-        assert_eq!(reducer.history.len(), 100);
-        assert_eq!(reducer.oldest_rewind_height(), 129);
-        assert!(!reducer.has_rewind_snapshot(128));
-        assert_eq!(reducer.rewind_to(128), Err(RewindError::SnapshotMissing));
+        assert_eq!(reducer.reorg_retention_blocks(), 121);
+        assert_eq!(reducer.history.len(), 121);
+        assert_eq!(reducer.oldest_rewind_height(), 108);
+        assert!(!reducer.has_rewind_snapshot(107));
+        assert_eq!(reducer.rewind_to(107), Err(RewindError::SnapshotMissing));
 
         let encoded = reducer.save_snapshot().unwrap();
         let stored: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
         assert!(stored.get("snapshots").is_none());
-        assert_eq!(stored["undo"].as_array().unwrap().len(), 100);
+        assert_eq!(stored["undo"].as_array().unwrap().len(), 121);
         assert!(stored["undo"].as_array().unwrap().iter().all(|undo| {
             undo["state"]["names"].as_array().unwrap().is_empty()
                 && undo["state"]["pending"].as_array().unwrap().is_empty()
@@ -2223,8 +2237,8 @@ mod tests {
             restored.ironwood_checkpoints(),
             reducer.ironwood_checkpoints()
         );
-        assert_eq!(restored.oldest_rewind_height(), 129);
-        assert_eq!(restored.history.len(), 100);
+        assert_eq!(restored.oldest_rewind_height(), 108);
+        assert_eq!(restored.history.len(), 121);
     }
 
     #[test]
@@ -2255,6 +2269,33 @@ mod tests {
         assert!(matches!(
             V1Reducer::load_snapshot(deployment(), &serde_json::to_vec(&value).unwrap()),
             Err(SnapshotError::InvalidCheckpoint)
+        ));
+    }
+
+    #[test]
+    fn snapshot_authenticates_oldest_still_usable_checkpoint() {
+        let mut reducer = reducer();
+        for height in 100u32..=229 {
+            let mut block_hash = [0u8; 32];
+            block_hash[..4].copy_from_slice(&height.to_be_bytes());
+            reducer
+                .apply_block(&empty_block_at(&reducer, height, block_hash))
+                .unwrap();
+        }
+        let oldest_checkpoint = *reducer.ironwood_checkpoints().first_key_value().unwrap().0;
+        assert_eq!(oldest_checkpoint, 109);
+        assert!(reducer.has_rewind_snapshot(oldest_checkpoint));
+
+        let mut stored: serde_json::Value =
+            serde_json::from_slice(&reducer.save_snapshot().unwrap()).unwrap();
+        let checkpoints = stored["current"]["ironwood_checkpoints"]
+            .as_array_mut()
+            .unwrap();
+        assert_eq!(checkpoints[0]["height"].as_u64(), Some(u64::from(oldest_checkpoint)));
+        checkpoints[0]["root"][0] = serde_json::Value::from(1);
+        assert!(matches!(
+            V1Reducer::load_snapshot(deployment(), &serde_json::to_vec(&stored).unwrap()),
+            Err(SnapshotError::StateRootMismatch | SnapshotError::InvalidCheckpoint)
         ));
     }
 }
