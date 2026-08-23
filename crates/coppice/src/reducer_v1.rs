@@ -31,7 +31,7 @@ pub type IronwoodFrontier = CommitmentTree<MerkleHashOrchard, 32>;
 ///
 /// This is wallet-local recovery policy, not a protocol consensus parameter.
 pub const DEFAULT_REORG_RETENTION_BLOCKS: u32 = 100;
-pub const COPPICE_SNAPSHOT_FORMAT_VERSION: u32 = 1;
+pub const COPPICE_SNAPSHOT_FORMAT_VERSION: u32 = 2;
 
 #[derive(Clone, Debug)]
 pub struct CanonicalBlockInput {
@@ -176,10 +176,30 @@ struct StoredReducerSnapshot {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+struct StoredStateUndo {
+    names: Vec<(String, Option<crate::record::NameRecord>)>,
+    pending: Vec<([u8; 32], Option<pending::ChainPosition>)>,
+    recent_spent: Vec<([u8; 32], Option<u32>)>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct StoredReducerUndo {
+    applied_height: u32,
+    applied_block_hash: [u8; 32],
+    prior_height: u32,
+    prior_block_hash: [u8; 32],
+    state: StoredStateUndo,
+    prior_ironwood_tree: Vec<u8>,
+    checkpoint_undo: Vec<(u32, Option<StoredCheckpoint>)>,
+    prior_state_root: [u8; 32],
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct StoredV1Reducer {
     format_version: u32,
     deployment_id: [u8; 32],
-    snapshots: Vec<StoredReducerSnapshot>,
+    current: StoredReducerSnapshot,
+    undo: Vec<StoredReducerUndo>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -188,6 +208,67 @@ struct ReducerSnapshot {
     ironwood_tree: IronwoodFrontier,
     ironwood_checkpoints: BTreeMap<u32, AuthenticatedIronwoodCheckpoint>,
     tip: ReplayTip,
+    state_root: [u8; 32],
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct StateUndo {
+    names: Vec<(String, Option<crate::record::NameRecord>)>,
+    pending: Vec<([u8; 32], Option<pending::ChainPosition>)>,
+    recent_spent: Vec<([u8; 32], Option<u32>)>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ReducerUndo {
+    applied_tip: ReplayTip,
+    prior_tip: ReplayTip,
+    state: StateUndo,
+    prior_ironwood_tree: IronwoodFrontier,
+    checkpoint_undo: Vec<(u32, Option<AuthenticatedIronwoodCheckpoint>)>,
+    prior_state_root: [u8; 32],
+}
+
+impl StateUndo {
+    fn between(before: &CoppiceState, after: &CoppiceState) -> Self {
+        Self {
+            names: map_undo(&before.names, &after.names),
+            pending: map_undo(&before.pending, &after.pending),
+            recent_spent: map_undo(&before.recent_spent, &after.recent_spent),
+        }
+    }
+}
+
+fn map_undo<K: Ord + Clone, V: Clone + PartialEq>(
+    before: &BTreeMap<K, V>,
+    after: &BTreeMap<K, V>,
+) -> Vec<(K, Option<V>)> {
+    let keys = before
+        .keys()
+        .chain(after.keys())
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    keys.into_iter()
+        .filter_map(|key| {
+            (before.get(&key) != after.get(&key)).then(|| (key.clone(), before.get(&key).cloned()))
+        })
+        .collect()
+}
+
+fn apply_map_undo<K: Ord + Clone, V: Clone>(target: &mut BTreeMap<K, V>, undo: &[(K, Option<V>)]) {
+    for (key, value) in undo {
+        match value {
+            Some(value) => {
+                target.insert(key.clone(), value.clone());
+            }
+            None => {
+                target.remove(key);
+            }
+        }
+    }
+}
+
+fn has_duplicate_keys<K: Ord, V>(values: &[(K, V)]) -> bool {
+    values.windows(2).any(|pair| pair[0].0 >= pair[1].0)
 }
 
 pub struct V1Reducer {
@@ -197,10 +278,11 @@ pub struct V1Reducer {
     ironwood_tree: IronwoodFrontier,
     ironwood_checkpoints: BTreeMap<u32, AuthenticatedIronwoodCheckpoint>,
     tip: ReplayTip,
+    state_root: [u8; 32],
     verifier: V1BondVerifier,
-    /// Bounded local reorg history. It retains the current state and at most
-    /// [`DEFAULT_REORG_RETENTION_BLOCKS`] predecessor snapshots.
-    history: BTreeMap<u32, ReducerSnapshot>,
+    /// Bounded per-block undo journal. Registry maps retain only keys changed
+    /// by each block; the current full state is stored exactly once.
+    history: BTreeMap<u32, ReducerUndo>,
 }
 
 enum CarrierSemantic {
@@ -242,14 +324,15 @@ impl V1Reducer {
             height: checkpoint.height,
             block_hash: checkpoint.block_hash,
         };
-        let initial_snapshot = ReducerSnapshot {
-            state: state.clone(),
-            ironwood_tree: ironwood_tree.clone(),
-            ironwood_checkpoints: ironwood_checkpoints.clone(),
+        let state_root = Self::snapshot_state_root(
+            &deployment,
+            deployment_id,
+            &state,
+            &ironwood_tree,
+            &ironwood_checkpoints,
             tip,
-        };
-        let mut history = BTreeMap::new();
-        history.insert(checkpoint.height, initial_snapshot);
+        )
+        .map_err(|_| FatalReducerError::StateInvariantFailure)?;
         Ok(Self {
             deployment,
             deployment_id,
@@ -257,8 +340,9 @@ impl V1Reducer {
             ironwood_tree,
             ironwood_checkpoints,
             tip,
+            state_root,
             verifier,
-            history,
+            history: BTreeMap::new(),
         })
     }
 
@@ -287,36 +371,44 @@ impl V1Reducer {
     }
 
     pub fn oldest_rewind_height(&self) -> u32 {
-        *self
-            .history
+        self.history
             .first_key_value()
-            .expect("activation snapshot is always retained")
-            .0
+            .map_or(self.tip.height, |(_, undo)| undo.prior_tip.height)
     }
 
     pub fn has_rewind_snapshot(&self, height: u32) -> bool {
-        self.history.contains_key(&height)
+        height == self.tip.height
+            || (height >= self.oldest_rewind_height() && height < self.tip.height)
     }
 
     /// Returns the canonical identity stored in a retained rewind snapshot.
     /// This is read-only and does not extend or otherwise alter retention.
     pub fn retained_tip_at(&self, height: u32) -> Option<ReplayTip> {
-        self.history.get(&height).map(|snapshot| snapshot.tip)
+        if height == self.tip.height {
+            Some(self.tip)
+        } else {
+            height
+                .checked_add(1)
+                .and_then(|next| self.history.get(&next))
+                .map(|undo| undo.prior_tip)
+        }
     }
 
     /// Serializes the validated reducer state and bounded rewind journal.
     ///
     /// The returned bytes are local wallet material, not protocol wire data.
     pub fn save_snapshot(&self) -> Result<Vec<u8>, SnapshotError> {
-        let snapshots = self
+        let current = self.store_current_snapshot()?;
+        let undo = self
             .history
             .values()
-            .map(|snapshot| self.store_snapshot(snapshot))
+            .map(Self::store_undo)
             .collect::<Result<Vec<_>, _>>()?;
         serde_json::to_vec(&StoredV1Reducer {
             format_version: COPPICE_SNAPSHOT_FORMAT_VERSION,
             deployment_id: self.deployment_id,
-            snapshots,
+            current,
+            undo,
         })
         .map_err(|_| SnapshotError::Encoding)
     }
@@ -341,10 +433,7 @@ impl V1Reducer {
         if stored.deployment_id != deployment_id {
             return Err(SnapshotError::DeploymentMismatch);
         }
-        if stored.snapshots.is_empty() {
-            return Err(SnapshotError::EmptyHistory);
-        }
-        if stored.snapshots.len() > DEFAULT_REORG_RETENTION_BLOCKS as usize + 1 {
+        if stored.undo.len() > DEFAULT_REORG_RETENTION_BLOCKS as usize {
             return Err(SnapshotError::HistoryTooLarge);
         }
 
@@ -352,41 +441,65 @@ impl V1Reducer {
             .activation_height
             .checked_sub(1)
             .ok_or(SnapshotError::InvalidState)?;
+        let current = Self::restore_snapshot(&deployment, deployment_id, stored.current)?;
+        if current.tip.height < activation_base {
+            return Err(SnapshotError::NonCanonicalHistory);
+        }
         let mut history = BTreeMap::new();
-        let mut previous_height: Option<u32> = None;
-        for stored_snapshot in stored.snapshots {
-            if stored_snapshot.height < activation_base
-                || previous_height
-                    .is_some_and(|height| height.checked_add(1) != Some(stored_snapshot.height))
+        for stored_undo in stored.undo {
+            let undo = Self::restore_undo(stored_undo)?;
+            if undo.prior_tip.height < activation_base
+                || undo.prior_tip.height.checked_add(1) != Some(undo.applied_tip.height)
+                || history.insert(undo.applied_tip.height, undo).is_some()
             {
                 return Err(SnapshotError::NonCanonicalHistory);
             }
-            previous_height = Some(stored_snapshot.height);
-            let snapshot = Self::restore_snapshot(&deployment, deployment_id, stored_snapshot)?;
-            if history.insert(snapshot.tip.height, snapshot).is_some() {
+        }
+        let expected_oldest = current.tip.height.saturating_sub(history.len() as u32);
+        if history
+            .keys()
+            .copied()
+            .ne(expected_oldest.saturating_add(1)..=current.tip.height)
+        {
+            return Err(SnapshotError::NonCanonicalHistory);
+        }
+
+        // Validate the complete journal by replaying every undo on temporary
+        // state. This authenticates historical checkpoints and roots without
+        // retaining complete historical registry snapshots.
+        let mut validation_state = current.state.clone();
+        let mut validation_tree = current.ironwood_tree.clone();
+        let mut validation_checkpoints = current.ironwood_checkpoints.clone();
+        let mut validation_tip = current.tip;
+        let mut validation_root = current.state_root;
+        for undo in history.values().rev() {
+            if undo.applied_tip != validation_tip {
                 return Err(SnapshotError::NonCanonicalHistory);
             }
-        }
-        // A checkpoint embedded in a later retained snapshot must agree with
-        // the authenticated tip checkpoint from the retained snapshot at that
-        // height. Tip state roots alone do not bind older checkpoint entries.
-        for snapshot in history.values() {
-            for (height, checkpoint) in &snapshot.ironwood_checkpoints {
-                if let Some(historical) = history.get(height) {
-                    let authenticated = historical
-                        .ironwood_checkpoints
-                        .get(height)
-                        .ok_or(SnapshotError::InvalidCheckpoint)?;
-                    if checkpoint != authenticated {
-                        return Err(SnapshotError::InvalidCheckpoint);
-                    }
-                }
+            Self::apply_undo_to(
+                undo,
+                &mut validation_state,
+                &mut validation_tree,
+                &mut validation_checkpoints,
+                &mut validation_tip,
+                &mut validation_root,
+            )?;
+            Self::validate_state_shape(&deployment, &validation_state, validation_tip.height)?;
+            let root = Self::snapshot_state_root(
+                &deployment,
+                deployment_id,
+                &validation_state,
+                &validation_tree,
+                &validation_checkpoints,
+                validation_tip,
+            )?;
+            if root != undo.prior_state_root {
+                return Err(SnapshotError::StateRootMismatch);
+            }
+            if validation_root != root {
+                return Err(SnapshotError::StateRootMismatch);
             }
         }
-        let current = history
-            .last_key_value()
-            .map(|(_, snapshot)| snapshot.clone())
-            .ok_or(SnapshotError::EmptyHistory)?;
         let verifier =
             V1BondVerifier::new().map_err(|_| SnapshotError::VerifierInitializationFailure)?;
         Ok(Self {
@@ -396,6 +509,7 @@ impl V1Reducer {
             ironwood_tree: current.ironwood_tree,
             ironwood_checkpoints: current.ironwood_checkpoints,
             tip: current.tip,
+            state_root: current.state_root,
             verifier,
             history,
         })
@@ -415,18 +529,24 @@ impl V1Reducer {
         if height > self.tip.height {
             return Err(RewindError::BeyondTip);
         }
-        let snapshot = self
-            .history
-            .get(&height)
-            .cloned()
-            .ok_or(RewindError::SnapshotMissing)?;
-
-        self.state = snapshot.state;
-        self.ironwood_tree = snapshot.ironwood_tree;
-        self.ironwood_checkpoints = snapshot.ironwood_checkpoints;
-        self.tip = snapshot.tip;
-        self.history
-            .retain(|snapshot_height, _| *snapshot_height <= height);
+        if height < self.oldest_rewind_height() {
+            return Err(RewindError::SnapshotMissing);
+        }
+        while self.tip.height > height {
+            let undo = self
+                .history
+                .remove(&self.tip.height)
+                .ok_or(RewindError::SnapshotMissing)?;
+            Self::apply_undo_to(
+                &undo,
+                &mut self.state,
+                &mut self.ironwood_tree,
+                &mut self.ironwood_checkpoints,
+                &mut self.tip,
+                &mut self.state_root,
+            )
+            .map_err(|_| RewindError::SnapshotMissing)?;
+        }
         Ok(())
     }
 
@@ -540,21 +660,26 @@ impl V1Reducer {
             block_hash: block.block_hash,
         };
 
+        let undo = ReducerUndo {
+            applied_tip: tip,
+            prior_tip: self.tip,
+            state: StateUndo::between(&self.state, &state),
+            prior_ironwood_tree: self.ironwood_tree.clone(),
+            checkpoint_undo: map_undo(&self.ironwood_checkpoints, &checkpoints),
+            prior_state_root: self.state_root,
+        };
+
         self.state = state;
         self.ironwood_tree = tree;
         self.ironwood_checkpoints = checkpoints;
         self.tip = tip;
-        self.history.insert(
-            block.height,
-            ReducerSnapshot {
-                state: self.state.clone(),
-                ironwood_tree: self.ironwood_tree.clone(),
-                ironwood_checkpoints: self.ironwood_checkpoints.clone(),
-                tip: self.tip,
-            },
-        );
-        let oldest_retained = block.height.saturating_sub(DEFAULT_REORG_RETENTION_BLOCKS);
-        self.history.retain(|height, _| *height >= oldest_retained);
+        self.state_root = final_root;
+        self.history.insert(block.height, undo);
+        let oldest_undo = block
+            .height
+            .saturating_sub(DEFAULT_REORG_RETENTION_BLOCKS)
+            .saturating_add(1);
+        self.history.retain(|height, _| *height >= oldest_undo);
         Ok(AppliedBlock {
             tip,
             ironwood_checkpoint,
@@ -566,41 +691,41 @@ impl V1Reducer {
         })
     }
 
-    fn store_snapshot(
-        &self,
-        snapshot: &ReducerSnapshot,
-    ) -> Result<StoredReducerSnapshot, SnapshotError> {
+    fn store_current_snapshot(&self) -> Result<StoredReducerSnapshot, SnapshotError> {
         let mut ironwood_tree = Vec::new();
         zcash_primitives::merkle_tree::write_commitment_tree(
-            &snapshot.ironwood_tree,
+            &self.ironwood_tree,
             &mut ironwood_tree,
         )
         .map_err(|_| SnapshotError::InvalidIronwoodTree)?;
         let state_root = Self::snapshot_state_root(
             &self.deployment,
             self.deployment_id,
-            &snapshot.state,
-            &snapshot.ironwood_tree,
-            &snapshot.ironwood_checkpoints,
-            snapshot.tip,
+            &self.state,
+            &self.ironwood_tree,
+            &self.ironwood_checkpoints,
+            self.tip,
         )?;
+        if state_root != self.state_root {
+            return Err(SnapshotError::StateRootMismatch);
+        }
         Ok(StoredReducerSnapshot {
-            height: snapshot.tip.height,
-            block_hash: snapshot.tip.block_hash,
+            height: self.tip.height,
+            block_hash: self.tip.block_hash,
             state: StoredState {
-                names: snapshot
+                names: self
                     .state
                     .names
                     .iter()
                     .map(|(name, record)| (name.clone(), record.clone()))
                     .collect(),
-                pending: snapshot
+                pending: self
                     .state
                     .pending
                     .iter()
                     .map(|(commitment, position)| (*commitment, *position))
                     .collect(),
-                recent_spent: snapshot
+                recent_spent: self
                     .state
                     .recent_spent
                     .iter()
@@ -608,7 +733,7 @@ impl V1Reducer {
                     .collect(),
             },
             ironwood_tree,
-            ironwood_checkpoints: snapshot
+            ironwood_checkpoints: self
                 .ironwood_checkpoints
                 .values()
                 .map(|checkpoint| StoredCheckpoint {
@@ -617,7 +742,43 @@ impl V1Reducer {
                     tree_size: checkpoint.tree_size,
                 })
                 .collect(),
-            state_root,
+            state_root: self.state_root,
+        })
+    }
+
+    fn store_undo(undo: &ReducerUndo) -> Result<StoredReducerUndo, SnapshotError> {
+        let mut prior_ironwood_tree = Vec::new();
+        zcash_primitives::merkle_tree::write_commitment_tree(
+            &undo.prior_ironwood_tree,
+            &mut prior_ironwood_tree,
+        )
+        .map_err(|_| SnapshotError::InvalidIronwoodTree)?;
+        Ok(StoredReducerUndo {
+            applied_height: undo.applied_tip.height,
+            applied_block_hash: undo.applied_tip.block_hash,
+            prior_height: undo.prior_tip.height,
+            prior_block_hash: undo.prior_tip.block_hash,
+            state: StoredStateUndo {
+                names: undo.state.names.clone(),
+                pending: undo.state.pending.clone(),
+                recent_spent: undo.state.recent_spent.clone(),
+            },
+            prior_ironwood_tree,
+            checkpoint_undo: undo
+                .checkpoint_undo
+                .iter()
+                .map(|(height, checkpoint)| {
+                    (
+                        *height,
+                        checkpoint.map(|checkpoint| StoredCheckpoint {
+                            height: checkpoint.height,
+                            root: checkpoint.root,
+                            tree_size: checkpoint.tree_size,
+                        }),
+                    )
+                })
+                .collect(),
+            prior_state_root: undo.prior_state_root,
         })
     }
 
@@ -723,7 +884,114 @@ impl V1Reducer {
             ironwood_tree,
             ironwood_checkpoints: checkpoints,
             tip,
+            state_root: stored.state_root,
         })
+    }
+
+    fn validate_state_shape(
+        deployment: &DeploymentParameters,
+        state: &CoppiceState,
+        height: u32,
+    ) -> Result<(), SnapshotError> {
+        if state.names.iter().any(|(name, record)| {
+            !crate::envelope::valid_name(name)
+                || crate::owner::parse_v1_owner_key(record.owner_pk).is_err()
+                || reveal::canonical_v1_address(&record.address, deployment).is_err()
+                || matches!(
+                    record.status,
+                    NameStatus::Released { terminal_height: 0 }
+                        | NameStatus::BondSpent { terminal_height: 0 }
+                )
+        }) || state
+            .pending
+            .values()
+            .any(|position| position.block_height > height)
+            || state.recent_spent.values().any(|spent| *spent > height)
+        {
+            return Err(SnapshotError::InvalidState);
+        }
+        Ok(())
+    }
+
+    fn restore_undo(stored: StoredReducerUndo) -> Result<ReducerUndo, SnapshotError> {
+        let mut tree_cursor = Cursor::new(&stored.prior_ironwood_tree);
+        let prior_ironwood_tree: IronwoodFrontier =
+            zcash_primitives::merkle_tree::read_commitment_tree(&mut tree_cursor)
+                .map_err(|_| SnapshotError::InvalidIronwoodTree)?;
+        if tree_cursor.position() != stored.prior_ironwood_tree.len() as u64 {
+            return Err(SnapshotError::InvalidIronwoodTree);
+        }
+        let checkpoint_undo = stored
+            .checkpoint_undo
+            .into_iter()
+            .map(|(height, checkpoint)| {
+                let checkpoint = checkpoint.map(|checkpoint| {
+                    if checkpoint.height != height {
+                        return Err(SnapshotError::InvalidCheckpoint);
+                    }
+                    Ok(AuthenticatedIronwoodCheckpoint {
+                        height,
+                        root: checkpoint.root,
+                        tree_size: checkpoint.tree_size,
+                    })
+                });
+                match checkpoint.transpose() {
+                    Ok(checkpoint) => Ok((height, checkpoint)),
+                    Err(error) => Err(error),
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if has_duplicate_keys(&stored.state.names)
+            || has_duplicate_keys(&stored.state.pending)
+            || has_duplicate_keys(&stored.state.recent_spent)
+            || has_duplicate_keys(&checkpoint_undo)
+        {
+            return Err(SnapshotError::NonCanonicalHistory);
+        }
+        Ok(ReducerUndo {
+            applied_tip: ReplayTip {
+                height: stored.applied_height,
+                block_hash: stored.applied_block_hash,
+            },
+            prior_tip: ReplayTip {
+                height: stored.prior_height,
+                block_hash: stored.prior_block_hash,
+            },
+            state: StateUndo {
+                names: stored.state.names,
+                pending: stored.state.pending,
+                recent_spent: stored.state.recent_spent,
+            },
+            prior_ironwood_tree,
+            checkpoint_undo,
+            prior_state_root: stored.prior_state_root,
+        })
+    }
+
+    fn apply_undo_to(
+        undo: &ReducerUndo,
+        state: &mut CoppiceState,
+        tree: &mut IronwoodFrontier,
+        checkpoints: &mut BTreeMap<u32, AuthenticatedIronwoodCheckpoint>,
+        tip: &mut ReplayTip,
+        state_root: &mut [u8; 32],
+    ) -> Result<(), SnapshotError> {
+        if *tip != undo.applied_tip {
+            return Err(SnapshotError::NonCanonicalHistory);
+        }
+        let mut names = state.names.clone();
+        let mut pending = state.pending.clone();
+        let mut recent_spent = state.recent_spent.clone();
+        apply_map_undo(&mut names, &undo.state.names);
+        apply_map_undo(&mut pending, &undo.state.pending);
+        apply_map_undo(&mut recent_spent, &undo.state.recent_spent);
+        *state = CoppiceState::from_authoritative_parts(names, pending, recent_spent)
+            .map_err(|_| SnapshotError::InvalidState)?;
+        *tree = undo.prior_ironwood_tree.clone();
+        apply_map_undo(checkpoints, &undo.checkpoint_undo);
+        *tip = undo.prior_tip;
+        *state_root = undo.prior_state_root;
+        Ok(())
     }
 
     fn snapshot_state_root(
@@ -1142,13 +1410,15 @@ mod tests {
         IronwoodFrontier,
         BTreeMap<u32, AuthenticatedIronwoodCheckpoint>,
         ReplayTip,
-        BTreeMap<u32, ReducerSnapshot>,
+        [u8; 32],
+        BTreeMap<u32, ReducerUndo>,
     ) {
         (
             reducer.state.clone(),
             reducer.ironwood_tree.clone(),
             reducer.ironwood_checkpoints.clone(),
             reducer.tip,
+            reducer.state_root,
             reducer.history.clone(),
         )
     }
@@ -1173,12 +1443,16 @@ mod tests {
         block_hash: [u8; 32],
         mutate: impl FnOnce(&V1Reducer, &mut CoppiceState),
     ) -> AppliedBlock {
+        let prior_state = reducer.state.clone();
         let mut staged = reducer.state.clone();
         mutate(reducer, &mut staged);
         reducer.state = staged;
-        reducer
+        let applied = reducer
             .apply_block(&empty_block_at(reducer, height, block_hash))
-            .unwrap()
+            .unwrap();
+        reducer.history.get_mut(&height).unwrap().state =
+            StateUndo::between(&prior_state, &reducer.state);
+        applied
     }
 
     fn block_with_effects(
@@ -1635,7 +1909,8 @@ mod tests {
         if let Operation::Update { signature: out, .. } = &mut update {
             *out = signature.to_vec();
         }
-        let mut staged = rewound.state.clone();
+        let prior_state = rewound.state.clone();
+        let mut staged = prior_state.clone();
         assert_eq!(
             rewound
                 .apply_operation(&mut staged, &rewound.ironwood_checkpoints, 103, 0, &update)
@@ -1661,6 +1936,8 @@ mod tests {
                 vec![abandoned_commitment],
             ))
             .unwrap();
+        rewound.history.get_mut(&103).unwrap().state =
+            StateUndo::between(&prior_state, &rewound.state);
         assert_eq!(rewound.state.names["alice"].sequence, 1);
         assert_eq!(rewound.state.names["alice"].status, NameStatus::Active);
         assert!(rewound.state.pending.contains_key(&abandoned_pending));
@@ -1729,12 +2006,12 @@ mod tests {
         assert!(!rewound.state.recent_spent.contains_key(&abandoned_tag));
         assert!(!rewound.state.pending.contains_key(&abandoned_pending));
         assert_ne!(replacement.ironwood_checkpoint.root, abandoned_root);
-        assert_eq!(rewound.history[&103].tip.block_hash, [0xb3; 32]);
+        assert_eq!(rewound.history[&103].applied_tip.block_hash, [0xb3; 32]);
         assert!(
             rewound
                 .history
                 .values()
-                .all(|snapshot| snapshot.tip.block_hash != [0xa3; 32])
+                .all(|undo| undo.applied_tip.block_hash != [0xa3; 32])
         );
     }
 
@@ -1758,10 +2035,11 @@ mod tests {
         assert_eq!(snapshot(&reducer), before);
         assert_eq!(reducer.rewind_to(102), Err(RewindError::BeyondTip));
         assert_eq!(snapshot(&reducer), before);
-        reducer.history.remove(&100);
+        let removed = reducer.history.remove(&101).unwrap();
         let missing_before = snapshot(&reducer);
         assert_eq!(reducer.rewind_to(100), Err(RewindError::SnapshotMissing));
         assert_eq!(snapshot(&reducer), missing_before);
+        reducer.history.insert(101, removed);
 
         reducer.rewind_to(99).unwrap();
         assert_eq!(reducer.deployment, deployment_before);
@@ -1846,18 +2124,18 @@ mod tests {
         reducer
             .apply_block(&empty_block_at(&reducer, 102, [0x22; 32]))
             .unwrap();
-        assert_eq!(reducer.history[&102].tip.block_hash, [0x22; 32]);
+        assert_eq!(reducer.history[&102].applied_tip.block_hash, [0x22; 32]);
         reducer.rewind_to(100).unwrap();
         for (height, byte) in [(101, 0x31), (102, 0x32)] {
             reducer
                 .apply_block(&empty_block_at(&reducer, height, [byte; 32]))
                 .unwrap();
         }
-        assert_eq!(reducer.history.len(), 4);
-        assert_eq!(reducer.history[&101].tip.block_hash, [0x31; 32]);
-        assert_eq!(reducer.history[&102].tip.block_hash, [0x32; 32]);
-        assert!(reducer.history.values().all(|snapshot| {
-            ![[0x11; 32], [0x12; 32], [0x22; 32]].contains(&snapshot.tip.block_hash)
+        assert_eq!(reducer.history.len(), 3);
+        assert_eq!(reducer.history[&101].applied_tip.block_hash, [0x31; 32]);
+        assert_eq!(reducer.history[&102].applied_tip.block_hash, [0x32; 32]);
+        assert!(reducer.history.values().all(|undo| {
+            ![[0x11; 32], [0x12; 32], [0x22; 32]].contains(&undo.applied_tip.block_hash)
         }));
     }
 
@@ -1922,12 +2200,20 @@ mod tests {
                 .unwrap();
         }
 
-        assert_eq!(reducer.history.len(), 101);
+        assert_eq!(reducer.history.len(), 100);
         assert_eq!(reducer.oldest_rewind_height(), 129);
         assert!(!reducer.has_rewind_snapshot(128));
         assert_eq!(reducer.rewind_to(128), Err(RewindError::SnapshotMissing));
 
         let encoded = reducer.save_snapshot().unwrap();
+        let stored: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        assert!(stored.get("snapshots").is_none());
+        assert_eq!(stored["undo"].as_array().unwrap().len(), 100);
+        assert!(stored["undo"].as_array().unwrap().iter().all(|undo| {
+            undo["state"]["names"].as_array().unwrap().is_empty()
+                && undo["state"]["pending"].as_array().unwrap().is_empty()
+                && undo["state"]["recent_spent"].as_array().unwrap().is_empty()
+        }));
         let restored = V1Reducer::load_snapshot(deployment(), &encoded).unwrap();
         assert_eq!(restored.tip(), reducer.tip());
         assert_eq!(restored.state(), reducer.state());
@@ -1937,7 +2223,7 @@ mod tests {
             reducer.ironwood_checkpoints()
         );
         assert_eq!(restored.oldest_rewind_height(), 129);
-        assert_eq!(restored.history.len(), 101);
+        assert_eq!(restored.history.len(), 100);
     }
 
     #[test]
@@ -1956,7 +2242,7 @@ mod tests {
         ));
 
         let mut value: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
-        value["snapshots"][1]["state_root"] =
+        value["current"]["state_root"] =
             serde_json::Value::Array(vec![serde_json::Value::from(0); 32]);
         assert!(matches!(
             V1Reducer::load_snapshot(deployment(), &serde_json::to_vec(&value).unwrap()),
@@ -1964,7 +2250,7 @@ mod tests {
         ));
 
         let mut value: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
-        value["snapshots"][1]["ironwood_checkpoints"][0]["root"][0] = serde_json::Value::from(1);
+        value["current"]["ironwood_checkpoints"][0]["root"][0] = serde_json::Value::from(1);
         assert!(matches!(
             V1Reducer::load_snapshot(deployment(), &serde_json::to_vec(&value).unwrap()),
             Err(SnapshotError::InvalidCheckpoint)

@@ -754,12 +754,16 @@ pub struct CoppiceSnapshotV1 {
 
 The reference reducer exposes a versioned local snapshot containing its current
 authoritative state plus a bounded rewind journal. The default journal retains
-the current snapshot and 100 predecessor blocks. Loading rejects a wrong
-deployment, non-contiguous or oversized history, malformed canonical records,
-invalid tree/checkpoint relationships, and state-root mismatches. The active
-bond index is always rebuilt from authoritative name records. Snapshot bytes
-remain wallet-local data; after loading, the host must still compare the saved
-tip identity with its selected canonical chain before enabling protected spends.
+one full current state and 100 per-block undo entries. Each undo entry stores
+only previous values for registry keys changed by that block, together with the
+previous compact Ironwood frontier and checkpoint-map changes; it does not copy
+the complete registry state. Loading rejects a wrong deployment, non-contiguous
+or oversized history, malformed canonical records, invalid tree/checkpoint
+relationships, and current or historical state-root mismatches by walking the
+journal backward. The active bond index is always rebuilt from authoritative
+name records. Snapshot bytes remain wallet-local data; after loading, the host
+must still compare the saved tip identity with its selected canonical chain
+before enabling protected spends.
 
 ## I-025 — Snapshot validation and local trust model
 
