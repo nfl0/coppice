@@ -576,6 +576,50 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct EmptyLockBackend;
+
+    struct TestHost(crate::WalletCanonicalTip);
+
+    impl crate::HostCanonicalTipSource for TestHost {
+        type Error = std::convert::Infallible;
+
+        fn canonical_tip(&self) -> Result<crate::WalletCanonicalTip, Self::Error> {
+            Ok(self.0)
+        }
+    }
+
+    impl crate::CoppiceLockBackend for EmptyLockBackend {
+        type Error = std::convert::Infallible;
+
+        fn owned_unspent_ironwood_notes(
+            &self,
+        ) -> Result<Vec<crate::OwnedIronwoodNote>, Self::Error> {
+            Ok(vec![])
+        }
+
+        fn ensure_coppice_lock(
+            &mut self,
+            _: &crate::IronwoodOutputId,
+            _: [u8; 32],
+            _: BlockHeight,
+        ) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn remove_coppice_lock(
+            &mut self,
+            _: &crate::IronwoodOutputId,
+            _: [u8; 32],
+        ) -> Result<bool, Self::Error> {
+            Ok(false)
+        }
+
+        fn max_lock_expiry_height(&self) -> BlockHeight {
+            BlockHeight::from_u32(u32::MAX)
+        }
+    }
+
     fn apply_history(reducer: &mut V1Reducer, blocks: &BTreeMap<u32, CompactBlock>) {
         let mut full = FullSource::default();
         for block in blocks.values() {
@@ -866,6 +910,19 @@ mod tests {
         assert_eq!(reducer.tip().height, 3);
         assert!(!source.source().block_calls.contains(&4));
         assert_eq!(source.source().tip_calls, 0);
+        let host = crate::WalletCanonicalTip::from(reducer.tip());
+        let mut backend = EmptyLockBackend;
+        crate::with_coppice_spend_guard(
+            crate::CoppiceProtectionMode::Enabled,
+            &TestHost(host),
+            &reducer,
+            &crate::PendingRegistrationCollection::new(),
+            crate::WalletAccountId::from_bytes([0x11; 32]),
+            crate::IronwoodViewingCapability::FullViewing,
+            &mut backend,
+            |_| (),
+        )
+        .unwrap();
 
         let transport = Source::new(history, tip(4, 4));
         let mut source = FrozenCanonicalBlockSource::new(transport, tip(4, 4));

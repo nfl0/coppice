@@ -1857,6 +1857,14 @@ RELEASE, canonical name payment, completion/abandonment, and explicit Break
 Bond. Manual transparent-only PCZT construction does not select shielded bond
 notes.
 
+A deliberate transition to `Off` first removes only exact-owner Coppice
+advisory locks for each account and persists `Off` only after cleanup succeeds;
+foreign/proposal locks are untouched. A crash before the setting write remains
+fail-closed because the previous protected mode repairs locks on the next spend.
+Generic signed-PCZT submission is independently rejected in protected mode if
+its Ironwood nullifiers spend an active or local-pending bond; explicit Break
+Bond is the only protected escape path.
+
 
 ## I-905 — Specification readiness
 

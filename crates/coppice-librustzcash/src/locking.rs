@@ -745,6 +745,27 @@ mod tests {
     }
 
     #[test]
+    fn off_transition_cleanup_removes_only_coppice_owned_locks() {
+        let own_output = note(4).output_id;
+        let foreign_output = note(5).output_id;
+        let foreign_owner = LockOwner::new([0xf5; 32]);
+        let mut backend = FakeBackend::new(vec![note(4), note(5)])
+            .with_lock(own_output, lock_owner_for_bond(tag(4)))
+            .with_lock(foreign_output, foreign_owner);
+        let report = reconcile_locks(
+            &BTreeSet::new(),
+            &PendingRegistrationCollection::new(),
+            account_id(),
+            IronwoodViewingCapability::FullViewing,
+            &mut backend,
+        )
+        .unwrap();
+        assert_eq!(report.removed_locks, 1);
+        assert!(!backend.locks.contains_key(&own_output));
+        assert_eq!(backend.locks[&foreign_output].owner, foreign_owner);
+    }
+
+    #[test]
     fn active_canonical_tag_without_owned_note_is_harmless() {
         let active = BTreeSet::from([tag(6)]);
         let mut backend = FakeBackend::new(Vec::new());
