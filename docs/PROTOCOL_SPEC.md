@@ -58,6 +58,26 @@ RELEASE
 
 There is no TRANSFER, REBOND, RENEW, or administrative operation.
 
+## P-SCOPE-001 — Ironwood-only shielded protocol scope
+
+Coppice v1 is an Ironwood-only protocol.
+
+Only Ironwood notes/actions may carry Coppice carrier frames, supply Coppice
+bonded notes, or contribute shielded effects to Coppice canonical state.
+Sapling notes/actions and notes/actions from the pre-Ironwood Orchard protocol
+are not valid Coppice carriers. They MUST NOT serve as Coppice bonded notes and
+MUST NEVER be interpreted as Coppice protocol state, including registry
+operations, commitments, nullifiers, or bond effects.
+
+Coppice-aware wallets MAY continue to hold, receive, and spend Sapling and
+pre-Ironwood Orchard funds through their normal Zcash wallet behavior. Those
+funds are outside Coppice and MUST NOT be selected for Coppice bond
+construction, carrier construction, or Coppice protection.
+
+The Rust `orchard` crate and its Orchard-named types are used for Ironwood
+cryptographic and wallet machinery. That implementation naming does not expand
+the Coppice v1 protocol scope to the pre-Ironwood Orchard protocol.
+
 ## 3. Conformance rule
 
 For every protocol rule, byte serialization, hash domain, validation condition,
@@ -150,9 +170,9 @@ Recommended Rust shape:
 
 ```rust
 pub struct Rendezvous {
-    /// Raw Orchard incoming viewing key encoding.
+    /// Raw Ironwood incoming viewing key encoding, provided by the `orchard` crate.
     pub orchard_ivk: [u8; 64],
-    /// Raw Orchard payment-address encoding.
+    /// Raw Ironwood payment-address encoding, provided by the `orchard` crate.
     pub orchard_receiver: [u8; 43],
 }
 
@@ -178,9 +198,9 @@ network_type_code(Test)    = 0x02
 network_type_code(Regtest) = 0x03
 ```
 
-The rendezvous validation MUST parse the 64-byte raw Orchard IVK and 43-byte
-raw Orchard receiver and require that `ivk.diversifier_index(&receiver)` is
-`Some(_)`.
+The rendezvous validation MUST parse the 64-byte raw Ironwood IVK and 43-byte
+raw Ironwood receiver using the `orchard` crate and require that
+`ivk.diversifier_index(&receiver)` is `Some(_)`.
 
 Validation MUST enforce:
 
@@ -387,7 +407,7 @@ The BondProof binds the registration to the chosen owner key.
 
 The protocol permits any valid owner public key.
 
-For interoperability between Coppice-aware software wallets, the librustzcash adapter SHOULD provide a deterministic default owner key derived from the account's Orchard spending authority.
+For interoperability between Coppice-aware software wallets, the librustzcash adapter SHOULD provide a deterministic default owner key derived from the account's Ironwood spending authority (the Orchard-named key component used by the `orchard` crate).
 
 This solves an important restore problem:
 
@@ -454,7 +474,7 @@ unkeyed `H(...)` function used for public protocol hashes.
 Security requirements:
 
 - never persist the derived scalar unless the wallet's normal key-storage policy permits it;
-- never expose the Orchard spending key to untrusted code;
+- never expose the Ironwood spending key to untrusted code;
 - hardware/external signers SHOULD implement this derivation internally;
 - UFVK-only wallets cannot derive this signing key and therefore cannot UPDATE or RELEASE.
 
@@ -1878,7 +1898,7 @@ Chain Ironwood effects still apply.
 For every compact Ironwood action:
 
 1. construct the Ironwood compact note-encryption domain;
-2. trial-decrypt the compact ciphertext with the deployment's public rendezvous Orchard IVK;
+2. trial-decrypt the compact ciphertext with the deployment's public rendezvous Ironwood IVK (provided by the `orchard` crate);
 3. if any action decrypts, mark the transaction as requiring full retrieval.
 
 A transaction with no matching action requires no full transaction fetch for Coppice.

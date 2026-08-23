@@ -54,8 +54,16 @@ reveal.rs
 state_root.rs
 ```
 
-The workspace already pins `halo2_proofs = 0.3.2`, Pasta/Orchard dependencies,
-and selects the Coppice Orchard fork through:
+### Shielded protocol scope
+
+Coppice v1 is Ironwood-only. Any reference below to Orchard-named types or
+machinery means the Rust `orchard` crate used to implement Ironwood; it does not
+make Sapling or the pre-Ironwood Orchard protocol part of Coppice. Sapling and
+pre-Ironwood Orchard funds remain ordinary wallet funds, but are outside
+Coppice carrier, bonded-note, and reducer state.
+
+The workspace already pins `halo2_proofs = 0.3.2`, Pasta dependencies, and uses
+the patched `orchard` Rust crate for Ironwood cryptographic machinery through:
 
 ```toml
 [patch.crates-io]
@@ -70,7 +78,7 @@ The implementation MUST preserve and build on:
 vendor/orchard
 ```
 
-The existing Coppice Orchard patch already exposes/refactors the real Orchard
+The existing Coppice `orchard` patch already exposes/refactors the Ironwood
 note-commitment, Merkle-membership, key, value, and nullifier constraints needed
 for BondProof. Do not reimplement these cryptographic primitives.
 
@@ -441,7 +449,8 @@ pub struct PendingRegistration {
 ```
 
 `wallet_account_id` is local wallet metadata derived from the canonical
-Orchard full viewing key, not a wallet-database row identifier. It therefore
+Orchard full viewing key used for Ironwood note derivation, not a wallet-database
+row identifier. It therefore
 survives restart and same-seed/import restoration. A wallet-global pending
 collection MUST filter pending bond tags by this account identity before
 reconciling one account's notes; another account's pending bond is not a
@@ -677,13 +686,14 @@ After wallet scanning, the concrete host MUST freeze that wallet-selected
 lightwalletd/Zaino server remains untrusted block/full-transaction transport;
 its newer tip must not replace or extend the frozen target during the pass.
 
-The Orchard/Ironwood builder may randomize Action positions. Wallet carrier
-construction MUST NOT rely on output insertion order to preserve frame order.
+The Ironwood builder, implemented with the `orchard` crate, may randomize Action
+positions. Wallet carrier construction MUST NOT rely on output insertion order
+to preserve frame order.
 It may add rendezvous outputs in any builder order; canonical v1 reconstruction
 uses each memo's explicit `frame_index`.
 
 Carrier transaction construction SHOULD map each prepared frame to one
-zero-valued payment to the Orchard-only rendezvous Unified Address and use the
+zero-valued payment to the Ironwood rendezvous Unified Address and use the
 normal `propose_transfer` and `create_proposed_transactions` wallet path. The
 proposal MUST route every payment to Ironwood, and the stored finished
 transaction MUST be decrypted and reconstructed before it is handed to a
@@ -901,7 +911,7 @@ The chosen upstream revision must coherently support:
 
 - Ironwood compact scanning;
 - Ironwood wallet notes;
-- Orchard/UFVK full viewing key access;
+- the `orchard`-crate UFVK component and full viewing key access for Ironwood;
 - `InputSource`;
 - enumeration of unspent Ironwood notes;
 - `LockFilter::Unfiltered` or equivalent;
@@ -1022,7 +1032,8 @@ After an active REVEAL is mined, another Coppice-aware device with the same acco
 - the active name from global replay;
 - the bond tag from NameRecord;
 - the bond note from UFVK note/tag matching;
-- the default owner signer from the account Orchard spending key + name + bond tag.
+- the default owner signer from the account Ironwood spending key component +
+  name + bond tag.
 
 No active-registration side database needs to be synchronized.
 
@@ -1728,8 +1739,8 @@ enable-output flag
 cross-address Action checks
 ```
 
-The existing Orchard V3 note-commitment, Sinsemilla Merkle, CommitIvk/ECC,
-nullifier, and related gadgets SHOULD be reused unchanged.
+The existing Ironwood V3 (`orchard`-crate) note-commitment, Sinsemilla Merkle,
+CommitIvk/ECC, nullifier, and related gadgets SHOULD be reused unchanged.
 
 ### Position-floor comparator
 
@@ -1826,7 +1837,7 @@ Use expensive review primarily for:
 
 1. `CoppiceBondCircuit` soundness and unconstrained-witness mistakes;
 2. integer/range constraints, especially freshness;
-3. nullifier/tag derivation equivalence with native Orchard;
+3. nullifier/tag derivation equivalence with native Ironwood (`orchard` crate);
 4. reducer transaction/block ordering;
 5. `RecentSpent` retention theorem boundaries;
 6. reorg equivalence to fresh replay;

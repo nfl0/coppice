@@ -11,7 +11,7 @@ For every task:
 2. Read only the relevant parts of `docs/IMPLEMENTATION.md`.
 3. Treat `test-vectors/` as interoperability oracles.
 4. Inspect the current implementation before editing.
-5. Reuse the existing vendored Orchard cryptographic work.
+5. Reuse the existing vendored `orchard` cryptographic work used by Ironwood.
 6. Make only the bounded change requested by the current task.
 7. If the requested change conflicts with the frozen protocol or exposes a
    design flaw, stop and report the issue instead of improvising.

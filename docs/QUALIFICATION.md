@@ -20,4 +20,4 @@ APIs before the real carrier, bond lifecycle, reorg, and same-seed live cases
 can be qualified end to end.
 
 This is an integration-capability failure, not permission to omit Ironwood
-effects, use Orchard state, or weaken canonical reducer validation.
+effects, use pre-Ironwood Orchard state, or weaken canonical reducer validation.
