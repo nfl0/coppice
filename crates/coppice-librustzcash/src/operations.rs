@@ -76,7 +76,7 @@ fn owner_signing_key<'a>(
         OwnerAuthority::DefaultSoftware(account_key) => {
             *derived = Some(derive_v1_owner_signing_key(
                 *account_key,
-                runtime.deployment_id(),
+                runtime.names_deployment_id().to_bytes(),
                 owner::name_id(name),
                 record.bond_tag,
             )?);
@@ -102,9 +102,13 @@ fn sign_and_frame<HostError>(
     if verification_key != previous.owner_pk {
         return Err(OwnerOperationError::OwnerKeyMismatch);
     }
-    let signature =
-        authorization::sign_v1(runtime.deployment_id(), signing_key, &operation, previous)
-            .map_err(|_| OwnerOperationError::Authorization)?;
+    let signature = authorization::sign_v1(
+        runtime.names_deployment_id().to_bytes(),
+        signing_key,
+        &operation,
+        previous,
+    )
+    .map_err(|_| OwnerOperationError::Authorization)?;
     match &mut operation {
         Operation::Update {
             signature: target, ..
@@ -114,7 +118,11 @@ fn sign_and_frame<HostError>(
         } => *target = signature.to_vec(),
         _ => return Err(OwnerOperationError::Authorization),
     }
-    if !authorization::verify_v1(runtime.deployment_id(), &operation, previous) {
+    if !authorization::verify_v1(
+        runtime.names_deployment_id().to_bytes(),
+        &operation,
+        previous,
+    ) {
         return Err(OwnerOperationError::Authorization);
     }
     let sequence = match &operation {
@@ -359,7 +367,7 @@ mod tests {
         let bond_tag = [0x42; 32];
         let key = derive_v1_owner_signing_key(
             account_key,
-            runtime.deployment_id(),
+            runtime.names_deployment_id().to_bytes(),
             owner::name_id("alice"),
             bond_tag,
         )
@@ -403,7 +411,7 @@ mod tests {
             .unwrap();
             assert_eq!(prepared.sequence, 8);
             assert!(authorization::verify_v1(
-                runtime.deployment_id(),
+                runtime.names_deployment_id().to_bytes(),
                 prepared.operation(),
                 &record,
             ));

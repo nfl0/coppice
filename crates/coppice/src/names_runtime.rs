@@ -895,12 +895,6 @@ impl NamesRuntime {
         self.names.deployment_id()
     }
 
-    /// Frozen Coppice Names v1 deployment identity used by Names
-    /// cryptography. This is deliberately distinct from CoreRuntimeId.
-    pub fn deployment_id(&self) -> [u8; 32] {
-        self.names.deployment_id().to_bytes()
-    }
-
     pub fn state(&self) -> &CoppiceState {
         self.names.state()
     }

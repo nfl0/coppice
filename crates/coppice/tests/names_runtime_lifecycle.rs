@@ -372,8 +372,13 @@ fn routed_names_lifecycle_rewind_bond_spend_pruning_and_fresh_replay() {
         address: updated_address,
         signature: vec![0; 64],
     };
-    let signature =
-        authorization::sign_v1(runtime.deployment_id(), &owner_key, &update, &previous).unwrap();
+    let signature = authorization::sign_v1(
+        runtime.names_deployment_id().to_bytes(),
+        &owner_key,
+        &update,
+        &previous,
+    )
+    .unwrap();
     let Operation::Update {
         signature: slot, ..
     } = &mut update
@@ -415,8 +420,13 @@ fn routed_names_lifecycle_rewind_bond_spend_pruning_and_fresh_replay() {
         sequence: 2,
         signature: vec![0; 64],
     };
-    let signature =
-        authorization::sign_v1(runtime.deployment_id(), &owner_key, &release, &previous).unwrap();
+    let signature = authorization::sign_v1(
+        runtime.names_deployment_id().to_bytes(),
+        &owner_key,
+        &release,
+        &previous,
+    )
+    .unwrap();
     let Operation::Release {
         signature: slot, ..
     } = &mut release

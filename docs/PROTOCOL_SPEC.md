@@ -180,8 +180,9 @@ These values are not interchangeable. In particular, the existing
 
 Throughout the Names v1 sections below, the historical field name
 `deployment_id` means `NamesDeploymentId` unless a Core runtime section
-explicitly says otherwise. The implementation retains that historical API name
-during the additive extraction so existing protocol bytes do not change.
+explicitly says otherwise. Historical Names encodings retain that field name
+so existing protocol bytes remain unchanged; runtime-facing APIs use the typed
+`NamesDeploymentId` wrapper.
 
 ## P-RUNTIME-ID-001 — Generic Core runtime identifier
 

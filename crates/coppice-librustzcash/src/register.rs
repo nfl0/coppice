@@ -265,7 +265,7 @@ where
         RegistrationOwner::DefaultSoftware(spending_key) => owner_key_bytes(
             &derive_v1_owner_verification_key(
                 *spending_key,
-                runtime.deployment_id(),
+                runtime.names_deployment_id().to_bytes(),
                 name_id(&name),
                 selected_bond.bond_tag,
             )
@@ -1080,7 +1080,7 @@ mod tests {
         let expected = owner_key_bytes(
             &derive_v1_owner_verification_key(
                 account_key,
-                runtime.deployment_id(),
+                runtime.names_deployment_id().to_bytes(),
                 name_id("alice"),
                 prepared.selected_bond.bond_tag,
             )
