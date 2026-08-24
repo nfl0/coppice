@@ -4,11 +4,12 @@
 use std::fmt::Debug;
 
 use coppice::{
-    config::DeploymentParameters, constants::MAX_TRANSACTION_LEN, envelope,
-    names_application::names_v1_application_key, names_runtime::NamesRuntime,
+    config::DeploymentParameters, envelope, names_application::names_v1_application_key,
+    names_runtime::NamesRuntime,
 };
 use coppice_core::{
     identity::ValidatedCoreRuntimeParameters,
+    replay::MAX_FULL_TRANSACTION_LEN,
     runtime::{ApplicationMessageStatus, inspect_transaction},
 };
 use sapling::prover::{OutputProver, SpendProver};
@@ -439,7 +440,7 @@ where
             reason: PostBuildInvariantError::Serialization,
         })?;
     let serialized_size = encoded.len();
-    if serialized_size > MAX_TRANSACTION_LEN {
+    if serialized_size > MAX_FULL_TRANSACTION_LEN {
         return Err(CarrierConstructionError::PostBuildInvariant {
             txid,
             reason: PostBuildInvariantError::TransactionTooLarge {

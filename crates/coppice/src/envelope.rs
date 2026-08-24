@@ -172,13 +172,13 @@ pub fn encode_operation(op: &Operation) -> Result<Vec<u8>, Error> {
             o.extend_from_slice(signature)
         }
     }
-    if o.len() > constants::MAX_PAYLOAD_LEN {
+    if o.len() > coppice_core::carrier::MAX_CPV1_PAYLOAD_LEN {
         return Err(Error::Length);
     }
     Ok(o)
 }
 pub fn decode_operation(mut p: &[u8]) -> Result<Operation, Error> {
-    if p.len() > constants::MAX_PAYLOAD_LEN {
+    if p.len() > coppice_core::carrier::MAX_CPV1_PAYLOAD_LEN {
         return Err(Error::Length);
     }
     let ty = *take(&mut p, 1)?.first().ok_or(Error::Malformed)?;
@@ -360,7 +360,7 @@ mod tests {
             Err(Error::Length)
         );
 
-        let mut oversized_operation = vec![0; constants::MAX_PAYLOAD_LEN + 1];
+        let mut oversized_operation = vec![0; coppice_core::carrier::MAX_CPV1_PAYLOAD_LEN + 1];
         oversized_operation[0] = 1;
         assert_eq!(decode_operation(&oversized_operation), Err(Error::Length));
 

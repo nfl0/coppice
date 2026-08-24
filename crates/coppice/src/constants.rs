@@ -44,7 +44,3 @@ pub const START_FRAME_HEADER: usize = 74;
 pub const START_CHUNK_CAP: usize = 438;
 pub const CONT_FRAME_HEADER: usize = 7;
 pub const CONT_CHUNK_CAP: usize = 505;
-/// Transitional compatibility name for the Core-owned CPV1 payload limit.
-pub use coppice_core::carrier::MAX_CPV1_PAYLOAD_LEN as MAX_PAYLOAD_LEN;
-/// Transitional compatibility name for the Core-owned full-transaction limit.
-pub use coppice_core::replay::MAX_FULL_TRANSACTION_LEN as MAX_TRANSACTION_LEN;

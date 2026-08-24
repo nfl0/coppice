@@ -1,6 +1,5 @@
 use coppice::{
     config::{DeploymentParameters, DeploymentValidationError, Rendezvous},
-    constants,
     envelope::{self, Operation},
     names_application::{
         NAMES_CANONICAL_APPLICATION_IDENTITY, NAMES_V1_APPLICATION_VERSION,
@@ -185,7 +184,10 @@ fn three_identity_vector_and_production_transport_binding_match() {
         names["expected_envelope_length"].as_u64().unwrap() as usize
     );
     assert_eq!(decode_names_v1_envelope(&encoded), Ok(operation));
-    assert_eq!(MAX_APPLICATION_ENVELOPE_LEN, constants::MAX_PAYLOAD_LEN);
+    assert_eq!(
+        MAX_APPLICATION_ENVELOPE_LEN,
+        coppice_core::carrier::MAX_CPV1_PAYLOAD_LEN
+    );
 
     let frames = transport::encode_frames(core_runtime_id.to_bytes(), &encoded).unwrap();
     assert_eq!(frames.len(), 1);
