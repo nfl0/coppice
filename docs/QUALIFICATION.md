@@ -1,31 +1,58 @@
-# Coppice v1 qualification
+# Coppice qualification
 
-The deterministic qualification suite covers canonical encoding, hostile-input
-parsing, BondProof generation and verification, bounded snapshot/reorg replay,
-wallet lock reconstruction, carrier construction boundaries, and canonical
-chain reconciliation. `crates/coppice/tests/fuzz_properties.rs` additionally
-feeds 10,000 deterministic arbitrary inputs through the operation and indexed
-carrier parsers; rejection is permitted, panics are not.
+Qualification separates deterministic source/test evidence from live local
+stack evidence. It is evidence that the pinned code path behaved as recorded;
+it is not an independent audit, a public deployment, or a claim that every
+future host integration is safe.
 
-## Live Zakura → Zaino qualification
+## Deterministic coverage
 
-The current local qualification uses Zakura with the pinned Z3 regtest upgrade
-schedule (NU5 through NU6.3 at height 2), the patched Zaino Ironwood compact
-block/subtree APIs, and `zcash-devtool` built from the committed Coppice
-runtime. Coppice is exercised through the general `CoreRuntime` and the
-Names-v1 application composition; Zcash remains the host-selected canonical
-ordering and fork-choice authority.
+The workspace covers canonical encodings, hostile-input parsing, CPV1 and CA01
+routing, exact receiver binding, BondProof generation and verification,
+application routing, block atomicity, snapshots, retained rewind, rebuild
+signaling, wallet lock reconstruction, and fresh replay. The fuzz-property
+tests feed deterministic arbitrary inputs through operation and indexed-carrier
+parsers; rejection is permitted, panics are not.
 
-The live phases cover ordinary Ironwood transactions, the complete Names
-COMMIT/REVEAL/UPDATE/RELEASE lifecycle, bond spends and protection, restart and
-fresh-wallet recovery, shallow reorgs, and multi-account isolation. Phase 7
-also mines an abandoned branch containing an application transition, advances
-that branch beyond the configured 121-block rewind horizon, replaces it with
-an equal-length canonical suffix, and verifies that the runtime rebuild and an
-independently initialized same-seed wallet produce the same tip, Names state,
-protection locks, and serialized runtime snapshot.
+## Final live qualification: Zakura -> patched Zaino -> zcash-devtool
 
-These are local qualification results for the development/regtest stack. They
-do not claim a public Zcash Testnet or Mainnet deployment, production release,
-or independent security audit. The Ironwood APIs are required for every live
-run; no fallback omits canonical Ironwood effects or weakens replay validation.
+The final local qualification used Zakura with the pinned Ironwood/regtest
+schedule, the patched Zaino fork with the required Ironwood subtree APIs, and
+`zcash-devtool` built from the frozen Coppice runtime. The host remained the
+canonical Zcash ordering and fork-choice authority throughout.
+
+The phases covered:
+
+1. Ironwood subtree-root serving through Zaino, wallet sync, and an ordinary
+   Ironwood receive/spend.
+2. Names `COMMIT`/`REVEAL`/`UPDATE`/`RELEASE`, bond spend, restart recovery, and
+   a shallow same-height reorg.
+3. Independent same-seed wallet recovery from the Coppice activation birthday,
+   canonical replay, bond-lock reconstruction, protected ordinary-send
+   rejection, and fresh-wallet Break Bond.
+4. Same-seed multi-account registration, distinct `WalletAccountId` values,
+   account-scoped pending state and locks, restart recovery, and fresh recovery.
+5. Adversarial wallet and PCZT spend-path checks under `Enabled` and
+   `GuardOnly`, exact-owner Break Bond, `Off`-mode cleanup, and foreign-lock
+   preservation.
+6. Deterministic retained/deep-reorg and activation-checkpoint rebuild
+   qualification, including equivalence with clean replay.
+7. The same real Zakura/Zaino stack advanced an abandoned branch 131 blocks
+   beyond the configured 121-block rewind horizon, replaced it with an
+   equal-length canonical suffix, forced a rebuild, and verified that the
+   active/bond-spent Names outcomes and account locks were correct. An
+   independently initialized same-seed wallet produced the same runtime
+   snapshot and application outcomes.
+
+Phase 7's 131-block depth is a local reorg fixture, not a security margin. The
+qualification stack and its parameters are disposable development/regtest
+material. There is no announced public Coppice Testnet or Mainnet deployment,
+and no independent security audit.
+
+## Status vocabulary
+
+The repository has a production-authoritative code path and frozen protocol
+vectors. That means the qualified implementation is the reference path for
+development and integration. It does not mean that Coppice is publicly
+deployed, audited, or ready for an operational rollout without future network,
+packaging, and deployment decisions.

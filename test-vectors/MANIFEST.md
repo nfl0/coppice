@@ -1,9 +1,10 @@
 # Coppice v1 Normative Vector Manifest
 
-This directory manifest defines the vectors that MUST exist before v1 is frozen.
-Do not populate expected values by hand from guesses. Generate each expected
-value from the frozen reference implementation, independently cross-check the
-primitive where practical, then commit the JSON as immutable protocol evidence.
+This directory manifest defines the normative vector set for the frozen v1
+protocol. All required files are present. Do not populate expected values by
+hand from guesses. Generate any future vector for a new protocol version from
+the reference implementation, independently cross-check the primitive where
+practical, and commit the JSON as immutable protocol evidence.
 
 Required files:
 
@@ -65,7 +66,7 @@ Invalid vectors additionally contain:
 }
 ```
 
-`coppice_bond_v1.json` is part of freeze gate F-001 and MUST include:
+The frozen `coppice_bond_v1.json` freeze gate F-001 includes:
 
 - exact circuit/source identifier;
 - `k = 11`;

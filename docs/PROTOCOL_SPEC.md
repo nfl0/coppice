@@ -1,6 +1,6 @@
 # Coppice Protocol Specification
 
-**Status:** Draft / general runtime architecture production-authoritative for development deployments
+**Status:** Normative v1 specification; production-authoritative code path; pre-release
 **Protocol version:** 1  
 **Wire version:** 1  
 **Last architecture decision:** 2026-08-24
@@ -9,9 +9,11 @@
 
 This document is the normative interoperability specification for Coppice v1.
 
-A conforming implementation MUST derive the same Coppice registry state from the
-same canonical Zcash history and deployment parameters. Implementation details
-that do not affect this result are outside this document.
+A conforming implementation MUST derive the same application state from the
+same canonical Zcash history and validated parameters. For Coppice Names v1,
+that application state is Names state; Core state is the generic canonical
+replay, Ironwood-effect, transport, and checkpoint context. Implementation
+details that do not affect these results are outside this document.
 
 Precedence for v1 development is:
 
@@ -32,8 +34,9 @@ The key words MUST, MUST NOT, REQUIRED, SHOULD, SHOULD NOT, and MAY are normativ
 
 ## 2. Protocol model
 
-Coppice is an adminless deterministic reducer of the host application's accepted
-canonical Zcash chain.
+Coppice Core is an adminless deterministic runtime over the host application's
+accepted canonical Zcash chain. Coppice Names v1 is the first application
+composed with that runtime and derives Names state from the Core context.
 
 It has:
 
@@ -41,13 +44,14 @@ It has:
 - no protocol treasury;
 - no smart contract;
 - no separate blockchain or fork-choice rule;
-- no trusted registry server;
+- no trusted remote registry authority;
 - no Zcash consensus change.
 
-The host selects canonical Zcash history. Coppice consumes that history and
-derives registry state.
+The host selects canonical Zcash history. Core consumes that history and emits
+canonical Ironwood effects and routed application context. Names v1 consumes
+that context and derives Names state.
 
-Coppice v1 has exactly four explicit operations:
+Coppice Names v1 has exactly four explicit application operations:
 
 ```text
 COMMIT
@@ -66,7 +70,7 @@ Only Ironwood notes/actions may carry Coppice carrier frames, supply Coppice
 bonded notes, or contribute shielded effects to Coppice canonical state.
 Sapling notes/actions and notes/actions from the pre-Ironwood Orchard protocol
 are not valid Coppice carriers. They MUST NOT serve as Coppice bonded notes and
-MUST NEVER be interpreted as Coppice protocol state, including registry
+MUST NEVER be interpreted as Coppice protocol state, including Names
 operations, commitments, nullifiers, or bond effects.
 
 Coppice-aware wallets MAY continue to hold, receive, and spend Sapling and
@@ -84,12 +88,13 @@ For every protocol rule, byte serialization, hash domain, validation condition,
 and state-transition order in this document, an implementation MUST behave
 exactly as specified.
 
-Unknown or malformed Coppice operations are deterministic protocol rejections,
+Unknown or malformed Names v1 operations are deterministic application
+rejections,
 not reasons to reinterpret bytes using an implementation-specific fallback.
 
 Fatal block-input errors are different: when canonical Zcash input required to
-evaluate a candidate transaction is missing or inconsistent, the reducer MUST
-not advance beyond that block.
+evaluate a candidate transaction is missing or inconsistent, Core MUST not
+advance beyond that block.
 
 ## 4. Numeric and byte conventions
 
@@ -133,7 +138,7 @@ The v1 personalization labels are:
 |---|---|---|
 | Core runtime identifier | `CoppiceRuntime1` | `436f707069636552756e74696d653100` |
 | application identifier | `CoppiceAppIdV1` | `436f7070696365417070496456310000` |
-| deployment identifier | `CoppiceDeployV1` | `436f70706963654465706c6f79563100` |
+| Names deployment identifier | `CoppiceDeployV1` | `436f70706963654465706c6f79563100` |
 | name identifier | `CoppiceNameV1` | `436f70706963654e616d655631000000` |
 | record hash | `CoppiceRecordV1` | `436f70706963655265636f7264563100` |
 | registration commitment | `CoppiceCommitV1` | `436f7070696365436f6d6d6974563100` |
@@ -968,7 +973,7 @@ It is not retained in `NameRecord`.
 
 ## P-REG-003 — Pending commitment state
 
-The reducer stores:
+The Names application stores:
 
 ```rust
 BTreeMap<[u8; 32], ChainPosition>
@@ -1093,7 +1098,7 @@ the prover to instantiate an Orchard/Ironwood Action, dummy output note, value
 commitment, action flags, binding-signature artifact, or any other transaction
 semantics that are irrelevant to a Coppice bond.
 
-The circuit MAY and SHOULD reuse the audited Orchard/Ironwood cryptographic
+The circuit MAY and SHOULD reuse the established Orchard/Ironwood cryptographic
 gadgets and primitive definitions needed to prove the actual Ironwood note
 relations, including note commitment, Sinsemilla Merkle membership, nullifier
 derivation, spend-authority key relations, and Pasta-field range/comparison
@@ -1350,7 +1355,7 @@ floor_height =
     )
 ```
 
-The reducer obtains:
+The Names application obtains:
 
 ```text
 position_floor =
@@ -1392,7 +1397,7 @@ The anchor MUST satisfy:
 C <= bond_anchor_height < R
 ```
 
-The reducer MUST have independently derived:
+The Names application MUST have independently derived:
 
 ```text
 Ironwood root at end of bond_anchor_height
@@ -1406,7 +1411,7 @@ Because `R <= C + commit_ttl_blocks`, the anchor can always be validated from a 
 
 ## P-BOND-010 — Ironwood checkpoint retention
 
-The reducer tracks a rolling sequence:
+The Names application tracks a rolling sequence:
 
 ```rust
 pub struct IronwoodCheckpoint {
@@ -1436,7 +1441,7 @@ The activation checkpoint supplies the first checkpoint.
 
 ## P-SPENT-001 — RecentSpent state
 
-The reducer sees every canonical Ironwood nullifier in every canonical block from activation onward.
+The Names application sees every canonical Ironwood nullifier in every canonical block from activation onward.
 
 For each nullifier:
 
@@ -1444,7 +1449,7 @@ For each nullifier:
 tag = bond_tag(nullifier)
 ```
 
-The reducer maintains a bounded map:
+The Names application maintains a bounded map:
 
 ```rust
 BTreeMap<[u8; 32], u32>   // tag -> first_seen_height
@@ -1555,7 +1560,8 @@ On load, rebuild it and reject state containing duplicate active bond tags.
 
 ## P-SPENT-006 — Processing Ironwood nullifiers
 
-For every canonical nullifier in a transaction, before applying any Coppice operation from that transaction:
+For every canonical nullifier in a transaction, before applying any Names v1
+operation from that transaction:
 
 1. derive `bond_tag`;
 2. insert it into RecentSpent if not already present;
@@ -1609,7 +1615,7 @@ Recommended order:
 15. deterministic freshness `position_floor` found;
 16. verify BondProof against exact reconstructed public inputs.
 
-Only then mutate registry state.
+Only then mutate Names application state.
 
 ## P-OP-REVEAL-002 — Successful REVEAL
 
@@ -1838,9 +1844,13 @@ Only `Active` is payable.
 
 ## P-CARRIER-001 — Public transport rendezvous
 
-Every deployment defines one public incoming capability and one matching receiver.
+Every Core runtime configuration defines one public incoming capability and one
+matching receiver.
 
-All Coppice bulletin outputs target that shared receiver using Ironwood note encryption.
+All CPV1 carrier outputs target that exact configured receiver using Ironwood
+note encryption. Decryptability under the public incoming IVK alone is
+insufficient: an output is a carrier only when its decrypted recipient bytes
+equal the configured receiver bytes.
 
 Properties:
 
@@ -1905,13 +1915,13 @@ MAX_FRAMES          = 32
 
 Immediately after the frame type is a one-byte `frame_index`.
 
-All frames of one Coppice operation MUST occur in the same Zcash transaction.
+All frames of one routed application message MUST occur in the same Zcash transaction.
 Rendezvous outputs MAY occur in any Ironwood Action order. Canonical carrier
 order is reconstructed exclusively by ascending `frame_index`; transaction
 builders MAY freely randomize Action positions.
 
 There is exactly one START frame. It has `frame_index = 0` and carries all
-operation-level metadata.
+carrier-level metadata.
 
 ### START frame
 
@@ -2035,8 +2045,11 @@ rather than silently changing this frame format.
 ## P-CARRIER-003 — Frame validation
 
 For a transaction whose compact Ironwood data indicates one or more outputs
-decryptable under the runtime rendezvous IVK, all matching full-transaction
-frames are parsed independently and reordered by `frame_index`.
+decryptable to the exact configured rendezvous receiver, all matching
+full-transaction frames are parsed independently and reordered by `frame_index`.
+
+Decryptability under the runtime rendezvous IVK for another diversified
+receiver does not make a transaction a candidate for this runtime.
 
 A valid Coppice carrier for this runtime requires:
 
@@ -2065,11 +2078,12 @@ It is delivered as a deterministic application rejection only to the routed
 application lifecycle; the transaction's ordinary Ironwood nullifier and
 commitment effects still apply.
 
-## P-CARRIER-004 — One logical operation per transaction
+## P-CARRIER-004 — One logical routed message per transaction
 
-A transaction may have multiple rendezvous outputs because one payload spans multiple frames.
+A transaction may have multiple exact-receiver rendezvous outputs because one
+payload spans multiple frames.
 
-It MUST reconstruct to at most one logical Coppice operation.
+It MUST reconstruct to at most one logical routed application message.
 
 If the transaction contains:
 
@@ -2086,10 +2100,14 @@ Chain Ironwood effects still apply.
 For every compact Ironwood action:
 
 1. construct the Ironwood compact note-encryption domain;
-2. trial-decrypt the compact ciphertext with the deployment's public rendezvous Ironwood IVK (provided by the `orchard` crate);
-3. if any action decrypts, mark the transaction as requiring full retrieval.
+2. trial-decrypt the compact ciphertext with the Core runtime's public
+   rendezvous Ironwood IVK (provided by the `orchard` crate);
+3. compare the decrypted recipient to the exact configured rendezvous receiver;
+4. only if both decryption and receiver comparison succeed, mark the
+   transaction as requiring full retrieval.
 
-A transaction with no matching action requires no full transaction fetch for Coppice.
+A transaction with no exact-receiver matching action requires no full transaction
+fetch for Coppice Core.
 
 ## P-CARRIER-006 — Full candidate verification
 
@@ -2097,24 +2115,27 @@ Before decoding a fetched full transaction:
 
 1. parse it with the correct Zcash consensus branch for its height;
 2. verify full transaction `txid` equals compact `txid`;
-3. extract all Ironwood nullifiers and commitments;
-4. verify they exactly equal compact effects for that transaction.
+3. decrypt/extract only outputs addressed to the exact configured rendezvous
+   receiver;
+4. extract all Ironwood nullifiers and commitments;
+5. verify they exactly equal compact effects for that transaction.
 
 Never hardcode one historical branch ID for all future heights.
 
 Use host consensus parameters / branch selection for the actual block height.
 
-A mismatch is a fatal block-input error, not merely a rejected Coppice operation.
+A mismatch is a fatal block-input error, not merely a rejected Names application
+operation.
 
 ## P-CARRIER-007 — Candidate unavailability
 
 If compact discovery says a full transaction is required but the host cannot fetch that full transaction:
 
 ```text
-DO NOT ADVANCE COPPICE PAST THAT BLOCK
+DO NOT ADVANCE THE COPPICE RUNTIME PAST THAT BLOCK
 ```
 
-Do not silently treat it as no operation.
+Do not silently treat it as no routed application message.
 
 The adapter may retry.
 
@@ -2122,7 +2143,7 @@ This is required for deterministic replay completeness.
 
 ## P-REDUCE-001 — Canonical block input
 
-The core reducer SHOULD consume a wallet-neutral representation similar to:
+Core Runtime SHOULD consume a wallet-neutral representation similar to:
 
 ```rust
 pub struct CanonicalBlockInput {
@@ -2168,7 +2189,7 @@ entire block NOT applied
 tip NOT advanced
 ```
 
-### Coppice operation rejection
+### Names application operation rejection
 
 Examples:
 
@@ -2186,7 +2207,7 @@ Result:
 
 ```text
 ordinary canonical Ironwood effects DO apply
-invalid Coppice operation is a deterministic no-op
+invalid Names application operation is a deterministic no-op
 tip advances
 typed rejection is emitted
 ```
@@ -2222,7 +2243,7 @@ For each transaction in ascending `tx_index`:
 
 The key rule is:
 
-> **Bond spends become visible before a Coppice operation in the same transaction.**
+> **Bond spends become visible before a Names v1 operation in the same transaction.**
 
 Therefore an UPDATE or RELEASE cannot rescue a bond that the same transaction already spends.
 
@@ -2354,7 +2375,7 @@ Mitigations:
 
 - compact trial decryption before full tx fetch;
 - Zcash transaction fees paid by spammer;
-- one logical operation per tx;
+- one logical routed message per transaction;
 - hard frame/payload/proof limits;
 - bounded COMMIT TTL;
 - bounded RecentSpent state;
@@ -2404,10 +2425,12 @@ The KDF relation is not externally visible.
 
 ## P-PRIV-003 — Carrier visibility
 
-Coppice bulletin outputs are intentionally publicly decryptable by anyone with
-the configured rendezvous incoming key.
+Coppice carrier outputs are intentionally publicly decryptable by anyone with
+the configured rendezvous incoming capability, but only outputs addressed to
+the exact configured receiver are carrier inputs for this runtime.
 
-Therefore Coppice operation contents are public protocol data once their transaction is visible.
+Therefore routed Names v1 operation contents are public protocol data once their
+transaction is visible.
 
 Commit/reveal hides the registration preimage only until REVEAL.
 
@@ -2466,7 +2489,7 @@ They are not fatal chain-input errors.
 `test-vectors/` SHOULD contain deterministic vectors for:
 
 - every BLAKE2b personalization constant;
-- deployment ID;
+- `NamesDeploymentId`;
 - name ID;
 - address digest;
 - record encoding/hash;
@@ -2537,7 +2560,7 @@ is represented in RecentSpent
 
 ```text
 new nullifier tag == active bond tag
--> record becomes BondSpent before same-tx operation processing
+-> record becomes BondSpent before same-tx Names operation processing
 ```
 
 ### Invariant H — claim epoch
@@ -2567,13 +2590,13 @@ full-transaction validation
     |
     +--> append every Ironwood commitment
     |
-    +--> reconstruct at most one Coppice operation
+    +--> reconstruct at most one routed application message
             |
             v
-       deterministic reducer
+       deterministic application state machine
             |
             v
-        registry state
+        Names application state
 ```
 
 Bond registration uses a private Ironwood note and a native Pasta/Halo2 proof.
