@@ -6,14 +6,14 @@ use coppice::{
 };
 use coppice_core::{
     application::{
-        ApplicationDescriptor, ApplicationEnvelopeV1, ApplicationKey, ApplicationTip,
-        CoppiceApplication, derive_application_id,
+        ApplicationBlockContext, ApplicationDescriptor, ApplicationEnvelopeV1, ApplicationKey,
+        ApplicationTip, CoppiceApplication, derive_application_id,
     },
     replay::{
         CoreCanonicalBlockInput, CoreCanonicalTransactionInput, CoreReplay,
         CoreReplayActivationCheckpoint, CoreReplayConfiguration, IronwoodFrontier,
     },
-    runtime::{ApplicationMessageStatus, CoreRuntime, RuntimeBlockContext},
+    runtime::{ApplicationMessageStatus, CoreRuntime},
     transport,
 };
 use orchard::{
@@ -179,28 +179,31 @@ impl CoppiceApplication for TinyApplication {
         [self.value; 32]
     }
 
-    fn apply_block(&mut self, block: &RuntimeBlockContext) -> Result<u8, ()> {
-        let core = block.core();
-        if self.tip.height.checked_add(1) != Some(core.height())
-            || self.tip.block_hash != core.prev_block_hash()
+    fn apply_block(&mut self, block: &ApplicationBlockContext<'_>) -> Result<u8, ()> {
+        let tip = block.tip();
+        if self.tip.height.checked_add(1) != Some(tip.height)
+            || self.tip.block_hash
+                != block
+                    .core()
+                    .map(|core| core.prev_block_hash())
+                    .unwrap_or(self.tip.block_hash)
         {
             return Err(());
         }
         self.history.push((self.tip, self.value));
-        for transaction in block.transactions() {
-            if let ApplicationMessageStatus::Message(message) = transaction.message()
-                && message.key() == self.descriptor.key
-            {
-                let [increment] = message.payload() else {
-                    return Err(());
-                };
-                self.value = self.value.checked_add(*increment).ok_or(())?;
+        if block.is_active() {
+            for transaction in block.transactions() {
+                if let ApplicationMessageStatus::Message(message) = transaction.message()
+                    && message.key() == self.descriptor.key
+                {
+                    let [increment] = message.payload() else {
+                        return Err(());
+                    };
+                    self.value = self.value.checked_add(*increment).ok_or(())?;
+                }
             }
         }
-        self.tip = ApplicationTip {
-            height: core.height(),
-            block_hash: core.block_hash(),
-        };
+        self.tip = tip;
         Ok(self.value)
     }
 
@@ -246,9 +249,83 @@ fn core_routes_a_non_names_application_without_understanding_its_state() {
         value: 0,
         history: vec![],
     };
-    assert_eq!(application.apply_block(&context), Ok(7));
+    let application_context = context.for_application(application.descriptor()).unwrap();
+    assert_eq!(application.apply_block(&application_context), Ok(7));
     assert_eq!(application.state_root(), [7; 32]);
     assert_eq!(core.tip().height, application.tip().height);
+}
+
+#[test]
+fn later_application_activation_withholds_effects_and_rewinds_deterministically() {
+    let deployment = deployment();
+    let parameters = names_v1_core_runtime_parameters(&deployment).unwrap();
+    let replay = CoreReplay::new(
+        CoreReplayConfiguration::new(ACTIVATION_HEIGHT, 8).unwrap(),
+        checkpoint(),
+    )
+    .unwrap();
+    let mut core = CoreRuntime::new(parameters, replay).unwrap();
+    let key = ApplicationKey::new(derive_application_id(b"future.app").unwrap(), 1);
+    let descriptor = ApplicationDescriptor {
+        key,
+        activation_height: ACTIVATION_HEIGHT + 2,
+    };
+    let mut application = TinyApplication {
+        descriptor,
+        tip: ApplicationTip {
+            height: ACTIVATION_HEIGHT - 1,
+            block_hash: ACTIVATION_HASH,
+        },
+        value: 0,
+        history: vec![],
+    };
+
+    for height in [ACTIVATION_HEIGHT, ACTIVATION_HEIGHT + 1] {
+        let envelope = ApplicationEnvelopeV1::new(key, vec![7]).unwrap().encode();
+        let input = block(
+            core.tip(),
+            height,
+            vec![candidate_transaction(
+                &deployment,
+                core.runtime_id().to_bytes(),
+                &envelope,
+                0,
+                (height - ACTIVATION_HEIGHT + 1) as u8,
+            )],
+        );
+        let context = core.apply_block(&input).unwrap();
+        let scoped = context.for_application(descriptor).unwrap();
+        assert!(!scoped.is_active());
+        assert!(scoped.core().is_none());
+        assert!(scoped.transactions().is_empty());
+        assert_eq!(application.apply_block(&scoped), Ok(0));
+    }
+
+    let envelope = ApplicationEnvelopeV1::new(key, vec![7]).unwrap().encode();
+    let input = block(
+        core.tip(),
+        ACTIVATION_HEIGHT + 2,
+        vec![candidate_transaction(
+            &deployment,
+            core.runtime_id().to_bytes(),
+            &envelope,
+            0,
+            3,
+        )],
+    );
+    let context = core.apply_block(&input).unwrap();
+    let scoped = context.for_application(descriptor).unwrap();
+    assert!(scoped.is_active());
+    assert!(scoped.core().is_some());
+    assert_eq!(scoped.transactions().len(), 1);
+    assert_eq!(application.apply_block(&scoped), Ok(7));
+
+    core.rewind_to(ACTIVATION_HEIGHT + 1).unwrap();
+    application.rewind_to(ACTIVATION_HEIGHT + 1).unwrap();
+    assert_eq!(application.value, 0);
+    let replayed = core.apply_block(&input).unwrap();
+    let replayed_scoped = replayed.for_application(descriptor).unwrap();
+    assert_eq!(application.apply_block(&replayed_scoped), Ok(7));
 }
 
 #[test]
@@ -340,4 +417,72 @@ fn names_snapshot_validation_rewinds_core_at_the_retention_boundary() {
             .ironwood_checkpoints()
             .contains_key(&(ACTIVATION_HEIGHT - 1))
     );
+}
+
+#[test]
+fn composed_snapshot_rejects_mismatched_core_and_names_rewind_boundaries() {
+    let deployment = deployment();
+    let mut runtime =
+        NamesRuntime::from_names_deployment(deployment.clone(), checkpoint()).unwrap();
+    for height in ACTIVATION_HEIGHT..=(ACTIVATION_HEIGHT + 4) {
+        runtime
+            .apply_block(&block(runtime.core().tip(), height, vec![]))
+            .unwrap();
+    }
+    let snapshot = runtime.save_snapshot().unwrap();
+    let mut outer: serde_json::Value = serde_json::from_slice(&snapshot).unwrap();
+    let application_bytes: Vec<u8> =
+        serde_json::from_value(outer["application_snapshot"].clone()).unwrap();
+    let mut application: serde_json::Value = serde_json::from_slice(&application_bytes).unwrap();
+    application["undo"].as_array_mut().unwrap().remove(0);
+    outer["application_snapshot"] =
+        serde_json::to_value(serde_json::to_vec(&application).unwrap()).unwrap();
+    assert!(matches!(
+        NamesRuntime::load_snapshot(deployment, &serde_json::to_vec(&outer).unwrap()),
+        Err(coppice::names_runtime::NamesRuntimeSnapshotError::InvalidHistory)
+    ));
+}
+
+#[test]
+fn snapshot_rejects_recent_spent_entries_below_the_tip_retention_floor() {
+    let deployment = deployment();
+    let mut runtime =
+        NamesRuntime::from_names_deployment(deployment.clone(), checkpoint()).unwrap();
+    runtime
+        .apply_block(&block(runtime.core().tip(), ACTIVATION_HEIGHT, vec![]))
+        .unwrap();
+    let snapshot = runtime.save_snapshot().unwrap();
+    let mut outer: serde_json::Value = serde_json::from_slice(&snapshot).unwrap();
+    let application_bytes: Vec<u8> =
+        serde_json::from_value(outer["application_snapshot"].clone()).unwrap();
+    let mut application: serde_json::Value = serde_json::from_slice(&application_bytes).unwrap();
+    application["state"]["recent_spent"] = serde_json::json!([[vec![1u8; 32], 0]]);
+    outer["application_snapshot"] =
+        serde_json::to_value(serde_json::to_vec(&application).unwrap()).unwrap();
+    assert!(matches!(
+        NamesRuntime::load_snapshot(deployment, &serde_json::to_vec(&outer).unwrap()),
+        Err(coppice::names_runtime::NamesRuntimeSnapshotError::InvalidState)
+    ));
+}
+
+#[test]
+fn rewound_snapshot_states_use_the_same_recent_spent_floor_validation() {
+    let deployment = deployment();
+    let mut runtime =
+        NamesRuntime::from_names_deployment(deployment.clone(), checkpoint()).unwrap();
+    runtime
+        .apply_block(&block(runtime.core().tip(), ACTIVATION_HEIGHT, vec![]))
+        .unwrap();
+    let snapshot = runtime.save_snapshot().unwrap();
+    let mut outer: serde_json::Value = serde_json::from_slice(&snapshot).unwrap();
+    let application_bytes: Vec<u8> =
+        serde_json::from_value(outer["application_snapshot"].clone()).unwrap();
+    let mut application: serde_json::Value = serde_json::from_slice(&application_bytes).unwrap();
+    application["undo"][0]["state"]["recent_spent"] = serde_json::json!([[vec![2u8; 32], 0]]);
+    outer["application_snapshot"] =
+        serde_json::to_value(serde_json::to_vec(&application).unwrap()).unwrap();
+    assert!(matches!(
+        NamesRuntime::load_snapshot(deployment, &serde_json::to_vec(&outer).unwrap()),
+        Err(coppice::names_runtime::NamesRuntimeSnapshotError::InvalidState)
+    ));
 }

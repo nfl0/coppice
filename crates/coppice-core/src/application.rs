@@ -1,6 +1,6 @@
 use crate::carrier::MAX_CPV1_PAYLOAD_LEN;
 use crate::hash;
-use crate::runtime::RuntimeBlockContext;
+use crate::{replay::CoreBlockContext, runtime::RuntimeTransactionContext};
 
 pub const APPLICATION_ID_PERSONALIZATION: [u8; 16] = *b"CoppiceAppIdV1\0\0";
 pub const APPLICATION_ENVELOPE_MAGIC: [u8; 4] = *b"CA01";
@@ -64,6 +64,40 @@ pub struct ApplicationDescriptor {
     pub activation_height: u32,
 }
 
+/// The portion of one Core block that a specific application is authorized to
+/// observe. Before application activation, only the canonical position is
+/// exposed; Core effects and routed messages are withheld.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ApplicationBlockContext<'a> {
+    pub(crate) core: &'a CoreBlockContext,
+    pub(crate) transactions: &'a [RuntimeTransactionContext],
+    pub(crate) active: bool,
+}
+
+impl ApplicationBlockContext<'_> {
+    pub fn is_active(&self) -> bool {
+        self.active
+    }
+
+    /// Returns canonical block metadata only after application activation.
+    /// Pre-activation applications still receive their position through
+    /// [`Self::tip`] so they can advance deterministic empty state.
+    pub fn core(&self) -> Option<&CoreBlockContext> {
+        self.active.then_some(self.core)
+    }
+
+    pub fn transactions(&self) -> &[RuntimeTransactionContext] {
+        self.transactions
+    }
+
+    pub fn tip(&self) -> ApplicationTip {
+        ApplicationTip {
+            height: self.core.height(),
+            block_hash: self.core.block_hash(),
+        }
+    }
+}
+
 /// Canonical application position corresponding to a completed Zcash block.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ApplicationTip {
@@ -84,13 +118,14 @@ pub trait CoppiceApplication {
     fn state_root(&self) -> [u8; 32];
     fn apply_block(
         &mut self,
-        block: &RuntimeBlockContext,
+        block: &ApplicationBlockContext<'_>,
     ) -> Result<Self::BlockOutput, Self::ApplyError>;
     fn rewind_to(&mut self, height: u32) -> Result<(), Self::RewindError>;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ApplicationActivationError {
+    ZeroActivationHeight,
     BeforeRuntimeActivation,
 }
 
@@ -99,7 +134,9 @@ impl ApplicationDescriptor {
         &self,
         runtime_activation_height: u32,
     ) -> Result<(), ApplicationActivationError> {
-        if self.activation_height < runtime_activation_height {
+        if self.activation_height == 0 {
+            Err(ApplicationActivationError::ZeroActivationHeight)
+        } else if self.activation_height < runtime_activation_height {
             Err(ApplicationActivationError::BeforeRuntimeActivation)
         } else {
             Ok(())
@@ -206,6 +243,14 @@ mod tests {
         };
         assert_eq!(at_runtime.validate_for_runtime(10), Ok(()));
         assert_eq!(later.validate_for_runtime(10), Ok(()));
+        assert_eq!(
+            ApplicationDescriptor {
+                key,
+                activation_height: 0,
+            }
+            .validate_for_runtime(10),
+            Err(ApplicationActivationError::ZeroActivationHeight)
+        );
         assert_eq!(
             earlier.validate_for_runtime(10),
             Err(ApplicationActivationError::BeforeRuntimeActivation)

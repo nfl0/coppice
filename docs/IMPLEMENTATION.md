@@ -87,7 +87,9 @@ canonical sequence.
 
 ## Coppice Names v1 application
 
-`NamesApplication` implements `CoppiceApplication` over `RuntimeBlockContext`.
+`NamesApplication` implements `CoppiceApplication` over the
+application-scoped `ApplicationBlockContext`; Core metadata and routed effects
+are withheld until the descriptor's activation height.
 It owns:
 
 - canonical Names records and pending commitments;

@@ -16,6 +16,10 @@ use coppice_core::{
         MAX_APPLICATION_ENVELOPE_LEN, derive_application_id,
     },
     identity::{CoreRuntimeId, CoreRuntimeParameters, ZcashNetwork},
+    replay::{
+        CoreReplay, CoreReplayActivationCheckpoint, CoreReplayConfiguration, IronwoodFrontier,
+    },
+    runtime::{CoreRuntime, CoreRuntimeConfigurationError},
     transport,
 };
 use orchard::keys::IncomingViewingKey;
@@ -116,6 +120,48 @@ fn names_deployment_fixture() -> (serde_json::Value, DeploymentParameters) {
         },
     };
     (fixture, parameters)
+}
+
+#[test]
+fn structurally_valid_but_unsupported_runtime_semantics_are_rejected() {
+    for (field, expected) in [
+        (
+            "protocol",
+            CoreRuntimeConfigurationError::UnsupportedRuntimeProtocol,
+        ),
+        (
+            "version",
+            CoreRuntimeConfigurationError::UnsupportedRuntimeVersion,
+        ),
+        (
+            "carrier",
+            CoreRuntimeConfigurationError::UnsupportedCarrierProtocol,
+        ),
+    ] {
+        let (_, original) = runtime_fixture();
+        let mut parameters = original;
+        match field {
+            "protocol" => parameters.runtime_protocol_id = b"future.runtime".to_vec(),
+            "version" => parameters.runtime_protocol_version = 2,
+            "carrier" => parameters.carrier_protocol_id = b"CPV2".to_vec(),
+            _ => unreachable!(),
+        }
+        let validated = parameters.validate().unwrap();
+        let replay = CoreReplay::new(
+            CoreReplayConfiguration::new(10, 8).unwrap(),
+            CoreReplayActivationCheckpoint {
+                height: 9,
+                block_hash: [9; 32],
+                ironwood_frontier: IronwoodFrontier::empty(),
+                ironwood_tree_size: 0,
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            CoreRuntime::new(validated, replay),
+            Err(error) if error == expected
+        ));
+    }
 }
 
 #[test]

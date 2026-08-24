@@ -28,7 +28,7 @@ pub use coppice_core::replay::{
 use coppice_core::{
     application::{ApplicationDescriptor, ApplicationTip, CoppiceApplication},
     runtime::{
-        ApplicationMessageStatus, CoreRuntime, CoreRuntimeConfigurationError,
+        ApplicationMessageStatus, CanonicalRuntime, CoreRuntime, CoreRuntimeConfigurationError,
         CoreRuntimeSnapshotError, RuntimeBlockContext,
     },
 };
@@ -360,6 +360,7 @@ impl NamesApplication {
 
     fn save_snapshot(&self, core: &CoreRuntime) -> Result<Vec<u8>, NamesRuntimeSnapshotError> {
         validate_names_core_position(self.tip, core)?;
+        validate_names_state_shape(&self.state, &self.deployment, self.tip.height)?;
         let checkpoint = core
             .ironwood_checkpoints()
             .get(&self.tip.height)
@@ -488,6 +489,7 @@ impl NamesApplication {
             retention_blocks,
             history,
         };
+        validate_names_core_history_boundary(&application, core)?;
         application.validate_snapshot_history(core)?;
         Ok(application)
     }
@@ -503,6 +505,7 @@ impl NamesApplication {
         let mut history = self.history.clone();
         loop {
             validate_names_core_position(tip, &validation_core)?;
+            validate_names_state_shape(&state, &self.deployment, tip.height)?;
             let checkpoint = validation_core
                 .ironwood_checkpoints()
                 .get(&tip.height)
@@ -538,6 +541,7 @@ impl NamesApplication {
         if !history.is_empty() {
             return Err(NamesRuntimeSnapshotError::InvalidHistory);
         }
+        validate_names_core_history_boundary(self, core)?;
         Ok(())
     }
 
@@ -720,9 +724,11 @@ impl CoppiceApplication for NamesApplication {
 
     fn apply_block(
         &mut self,
-        block: &RuntimeBlockContext,
+        block: &coppice_core::application::ApplicationBlockContext<'_>,
     ) -> Result<Self::BlockOutput, Self::ApplyError> {
-        let core = block.core();
+        let core = block
+            .core()
+            .ok_or(NamesApplicationError::StateInvariantFailure)?;
         if self.tip.height.checked_add(1) != Some(core.height()) {
             return Err(NamesApplicationError::NonSequentialHeight);
         }
@@ -950,9 +956,12 @@ impl NamesRuntime {
         let core = staged_core
             .apply_block(block)
             .map_err(NamesRuntimeError::Core)?;
+        let application_context = core
+            .for_application(self.names.descriptor)
+            .map_err(|_| NamesRuntimeError::Names(NamesApplicationError::StateInvariantFailure))?;
         let names = self
             .names
-            .apply_block(&core)
+            .apply_block(&application_context)
             .map_err(NamesRuntimeError::Names)?;
         self.core = staged_core;
         Ok(NamesRuntimeAppliedBlock { core, names })
@@ -1040,6 +1049,39 @@ impl NamesRuntime {
             return Err(NamesRuntimeSnapshotError::RootMismatch);
         }
         Ok(Self { core, names })
+    }
+}
+
+impl CanonicalRuntime for NamesRuntime {
+    type BlockOutput = NamesRuntimeAppliedBlock;
+    type ApplyError = NamesRuntimeError;
+    type RewindError = NamesRuntimeRewindError;
+
+    fn core_parameters(&self) -> &coppice_core::identity::ValidatedCoreRuntimeParameters {
+        self.core.parameters()
+    }
+
+    fn tip(&self) -> coppice_core::replay::CoreReplayTip {
+        self.tip()
+    }
+
+    fn oldest_rewind_height(&self) -> u32 {
+        self.oldest_rewind_height()
+    }
+
+    fn retained_tip_at(&self, height: u32) -> Option<coppice_core::replay::CoreReplayTip> {
+        self.retained_tip_at(height)
+    }
+
+    fn apply_canonical_block(
+        &mut self,
+        block: &CoreCanonicalBlockInput,
+    ) -> Result<Self::BlockOutput, Self::ApplyError> {
+        self.apply_block(block)
+    }
+
+    fn rewind_canonical_to(&mut self, height: u32) -> Result<(), Self::RewindError> {
+        self.rewind_to(height)
     }
 }
 
@@ -1152,7 +1194,21 @@ fn restore_names_state(
     let names = stored.names.into_iter().collect::<BTreeMap<_, _>>();
     let pending = stored.pending.into_iter().collect::<BTreeMap<_, _>>();
     let recent_spent = stored.recent_spent.into_iter().collect::<BTreeMap<_, _>>();
-    if names.iter().any(|(name, record)| {
+    let state = CoppiceState::from_authoritative_parts(names, pending, recent_spent)
+        .map_err(|_| NamesRuntimeSnapshotError::InvalidState)?;
+    validate_names_state_shape(&state, deployment, tip_height)?;
+    Ok(state)
+}
+
+/// Validates the complete persisted Names state shape at one canonical tip.
+/// This helper is shared by current and rewound states so undo validation
+/// cannot silently accept a state that ordinary snapshot loading would reject.
+fn validate_names_state_shape(
+    state: &CoppiceState,
+    deployment: &DeploymentParameters,
+    tip_height: u32,
+) -> Result<(), NamesRuntimeSnapshotError> {
+    if state.names.iter().any(|(name, record)| {
         !crate::envelope::valid_name(name)
             || crate::owner::parse_v1_owner_key(record.owner_pk).is_err()
             || reveal::canonical_v1_address(&record.address, deployment).is_err()
@@ -1161,15 +1217,59 @@ fn restore_names_state(
                 NameStatus::Released { terminal_height: 0 }
                     | NameStatus::BondSpent { terminal_height: 0 }
             )
-    }) || pending
+    }) || state.pending.values().any(|position| {
+        position.block_height < deployment.activation_height || position.block_height > tip_height
+    }) {
+        return Err(NamesRuntimeSnapshotError::InvalidState);
+    }
+
+    let retention_floor = recent_spent::oldest_retained_height(
+        deployment.activation_height,
+        tip_height,
+        deployment.bond_note_max_age_blocks,
+        deployment.commit_ttl_blocks,
+    )
+    .map_err(|_| NamesRuntimeSnapshotError::InvalidState)?;
+    if state
+        .recent_spent
         .values()
-        .any(|position| position.block_height > tip_height)
-        || recent_spent.values().any(|height| *height > tip_height)
+        .any(|height| *height < retention_floor || *height > tip_height)
     {
         return Err(NamesRuntimeSnapshotError::InvalidState);
     }
-    CoppiceState::from_authoritative_parts(names, pending, recent_spent)
-        .map_err(|_| NamesRuntimeSnapshotError::InvalidState)
+
+    // Rebuilding the authoritative index must reproduce the complete state,
+    // including the private active-bond index used by transition validation.
+    let rebuilt = CoppiceState::from_authoritative_parts(
+        state.names.clone(),
+        state.pending.clone(),
+        state.recent_spent.clone(),
+    )
+    .map_err(|_| NamesRuntimeSnapshotError::InvalidState)?;
+    if rebuilt != *state {
+        return Err(NamesRuntimeSnapshotError::InvalidState);
+    }
+    Ok(())
+}
+
+fn validate_names_core_history_boundary(
+    names: &NamesApplication,
+    core: &CoreRuntime,
+) -> Result<(), NamesRuntimeSnapshotError> {
+    if names.oldest_rewind_height() != core.oldest_rewind_height() {
+        return Err(NamesRuntimeSnapshotError::InvalidHistory);
+    }
+    let height = names.oldest_rewind_height();
+    let names_tip = names
+        .retained_tip_at(height)
+        .ok_or(NamesRuntimeSnapshotError::InvalidHistory)?;
+    let core_tip = core
+        .retained_tip_at(height)
+        .ok_or(NamesRuntimeSnapshotError::InvalidHistory)?;
+    if names_tip.height != core_tip.height || names_tip.block_hash != core_tip.block_hash {
+        return Err(NamesRuntimeSnapshotError::InvalidHistory);
+    }
+    Ok(())
 }
 
 fn validate_names_core_position(

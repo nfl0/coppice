@@ -1,8 +1,15 @@
 //! Generic CPV1 application-envelope routing over canonical Core replay.
 
 use crate::{
-    application::{ApplicationEnvelopeError, ApplicationEnvelopeV1},
-    identity::{CoreRuntimeId, ValidatedCoreRuntimeParameters},
+    application::{
+        ApplicationActivationError, ApplicationBlockContext, ApplicationDescriptor,
+        ApplicationEnvelopeError, ApplicationEnvelopeV1,
+    },
+    carrier::CPV1_PROTOCOL_ID,
+    identity::{
+        CORE_RUNTIME_PROTOCOL_ID_V1, CORE_RUNTIME_PROTOCOL_VERSION_V1, CoreRuntimeId,
+        ValidatedCoreRuntimeParameters,
+    },
     replay::{
         CandidateTransactionStatus, CoreBlockContext, CoreCanonicalBlockInput,
         CoreIronwoodCheckpoint, CoreReplay, CoreReplayConfiguration, CoreReplayError,
@@ -12,11 +19,15 @@ use crate::{
 };
 use orchard::{keys::IncomingViewingKey, note_encryption::IronwoodDomain};
 use serde::{Deserialize, Serialize};
+use std::fmt::Debug;
 use zcash_note_encryption::try_note_decryption;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CoreRuntimeConfigurationError {
     ActivationMismatch,
+    UnsupportedRuntimeProtocol,
+    UnsupportedRuntimeVersion,
+    UnsupportedCarrierProtocol,
 }
 
 pub const CORE_RUNTIME_SNAPSHOT_FORMAT_VERSION: u32 = 1;
@@ -85,6 +96,7 @@ impl RuntimeTransactionContext {
 pub struct RuntimeBlockContext {
     core: CoreBlockContext,
     transactions: Box<[RuntimeTransactionContext]>,
+    runtime_activation_height: u32,
 }
 
 impl RuntimeBlockContext {
@@ -99,6 +111,42 @@ impl RuntimeBlockContext {
     pub fn ironwood_checkpoint(&self) -> CoreIronwoodCheckpoint {
         self.core.ironwood_checkpoint()
     }
+
+    /// Creates an application-scoped view of this block. The view is the only
+    /// supported application lifecycle boundary: before the descriptor's
+    /// activation height, Core metadata remains available only as a position
+    /// while effects and routed messages are withheld.
+    pub fn for_application(
+        &self,
+        descriptor: ApplicationDescriptor,
+    ) -> Result<ApplicationBlockContext<'_>, ApplicationActivationError> {
+        descriptor.validate_for_runtime(self.runtime_activation_height)?;
+        let active = self.core.height() >= descriptor.activation_height;
+        Ok(ApplicationBlockContext {
+            core: &self.core,
+            transactions: if active { &self.transactions } else { &[] },
+            active,
+        })
+    }
+}
+
+/// Host-facing canonical runtime boundary used by generic CompactBlock
+/// ingestion and reconciliation. Implementations may compose application
+/// state above Core, but this trait exposes no application-specific concepts.
+pub trait CanonicalRuntime {
+    type BlockOutput;
+    type ApplyError: Debug;
+    type RewindError: Debug;
+
+    fn core_parameters(&self) -> &ValidatedCoreRuntimeParameters;
+    fn tip(&self) -> CoreReplayTip;
+    fn oldest_rewind_height(&self) -> u32;
+    fn retained_tip_at(&self, height: u32) -> Option<CoreReplayTip>;
+    fn apply_canonical_block(
+        &mut self,
+        block: &CoreCanonicalBlockInput,
+    ) -> Result<Self::BlockOutput, Self::ApplyError>;
+    fn rewind_canonical_to(&mut self, height: u32) -> Result<(), Self::RewindError>;
 }
 
 #[derive(Clone)]
@@ -113,6 +161,15 @@ impl CoreRuntime {
         parameters: ValidatedCoreRuntimeParameters,
         replay: CoreReplay,
     ) -> Result<Self, CoreRuntimeConfigurationError> {
+        if parameters.parameters().runtime_protocol_id != CORE_RUNTIME_PROTOCOL_ID_V1 {
+            return Err(CoreRuntimeConfigurationError::UnsupportedRuntimeProtocol);
+        }
+        if parameters.parameters().runtime_protocol_version != CORE_RUNTIME_PROTOCOL_VERSION_V1 {
+            return Err(CoreRuntimeConfigurationError::UnsupportedRuntimeVersion);
+        }
+        if parameters.parameters().carrier_protocol_id != CPV1_PROTOCOL_ID {
+            return Err(CoreRuntimeConfigurationError::UnsupportedCarrierProtocol);
+        }
         if parameters.parameters().runtime_activation_height
             != replay.configuration().activation_height()
         {
@@ -187,7 +244,11 @@ impl CoreRuntime {
             .collect::<Vec<_>>()
             .into_boxed_slice();
         self.replay = replay;
-        Ok(RuntimeBlockContext { core, transactions })
+        Ok(RuntimeBlockContext {
+            core,
+            transactions,
+            runtime_activation_height: self.parameters.parameters().runtime_activation_height,
+        })
     }
 
     /// Inspects application transport without advancing canonical replay.
@@ -232,6 +293,39 @@ impl CoreRuntime {
         let replay = CoreReplay::load_snapshot(configuration, &stored.replay)
             .map_err(CoreRuntimeSnapshotError::Replay)?;
         Self::new(parameters, replay).map_err(CoreRuntimeSnapshotError::Configuration)
+    }
+}
+
+impl CanonicalRuntime for CoreRuntime {
+    type BlockOutput = RuntimeBlockContext;
+    type ApplyError = CoreReplayError;
+    type RewindError = CoreRewindError;
+
+    fn core_parameters(&self) -> &ValidatedCoreRuntimeParameters {
+        self.parameters()
+    }
+
+    fn tip(&self) -> CoreReplayTip {
+        self.tip()
+    }
+
+    fn oldest_rewind_height(&self) -> u32 {
+        self.oldest_rewind_height()
+    }
+
+    fn retained_tip_at(&self, height: u32) -> Option<CoreReplayTip> {
+        self.retained_tip_at(height)
+    }
+
+    fn apply_canonical_block(
+        &mut self,
+        block: &CoreCanonicalBlockInput,
+    ) -> Result<Self::BlockOutput, Self::ApplyError> {
+        self.apply_block(block)
+    }
+
+    fn rewind_canonical_to(&mut self, height: u32) -> Result<(), Self::RewindError> {
+        self.rewind_to(height)
     }
 }
 
