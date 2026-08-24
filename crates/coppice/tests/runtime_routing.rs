@@ -309,3 +309,35 @@ fn names_runtime_routes_envelopes_and_restores_split_state_atomically() {
             | Err(coppice::names_runtime::NamesRuntimeSnapshotError::RootMismatch)
     ));
 }
+
+#[test]
+fn names_snapshot_validation_rewinds_core_at_the_retention_boundary() {
+    let deployment = deployment();
+    let mut runtime =
+        NamesRuntime::from_names_deployment(deployment.clone(), checkpoint()).unwrap();
+    let retention = runtime.reorg_retention_blocks();
+
+    for height in ACTIVATION_HEIGHT..=(ACTIVATION_HEIGHT + retention - 1) {
+        let input = block(runtime.core().tip(), height, vec![]);
+        runtime.apply_block(&input).unwrap();
+    }
+
+    assert_eq!(runtime.oldest_rewind_height(), ACTIVATION_HEIGHT - 1);
+    assert!(
+        !runtime
+            .ironwood_checkpoints()
+            .contains_key(&(ACTIVATION_HEIGHT - 1))
+    );
+    let snapshot = runtime.save_snapshot().unwrap();
+    let mut restored = NamesRuntime::load_snapshot(deployment, &snapshot).unwrap();
+    assert_eq!(restored.tip(), runtime.tip());
+    assert_eq!(restored.state_root(), runtime.state_root());
+
+    restored.rewind_to(ACTIVATION_HEIGHT - 1).unwrap();
+    assert_eq!(restored.tip().height, ACTIVATION_HEIGHT - 1);
+    assert!(
+        restored
+            .ironwood_checkpoints()
+            .contains_key(&(ACTIVATION_HEIGHT - 1))
+    );
+}

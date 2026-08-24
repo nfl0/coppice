@@ -496,12 +496,14 @@ impl NamesApplication {
         &self,
         core: &CoreRuntime,
     ) -> Result<(), NamesRuntimeSnapshotError> {
+        let mut validation_core = core.clone();
         let mut state = self.state.clone();
         let mut tip = self.tip;
         let mut expected_root = self.state_root;
         let mut history = self.history.clone();
         loop {
-            let checkpoint = core
+            validate_names_core_position(tip, &validation_core)?;
+            let checkpoint = validation_core
                 .ironwood_checkpoints()
                 .get(&tip.height)
                 .copied()
@@ -529,6 +531,9 @@ impl NamesApplication {
                 .map_err(|_| NamesRuntimeSnapshotError::InvalidState)?;
             tip = undo.prior_tip;
             expected_root = undo.prior_state_root;
+            validation_core
+                .rewind_to(tip.height)
+                .map_err(|_| NamesRuntimeSnapshotError::InvalidHistory)?;
         }
         if !history.is_empty() {
             return Err(NamesRuntimeSnapshotError::InvalidHistory);
