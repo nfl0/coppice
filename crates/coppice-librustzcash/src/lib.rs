@@ -46,7 +46,8 @@ pub use pending::{
 };
 pub use reconcile::{
     CanonicalBlockSource, CanonicalTip, FrozenCanonicalBlockSource, ReconcileError, ReconcileKind,
-    ReconcileOutcome, reconcile_canonical_chain, reconcile_canonical_chain_with_progress,
+    ReconcileOutcome, ReconcileResult, reconcile_canonical_chain,
+    reconcile_canonical_chain_with_progress,
 };
 pub use register::{
     BeginRegistrationError, CanonicalCommitMissing, CarrierPreparationError, CommitTransitionError,
@@ -88,8 +89,8 @@ pub use carrier_tx::{
     propose_carrier_transaction,
 };
 pub use chain::{
-    CompactBlockAdapterError, CompactBlockApplyError, FullTransactionSource, apply_compact_block,
-    prepare_canonical_block,
+    CanonicalRuntime, CompactBlockAdapterError, CompactBlockApplyError, FullTransactionSource,
+    MAX_CANDIDATE_FULL_TX_BYTES, apply_compact_block, prepare_canonical_block,
 };
 /// The exact pinned librustzcash lock-owner type used by this adapter.
 pub use zcash_client_backend::wallet::LockOwner;

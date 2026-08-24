@@ -4,8 +4,7 @@
 //! by `coppice-core`.
 
 use crate::config::Rendezvous;
-use orchard::{keys::IncomingViewingKey, note_encryption::IronwoodDomain};
-use zcash_note_encryption::try_compact_note_decryption;
+use orchard::keys::IncomingViewingKey;
 
 #[derive(Debug)]
 pub enum Error {
@@ -31,7 +30,6 @@ pub fn compact_action_is_bulletin(
     action: &orchard::note_encryption::CompactAction,
     rendezvous: Rendezvous,
 ) -> Result<bool, Error> {
-    let domain = IronwoodDomain::for_compact_action(action);
-    let ivk = bulletin_ivk(rendezvous)?.prepare();
-    Ok(try_compact_note_decryption(&domain, &ivk, action).is_some())
+    coppice_core::carrier::compact_action_is_rendezvous(action, &rendezvous.orchard_ivk)
+        .map_err(|_| Error::Build)
 }

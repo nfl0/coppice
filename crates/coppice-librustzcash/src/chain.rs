@@ -6,16 +6,23 @@
 
 use std::fmt::Debug;
 
-use coppice::{
+use coppice_core::{
     carrier,
-    names_runtime::{
-        CoreCanonicalBlockInput, CoreCanonicalTransactionInput, NamesRuntime,
-        NamesRuntimeAppliedBlock, NamesRuntimeError,
-    },
+    identity::{ValidatedCoreRuntimeParameters, ZcashNetwork},
+    replay::{CoreCanonicalBlockInput, CoreCanonicalTransactionInput},
 };
 use orchard::note_encryption::CompactAction;
 use zcash_client_backend::proto::compact_formats::{CompactBlock, CompactTx};
-use zcash_protocol::consensus::{BlockHeight, BranchId, Parameters};
+use zcash_protocol::{
+    consensus::{BlockHeight, BranchId, NetworkType, Parameters},
+    constants::MAX_BLOCK_BYTES,
+};
+
+/// The cumulative candidate-byte budget is the consensus maximum serialized
+/// Zcash block size. It bounds bytes retained before Core parses any candidate.
+pub const MAX_CANDIDATE_FULL_TX_BYTES: usize = MAX_BLOCK_BYTES;
+
+pub use coppice_core::runtime::CanonicalRuntime;
 
 /// Supplies raw serialized transactions only when compact public rendezvous
 /// detection makes the full transaction mandatory.
@@ -31,21 +38,49 @@ pub enum CompactBlockAdapterError<SourceError: Debug> {
     InvalidBlockHeight,
     InvalidBlockHash,
     InvalidPrevBlockHash,
-    NonSequentialHeight { expected: u32, actual: u32 },
+    NonSequentialHeight {
+        expected: u32,
+        actual: u32,
+    },
     PredecessorMismatch,
-    InvalidTxIndex { transaction: usize },
-    InvalidTxid { transaction: usize },
+    InvalidTxIndex {
+        transaction: usize,
+    },
+    InvalidTxid {
+        transaction: usize,
+    },
     NonCanonicalTxOrder,
-    InvalidIronwoodCompactAction { tx_index: u32, action_index: usize },
-    CandidateDetection { tx_index: u32, action_index: usize },
+    InvalidIronwoodCompactAction {
+        tx_index: u32,
+        action_index: usize,
+    },
+    CandidateDetection {
+        tx_index: u32,
+        action_index: usize,
+    },
     FullTransactionSource(SourceError),
-    RequiredFullTransactionMissing { txid: [u8; 32], tx_index: u32 },
+    RequiredFullTransactionMissing {
+        txid: [u8; 32],
+        tx_index: u32,
+    },
+    CandidateFullTransactionTooLarge {
+        txid: [u8; 32],
+        tx_index: u32,
+        len: usize,
+        limit: usize,
+    },
+    CandidateFullTransactionBudgetExceeded {
+        txid: [u8; 32],
+        tx_index: u32,
+        attempted: usize,
+        limit: usize,
+    },
 }
 
 #[derive(Debug)]
-pub enum CompactBlockApplyError<SourceError: Debug> {
+pub enum CompactBlockApplyError<SourceError: Debug, RuntimeError: Debug> {
     Prepare(CompactBlockAdapterError<SourceError>),
-    Runtime(NamesRuntimeError),
+    Runtime(RuntimeError),
 }
 
 struct ValidatedCompactTx {
@@ -57,10 +92,10 @@ fn exact_32(bytes: &[u8]) -> Option<[u8; 32]> {
     bytes.try_into().ok()
 }
 
-fn validate_transaction<SourceError: Debug>(
+fn validate_transaction<SourceError: Debug, R: CanonicalRuntime>(
     transaction: usize,
     compact_tx: &CompactTx,
-    runtime: &NamesRuntime,
+    runtime: &R,
 ) -> Result<ValidatedCompactTx, CompactBlockAdapterError<SourceError>> {
     let tx_index = u32::try_from(compact_tx.index)
         .map_err(|_| CompactBlockAdapterError::InvalidTxIndex { transaction })?;
@@ -79,11 +114,14 @@ fn validate_transaction<SourceError: Debug>(
         })?;
         ironwood_nullifiers.push(action.nullifier().to_bytes());
         ironwood_commitments.push(action.cmx().to_bytes());
-        let hit = carrier::compact_action_is_bulletin(&action, runtime.deployment().rendezvous)
-            .map_err(|_| CompactBlockAdapterError::CandidateDetection {
-                tx_index,
-                action_index,
-            })?;
+        let hit = carrier::compact_action_is_rendezvous(
+            &action,
+            &runtime.core_parameters().parameters().rendezvous_ivk,
+        )
+        .map_err(|_| CompactBlockAdapterError::CandidateDetection {
+            tx_index,
+            action_index,
+        })?;
         candidate |= hit;
     }
 
@@ -102,17 +140,18 @@ fn validate_transaction<SourceError: Debug>(
 
 /// Validates an entire compact block before making the first external fetch,
 /// then fetches each candidate transaction exactly once in canonical order.
-pub fn prepare_canonical_block<P, S>(
+pub fn prepare_canonical_block<P, R, S>(
     params: &P,
-    runtime: &NamesRuntime,
+    runtime: &R,
     compact_block: &CompactBlock,
     full_tx_source: &mut S,
 ) -> Result<CoreCanonicalBlockInput, CompactBlockAdapterError<S::Error>>
 where
     P: Parameters,
+    R: CanonicalRuntime,
     S: FullTransactionSource,
 {
-    if params.network_type() != runtime.deployment().address_network {
+    if !network_matches(params.network_type(), runtime.core_parameters()) {
         return Err(CompactBlockAdapterError::NetworkMismatch);
     }
     let height = u32::try_from(compact_block.height)
@@ -150,17 +189,44 @@ where
     }
 
     // Phase B: fetch raw bytes only for compact rendezvous hits.
+    let mut candidate_bytes = 0usize;
     for tx in &mut validated {
         if tx.candidate {
-            tx.input.candidate_full_tx = Some(
-                full_tx_source
-                    .full_transaction(tx.input.txid)
-                    .map_err(CompactBlockAdapterError::FullTransactionSource)?
-                    .ok_or(CompactBlockAdapterError::RequiredFullTransactionMissing {
+            let bytes = full_tx_source
+                .full_transaction(tx.input.txid)
+                .map_err(CompactBlockAdapterError::FullTransactionSource)?
+                .ok_or(CompactBlockAdapterError::RequiredFullTransactionMissing {
+                    txid: tx.input.txid,
+                    tx_index: tx.input.tx_index,
+                })?;
+            if bytes.len() > MAX_CANDIDATE_FULL_TX_BYTES {
+                return Err(CompactBlockAdapterError::CandidateFullTransactionTooLarge {
+                    txid: tx.input.txid,
+                    tx_index: tx.input.tx_index,
+                    len: bytes.len(),
+                    limit: MAX_CANDIDATE_FULL_TX_BYTES,
+                });
+            }
+            let attempted = candidate_bytes.checked_add(bytes.len()).ok_or(
+                CompactBlockAdapterError::CandidateFullTransactionBudgetExceeded {
+                    txid: tx.input.txid,
+                    tx_index: tx.input.tx_index,
+                    attempted: usize::MAX,
+                    limit: MAX_CANDIDATE_FULL_TX_BYTES,
+                },
+            )?;
+            if attempted > MAX_CANDIDATE_FULL_TX_BYTES {
+                return Err(
+                    CompactBlockAdapterError::CandidateFullTransactionBudgetExceeded {
                         txid: tx.input.txid,
                         tx_index: tx.input.tx_index,
-                    })?,
-            );
+                        attempted,
+                        limit: MAX_CANDIDATE_FULL_TX_BYTES,
+                    },
+                );
+            }
+            candidate_bytes = attempted;
+            tx.input.candidate_full_tx = Some(bytes);
         }
     }
 
@@ -175,21 +241,31 @@ where
 
 /// Prepares the complete block first and delegates the sole state mutation to
 /// the atomic core runtime.
-pub fn apply_compact_block<P, S>(
+pub fn apply_compact_block<P, R, S>(
     params: &P,
-    runtime: &mut NamesRuntime,
+    runtime: &mut R,
     compact_block: &CompactBlock,
     full_tx_source: &mut S,
-) -> Result<NamesRuntimeAppliedBlock, CompactBlockApplyError<S::Error>>
+) -> Result<R::BlockOutput, CompactBlockApplyError<S::Error, R::ApplyError>>
 where
     P: Parameters,
+    R: CanonicalRuntime,
     S: FullTransactionSource,
 {
     let input = prepare_canonical_block(params, runtime, compact_block, full_tx_source)
         .map_err(CompactBlockApplyError::Prepare)?;
     runtime
-        .apply_block(&input)
+        .apply_canonical_block(&input)
         .map_err(CompactBlockApplyError::Runtime)
+}
+
+fn network_matches(network: NetworkType, parameters: &ValidatedCoreRuntimeParameters) -> bool {
+    matches!(
+        (network, parameters.parameters().zcash_network),
+        (NetworkType::Main, ZcashNetwork::Main)
+            | (NetworkType::Test, ZcashNetwork::Test)
+            | (NetworkType::Regtest, ZcashNetwork::Regtest)
+    )
 }
 
 #[cfg(test)]
@@ -197,11 +273,12 @@ mod tests {
     use std::collections::BTreeMap;
 
     use coppice::{
+        carrier as names_carrier,
         config::{DeploymentParameters, REGTEST, Rendezvous},
         constants::REGTEST_ACTIVATION_HEIGHT,
         names_runtime::{
-            CoreReplayActivationCheckpoint, CoreReplayError, IronwoodFrontier,
-            NamesTransactionOutcome,
+            CoreReplayActivationCheckpoint, CoreReplayError, IronwoodFrontier, NamesRuntime,
+            NamesRuntimeError, NamesTransactionOutcome,
         },
     };
     use orchard::{
@@ -335,9 +412,9 @@ mod tests {
     #[test]
     fn real_public_rendezvous_detector_distinguishes_a_foreign_compact_action() {
         let hit = CompactAction::try_from(&real_rendezvous_action()).unwrap();
-        assert!(carrier::compact_action_is_bulletin(&hit, REGTEST.rendezvous).unwrap());
+        assert!(names_carrier::compact_action_is_bulletin(&hit, REGTEST.rendezvous).unwrap());
         let miss = CompactAction::try_from(&noncandidate_action()).unwrap();
-        assert!(!carrier::compact_action_is_bulletin(&miss, REGTEST.rendezvous).unwrap());
+        assert!(!names_carrier::compact_action_is_bulletin(&miss, REGTEST.rendezvous).unwrap());
     }
 
     #[test]
@@ -513,6 +590,54 @@ mod tests {
         }
         prepare_canonical_block(&params(), &runtime, &three, &mut source).unwrap();
         assert_eq!(source.calls, vec![[1; 32], [2; 32], [3; 32]]);
+    }
+
+    #[test]
+    fn candidate_bytes_are_bounded_before_core_parsing() {
+        let runtime = runtime();
+        let input = block(
+            &runtime,
+            vec![compact_tx(2, 1, vec![real_rendezvous_action()])],
+        );
+        let mut source = Source::default();
+        source
+            .values
+            .insert([1; 32], Ok(Some(vec![0; MAX_CANDIDATE_FULL_TX_BYTES + 1])));
+        assert!(matches!(
+            prepare_canonical_block(&params(), &runtime, &input, &mut source),
+            Err(CompactBlockAdapterError::CandidateFullTransactionTooLarge {
+                txid,
+                len,
+                limit: MAX_CANDIDATE_FULL_TX_BYTES,
+                ..
+            }) if txid == [1; 32] && len == MAX_CANDIDATE_FULL_TX_BYTES + 1
+        ));
+    }
+
+    #[test]
+    fn cumulative_candidate_bytes_are_bounded_in_canonical_fetch_order() {
+        let runtime = runtime();
+        let input = block(
+            &runtime,
+            vec![
+                compact_tx(2, 1, vec![real_rendezvous_action()]),
+                compact_tx(7, 2, vec![real_rendezvous_action()]),
+            ],
+        );
+        let each = MAX_CANDIDATE_FULL_TX_BYTES / 2 + 1;
+        let mut source = Source::default();
+        source.values.insert([1; 32], Ok(Some(vec![0; each])));
+        source.values.insert([2; 32], Ok(Some(vec![0; each])));
+        assert!(matches!(
+            prepare_canonical_block(&params(), &runtime, &input, &mut source),
+            Err(CompactBlockAdapterError::CandidateFullTransactionBudgetExceeded {
+                txid,
+                attempted,
+                limit: MAX_CANDIDATE_FULL_TX_BYTES,
+                ..
+            }) if txid == [2; 32] && attempted == each * 2
+        ));
+        assert_eq!(source.calls, vec![[1; 32], [2; 32]]);
     }
 
     #[test]

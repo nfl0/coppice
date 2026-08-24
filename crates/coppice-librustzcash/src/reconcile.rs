@@ -5,7 +5,7 @@
 
 use std::fmt::Debug;
 
-use coppice::names_runtime::{CoreReplayTip, NamesRuntime, NamesRuntimeRewindError};
+use coppice_core::{replay::CoreReplayTip, runtime::CanonicalRuntime};
 use zcash_client_backend::proto::compact_formats::CompactBlock;
 use zcash_protocol::consensus::Parameters;
 
@@ -90,7 +90,12 @@ pub struct ReconcileOutcome {
 }
 
 #[derive(Debug)]
-pub enum ReconcileError<CanonicalError: Debug, FullTxError: Debug> {
+pub enum ReconcileError<
+    CanonicalError: Debug,
+    FullTxError: Debug,
+    RuntimeApplyError: Debug,
+    RuntimeRewindError: Debug,
+> {
     CanonicalBlockSource(CanonicalError),
     MissingCanonicalBlock {
         height: u32,
@@ -103,14 +108,16 @@ pub enum ReconcileError<CanonicalError: Debug, FullTxError: Debug> {
         current: CanonicalTip,
     },
     NoRetainedCommonAncestor,
-    Rewind(NamesRuntimeRewindError),
+    Rewind(RuntimeRewindError),
     CompactBlockApply {
         height: u32,
-        error: CompactBlockApplyError<FullTxError>,
+        error: CompactBlockApplyError<FullTxError, RuntimeApplyError>,
     },
     ProgressPersistenceFailed,
     ArithmeticOverflow,
 }
+
+pub type ReconcileResult<C, F, A, W> = Result<ReconcileOutcome, ReconcileError<C, F, A, W>>;
 
 fn block_identity(block: &CompactBlock, requested_height: u32) -> Option<CanonicalTip> {
     let height = u32::try_from(block.height).ok()?;
@@ -118,14 +125,16 @@ fn block_identity(block: &CompactBlock, requested_height: u32) -> Option<Canonic
     (height == requested_height).then_some(CanonicalTip { height, block_hash })
 }
 
-fn checked_block<C, F>(
+fn checked_block<C, F, A, W>(
     source: &mut C,
     height: u32,
-) -> Result<CompactBlock, ReconcileError<C::Error, F>>
+) -> Result<CompactBlock, ReconcileError<C::Error, F, A, W>>
 where
     C: CanonicalBlockSource,
     C::Error: Debug,
     F: Debug,
+    A: Debug,
+    W: Debug,
 {
     let block = source
         .compact_block(height)
@@ -137,16 +146,18 @@ where
     Ok(block)
 }
 
-fn canonical_hash_at<C, F>(
+fn canonical_hash_at<C, F, A, W>(
     source: &mut C,
     observed_tip: CanonicalTip,
     activation_height: u32,
     height: u32,
-) -> Result<[u8; 32], ReconcileError<C::Error, F>>
+) -> Result<[u8; 32], ReconcileError<C::Error, F, A, W>>
 where
     C: CanonicalBlockSource,
     C::Error: Debug,
     F: Debug,
+    A: Debug,
+    W: Debug,
 {
     if height == observed_tip.height {
         return Ok(observed_tip.block_hash);
@@ -157,14 +168,14 @@ where
     if height == activation_base {
         // Never request a pre-activation CompactBlock. The activation block's
         // predecessor identifies the host-selected activation base.
-        let block = checked_block::<C, F>(source, activation_height)?;
+        let block = checked_block::<C, F, A, W>(source, activation_height)?;
         return block.prev_hash.as_slice().try_into().map_err(|_| {
             ReconcileError::InvalidCanonicalIdentity {
                 requested_height: activation_height,
             }
         });
     }
-    checked_block::<C, F>(source, height)?
+    checked_block::<C, F, A, W>(source, height)?
         .hash
         .as_slice()
         .try_into()
@@ -176,14 +187,15 @@ where
 /// Reconciles to the host-selected tip observed at the beginning of this call.
 /// Ancestor discovery is mutation-free; after a rewind, replay is deliberately
 /// block-atomic and resumable rather than range-transactional.
-pub fn reconcile_canonical_chain<P, C, F>(
+pub fn reconcile_canonical_chain<P, R, C, F>(
     params: &P,
-    runtime: &mut NamesRuntime,
+    runtime: &mut R,
     canonical_source: &mut C,
     full_tx_source: &mut F,
-) -> Result<ReconcileOutcome, ReconcileError<C::Error, F::Error>>
+) -> ReconcileResult<C::Error, F::Error, R::ApplyError, R::RewindError>
 where
     P: Parameters,
+    R: CanonicalRuntime,
     C: CanonicalBlockSource,
     F: FullTransactionSource,
 {
@@ -200,15 +212,16 @@ where
 /// after each successfully applied canonical block. Returning `false` stops
 /// immediately at that durable boundary; the runtime remains at exactly the
 /// state presented to the callback.
-pub fn reconcile_canonical_chain_with_progress<P, C, F>(
+pub fn reconcile_canonical_chain_with_progress<P, R, C, F>(
     params: &P,
-    runtime: &mut NamesRuntime,
+    runtime: &mut R,
     canonical_source: &mut C,
     full_tx_source: &mut F,
-    mut persist_progress: impl FnMut(&NamesRuntime) -> bool,
-) -> Result<ReconcileOutcome, ReconcileError<C::Error, F::Error>>
+    mut persist_progress: impl FnMut(&R) -> bool,
+) -> ReconcileResult<C::Error, F::Error, R::ApplyError, R::RewindError>
 where
     P: Parameters,
+    R: CanonicalRuntime,
     C: CanonicalBlockSource,
     F: FullTransactionSource,
 {
@@ -230,12 +243,15 @@ where
         });
     }
 
-    let activation_height = runtime.deployment().activation_height;
+    let activation_height = runtime
+        .core_parameters()
+        .parameters()
+        .runtime_activation_height;
     let activation_base = activation_height
         .checked_sub(1)
         .ok_or(ReconcileError::ArithmeticOverflow)?;
     let local_is_ancestor = if original_tip.height < observed_host_tip.height {
-        canonical_hash_at::<C, F::Error>(
+        canonical_hash_at::<C, F::Error, R::ApplyError, R::RewindError>(
             canonical_source,
             observed_host_tip,
             activation_height,
@@ -255,7 +271,7 @@ where
             let Some(local) = runtime.retained_tip_at(height) else {
                 continue;
             };
-            let canonical_hash = canonical_hash_at::<C, F::Error>(
+            let canonical_hash = canonical_hash_at::<C, F::Error, R::ApplyError, R::RewindError>(
                 canonical_source,
                 observed_host_tip,
                 activation_height,
@@ -272,7 +288,7 @@ where
             .checked_sub(common.height)
             .ok_or(ReconcileError::ArithmeticOverflow)?;
         runtime
-            .rewind_to(common.height)
+            .rewind_canonical_to(common.height)
             .map_err(ReconcileError::Rewind)?;
         if !persist_progress(runtime) {
             return Err(ReconcileError::ProgressPersistenceFailed);
@@ -290,7 +306,10 @@ where
         for height in start..=observed_host_tip.height {
             // Ownership is deliberately per iteration: after application this
             // protobuf block is dropped before the next height is fetched.
-            let block = checked_block::<C, F::Error>(canonical_source, height)?;
+            let block = checked_block::<C, F::Error, R::ApplyError, R::RewindError>(
+                canonical_source,
+                height,
+            )?;
             if height == observed_host_tip.height
                 && block_identity(&block, height).map(|id| id.block_hash)
                     != Some(observed_host_tip.block_hash)
@@ -325,7 +344,7 @@ where
         });
     }
     if current_host_tip != observed_host_tip {
-        let current_observed_hash = canonical_hash_at::<C, F::Error>(
+        let current_observed_hash = canonical_hash_at::<C, F::Error, R::ApplyError, R::RewindError>(
             canonical_source,
             current_host_tip,
             activation_height,
@@ -359,7 +378,7 @@ mod tests {
 
     use coppice::{
         config::{DeploymentParameters, REGTEST, Rendezvous},
-        names_runtime::{CoreReplayActivationCheckpoint, IronwoodFrontier},
+        names_runtime::{CoreReplayActivationCheckpoint, IronwoodFrontier, NamesRuntime},
     };
     use orchard::{
         note::{ExtractedNoteCommitment, Note, NoteVersion, Nullifier, RandomSeed, Rho},
@@ -723,7 +742,7 @@ mod tests {
             &mut runtime,
             &mut source,
             &mut full,
-            |progress| {
+            |progress: &NamesRuntime| {
                 persisted.push(progress.tip().height);
                 progress.tip().height < 2
             },
