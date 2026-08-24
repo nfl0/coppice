@@ -12,7 +12,10 @@ workspace = true
 
 [dependencies]
 blake2b_simd.workspace = true
+incrementalmerkletree.workspace = true
 orchard.workspace = true
+zcash_primitives.workspace = true
+zcash_protocol.workspace = true
 
 [dev-dependencies]
 hex.workspace = true

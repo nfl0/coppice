@@ -18,14 +18,17 @@ use crate::{
     state::{CoppiceState, StateMutationError},
     state_root::{self, StateRootInput},
 };
-use incrementalmerkletree::frontier::CommitmentTree;
 use orchard::tree::MerkleHashOrchard;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, io::Cursor};
 use zcash_primitives::transaction::Transaction;
 use zcash_protocol::consensus::BranchId;
 
-pub type IronwoodFrontier = CommitmentTree<MerkleHashOrchard, 32>;
+pub use coppice_core::replay::{
+    CoreCanonicalBlockInput as CanonicalBlockInput,
+    CoreCanonicalTransactionInput as CanonicalTxInput,
+    CoreReplayActivationCheckpoint as ActivationCheckpoint, IronwoodFrontier,
+};
 
 pub const COPPICE_SNAPSHOT_FORMAT_VERSION: u32 = 1;
 
@@ -37,33 +40,6 @@ fn required_reorg_retention_blocks(
         .checked_add(deployment.commit_ttl_blocks)
         .and_then(|value| value.checked_add(1))
         .ok_or(SnapshotError::HistoryTooLarge)
-}
-
-#[derive(Clone, Debug)]
-pub struct CanonicalBlockInput {
-    pub height: u32,
-    pub block_hash: [u8; 32],
-    pub prev_block_hash: [u8; 32],
-    pub branch_id: BranchId,
-    pub transactions: Vec<CanonicalTxInput>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CanonicalTxInput {
-    pub tx_index: u32,
-    pub txid: [u8; 32],
-    pub ironwood_nullifiers: Vec<[u8; 32]>,
-    pub ironwood_commitments: Vec<[u8; 32]>,
-    pub full_tx_required: bool,
-    pub candidate_full_tx: Option<Vec<u8>>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ActivationCheckpoint {
-    pub height: u32,
-    pub block_hash: [u8; 32],
-    pub ironwood_frontier: IronwoodFrontier,
-    pub ironwood_tree_size: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1344,6 +1320,9 @@ fn map_reveal_rejection(
         }
     })
 }
+
+#[cfg(test)]
+mod core_replay_differential;
 
 #[cfg(test)]
 mod tests {
