@@ -1,6 +1,10 @@
-# Codex Session Orientation
+# Internal Codex Session Orientation
 
-This directory contains the current Coppice v1 design contract.
+This is an internal agent/development document, not the public contribution
+entry point. Human contributors should start with `../README.md` and
+`../CONTRIBUTING.md`.
+
+It records the current Coppice v1 design contract.
 
 The repository already contains a functioning Coppice implementation. Do **not**
 start a clean-room rewrite unless a later task explicitly requires one.
@@ -15,7 +19,9 @@ For every task:
 6. Make only the bounded change requested by the current task.
 7. If the requested change conflicts with the frozen protocol or exposes a
    design flaw, stop and report the issue instead of improvising.
-8. Run relevant focused tests plus the full Coppice workspace tests.
+8. Run relevant focused checks. Run the full Coppice workspace tests when an
+   executable or normative/generated change warrants them; documentation-only
+   work uses lightweight validation.
 9. Commit and push successful work when the task prompt explicitly requests it.
 
 Authority order:

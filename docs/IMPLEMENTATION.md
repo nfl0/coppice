@@ -1,9 +1,13 @@
 # Coppice implementation guide
 
-This document maps the implemented production architecture. Normative protocol
+This document maps the implemented production-authoritative architecture.
+Normative protocol
 bytes and state transitions are governed by `PROTOCOL_SPEC.md` and the files in
 `test-vectors/`. `RUNTIME_ARCHITECTURE.md` defines the crate and authority
 boundaries.
+
+This code path is qualified locally; it is not a public Coppice Testnet or
+Mainnet deployment, and no independent security audit has been completed.
 
 ## Workspace dependency direction
 
@@ -37,8 +41,10 @@ Three non-interchangeable identities are used:
 
 `CoreRuntimeParameters::validate()` must succeed before a `CoreRuntimeId` can
 be derived. Validation includes a cryptographic correspondence check between
-the rendezvous IVK and receiver. Names policy values are absent from the Core
-preimage.
+the rendezvous IVK and receiver. Candidate classification and full extraction
+also require the decrypted recipient to equal the exact configured receiver;
+IVK-only decryptability is not enough. Names policy values are absent from the
+Core preimage.
 
 Runtime activation belongs to Core. Application activation belongs to the
 application descriptor and may be later than runtime activation. Names v1
@@ -59,7 +65,7 @@ CPV1 payload        = CA01 || application_id || u16be(version) || payload
 `coppice-core::application` owns the strict CA01 envelope. The maximum CPV1
 payload is 16,093 bytes and the maximum application payload is 16,055 bytes.
 
-`CoreRuntime` decrypts frames only at its validated rendezvous, reconstructs
+`CoreRuntime` decrypts frames only at its validated exact receiver, reconstructs
 one CPV1 message, decodes the CA01 route, and emits an immutable message status.
 Unknown routes remain structurally valid but are not reinterpreted. Malformed
 transport or envelopes never fall back to naked Names decoding.
@@ -153,7 +159,8 @@ accepted; the host rebuilds it from activation.
 runtime. It provides:
 
 - strict CompactBlock conversion into `CoreCanonicalBlockInput`;
-- rendezvous candidate detection before full-transaction fetching;
+- exact-receiver rendezvous candidate detection before full-transaction
+  fetching;
 - full transaction fetching only for candidates;
 - host-tip-frozen reconciliation, shallow rewind, and deep rebuild signaling;
 - normal librustzcash proposal/construction for CPV1/CA01 Names carriers;
@@ -223,12 +230,17 @@ Every change must preserve:
 
 ## Qualification
 
-Before release, run workspace formatting, tests, clippy with warnings denied,
-and diff checks. Deterministic tests cover hostile inputs, routing, atomicity,
-retained/deep reorgs, snapshots, and fresh replay. The live Zakura -> Zaino ->
-zcash-devtool qualification covers ordinary Ironwood transactions, complete
-Names lifecycles, bond spends, restart/fresh recovery, shallow reorg,
-same-seed determinism, protection modes, and multi-account isolation. Deep
-reorg and byte-identical rebuild qualification is deterministic because it
-requires a longer retained history than the disposable live stack normally
-constructs.
+The final qualification record spans the real Zakura -> patched Zaino ->
+`zcash-devtool` stack in Phases 1-5 and 7, with the deterministic retained/deep
+reorg companion in Phase 6. It covers ordinary Ironwood transactions, the full
+Names lifecycle, restart and fresh same-seed recovery, shallow reorgs,
+multi-account isolation, protection modes, wallet/PCZT spend boundaries, and
+resolution/lock invariants.
+
+Phase 7 placed a Names transition on an abandoned branch, advanced that branch
+131 blocks beyond the configured 121-block retention horizon, mined an
+equal-length replacement, and verified canonical rebuild. It then initialized
+an independent same-seed wallet from activation and compared the resulting
+runtime snapshot and Names outcomes. This is local development/regtest
+qualification evidence, not a security audit, public deployment, or guarantee
+for future operational environments.

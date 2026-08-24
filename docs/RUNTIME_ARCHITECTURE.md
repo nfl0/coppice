@@ -1,8 +1,12 @@
 # Coppice runtime architecture
 
-This document records the production crate and state boundaries after the
-general-runtime refactor. Protocol bytes remain governed by
+This document records the production-authoritative crate and state boundaries
+for Coppice Core / Core Runtime and its first application, Coppice Names v1.
+Protocol bytes remain governed by
 `PROTOCOL_SPEC.md` and the normative vectors.
+
+“Production-authoritative” describes the code path used for qualification and
+integration. It does not mean that Coppice has a public production deployment.
 
 ## Authority and dependencies
 
@@ -19,7 +23,7 @@ coppice-core::CoreRuntime
         |  owns CoreReplay, CPV1 and CA01 routing
         |  depends on no application crate
         v
-coppice::NamesRuntime
+coppice::NamesRuntime (Coppice Names v1)
         |  composes CoreRuntime + NamesApplication atomically
         v
 wallet-facing Names workflows and protection policy
@@ -28,6 +32,20 @@ wallet-facing Names workflows and protection policy
 There is no second consensus layer. The host supplies an already selected
 canonical chain. Core validates continuity, ordering, candidate/full
 consistency, and Ironwood effects, but never chooses a competing block.
+
+## Identity vocabulary
+
+These identities are intentionally separate:
+
+- `CoreRuntimeId` identifies the generic runtime, its activation, CPV1 context,
+  and exact rendezvous IVK/receiver pair.
+- `ApplicationId + application_version` identifies a routed application
+  envelope.
+- `NamesDeploymentId` identifies Coppice Names v1's application-specific
+  cryptographic and state domains.
+
+Use `NamesDeploymentId` when discussing Names deployment parameters. A generic
+“deployment ID” is ambiguous and should not be used for Core identity.
 
 ## Stable identities
 
@@ -60,10 +78,14 @@ Names application state
   bounded Names undo journal
 ```
 
-`CoreRuntime` decrypts public rendezvous frames and emits immutable transaction
-contexts containing canonical height/hash/index/txid, ordered validated
-nullifiers and commitments, candidate validation status, and optional routed
-application message. It does not interpret an application payload.
+`CoreRuntime` decrypts public rendezvous frames only when the decrypted
+recipient is the exact configured receiver. Decryptability under the public
+incoming IVK alone is insufficient. The same receiver-bound rule is applied by
+compact candidate discovery and authoritative full-transaction extraction.
+Core then emits immutable transaction contexts containing canonical
+height/hash/index/txid, ordered validated nullifiers and commitments, candidate
+validation status, and an optional routed application message. It does not
+interpret application payload bytes.
 
 `NamesApplication` consumes those contexts. Canonical nullifiers may terminate
 Names bonds before a routed operation in the same transaction. The application
@@ -133,7 +155,8 @@ retention concepts.
 ### `coppice-librustzcash`
 
 - hostile-input-safe CompactBlock adaptation;
-- rendezvous candidate detection and candidate-only full transaction fetching;
+- exact-receiver rendezvous candidate detection and candidate-only full
+  transaction fetching;
 - host-authoritative reconciliation and rebuild signaling;
 - wallet-local bond inventory, witness/proof construction, pending intents,
   owner workflows, locks, and spend protection;
