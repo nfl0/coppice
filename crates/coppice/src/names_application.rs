@@ -11,7 +11,8 @@ use coppice_core::{
     carrier::CPV1_PROTOCOL_ID,
     identity::{
         CORE_RUNTIME_PROTOCOL_ID_V1, CORE_RUNTIME_PROTOCOL_VERSION_V1, CoreRuntimeId,
-        ValidatedCoreRuntimeParameters, ZcashNetwork,
+        CoreRuntimeIdentityError, CoreRuntimeParameters, ValidatedCoreRuntimeParameters,
+        ZcashNetwork,
     },
 };
 use zcash_protocol::consensus::NetworkType;
@@ -77,6 +78,7 @@ impl NamesDeploymentId {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NamesCoreCompatibilityError {
     InvalidNamesDeployment(DeploymentValidationError),
+    InvalidCoreRuntime(CoreRuntimeIdentityError),
     UnsupportedNamesNetworkDomain,
     RuntimeProtocol,
     ZcashNetwork,
@@ -87,6 +89,48 @@ pub enum NamesCoreCompatibilityError {
     ApplicationKey,
     ApplicationActivation,
     NamesV1RuntimeActivation,
+}
+
+/// Derives and validates the generic Core context shared by the frozen Names
+/// v1 deployment. Names policy parameters are deliberately not copied into the
+/// Core parameters or identity.
+pub fn names_v1_core_runtime_parameters(
+    names: &DeploymentParameters,
+) -> Result<ValidatedCoreRuntimeParameters, NamesCoreCompatibilityError> {
+    names
+        .validate()
+        .map_err(NamesCoreCompatibilityError::InvalidNamesDeployment)?;
+    let (zcash_network, zcash_network_domain, expected_address_network) =
+        if names.network_id == constants::REGTEST_NETWORK_ID {
+            (
+                ZcashNetwork::Regtest,
+                NAMES_V1_REGTEST_CORE_NETWORK_DOMAIN,
+                NetworkType::Regtest,
+            )
+        } else if names.network_id == constants::TESTNET_NETWORK_ID {
+            (
+                ZcashNetwork::Test,
+                NAMES_V1_TESTNET_CORE_NETWORK_DOMAIN,
+                NetworkType::Test,
+            )
+        } else {
+            return Err(NamesCoreCompatibilityError::UnsupportedNamesNetworkDomain);
+        };
+    if names.address_network != expected_address_network {
+        return Err(NamesCoreCompatibilityError::ZcashNetwork);
+    }
+    CoreRuntimeParameters {
+        runtime_protocol_id: CORE_RUNTIME_PROTOCOL_ID_V1.to_vec(),
+        runtime_protocol_version: CORE_RUNTIME_PROTOCOL_VERSION_V1,
+        zcash_network_domain: zcash_network_domain.to_vec(),
+        zcash_network,
+        runtime_activation_height: names.activation_height,
+        carrier_protocol_id: CPV1_PROTOCOL_ID.to_vec(),
+        rendezvous_ivk: names.rendezvous.orchard_ivk,
+        rendezvous_receiver: names.rendezvous.orchard_receiver,
+    }
+    .validate()
+    .map_err(NamesCoreCompatibilityError::InvalidCoreRuntime)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

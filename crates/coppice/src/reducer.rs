@@ -1331,9 +1331,6 @@ fn map_reveal_rejection(
 mod core_replay_differential;
 
 #[cfg(test)]
-mod names_runtime_differential;
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use crate::{

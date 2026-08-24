@@ -6,6 +6,7 @@
 
 use incrementalmerkletree::frontier::CommitmentTree;
 use orchard::{note::Nullifier, tree::MerkleHashOrchard};
+use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, io::Cursor};
 use zcash_primitives::transaction::Transaction;
 use zcash_protocol::consensus::BranchId;
@@ -13,6 +14,7 @@ use zcash_protocol::consensus::BranchId;
 /// Zcash transactions are bounded by the consensus block-size limit. Applying
 /// the same limit before parsing prevents caller-controlled allocation spikes.
 pub const MAX_FULL_TRANSACTION_LEN: usize = 2_000_000;
+pub const CORE_REPLAY_SNAPSHOT_FORMAT_VERSION: u32 = 1;
 
 /// The authenticated Ironwood commitment frontier tracked by Core replay.
 pub type IronwoodFrontier = CommitmentTree<MerkleHashOrchard, 32>;
@@ -288,12 +290,55 @@ pub enum CoreRewindError {
     SnapshotMissing,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CoreReplaySnapshotError {
+    Encoding,
+    UnsupportedFormat,
+    ConfigurationMismatch,
+    InvalidTip,
+    InvalidHistory,
+    InvalidIronwoodTree,
+    InvalidCheckpoint,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct CoreReplayUndo {
     applied_tip: CoreReplayTip,
     prior_tip: CoreReplayTip,
     prior_ironwood_frontier: IronwoodFrontier,
     checkpoint_undo: Vec<(u32, Option<CoreIronwoodCheckpoint>)>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+struct StoredCoreTip {
+    height: u32,
+    block_hash: [u8; 32],
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+struct StoredCoreCheckpoint {
+    height: u32,
+    root: [u8; 32],
+    tree_size: u32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct StoredCoreUndo {
+    applied_tip: StoredCoreTip,
+    prior_tip: StoredCoreTip,
+    prior_ironwood_frontier: Vec<u8>,
+    checkpoint_undo: Vec<(u32, Option<StoredCoreCheckpoint>)>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct StoredCoreReplay {
+    format_version: u32,
+    activation_height: u32,
+    retention_blocks: u32,
+    tip: StoredCoreTip,
+    ironwood_frontier: Vec<u8>,
+    ironwood_checkpoints: Vec<StoredCoreCheckpoint>,
+    undo: Vec<StoredCoreUndo>,
 }
 
 /// Parallel application-blind canonical replay state.
@@ -377,6 +422,143 @@ impl CoreReplay {
                 .and_then(|next| self.history.get(&next))
                 .map(|undo| undo.prior_tip)
         }
+    }
+
+    /// Serializes Core-only canonical replay state and bounded rewind metadata.
+    pub fn save_snapshot(&self) -> Result<Vec<u8>, CoreReplaySnapshotError> {
+        validate_frontier_tip(
+            &self.ironwood_frontier,
+            &self.ironwood_checkpoints,
+            self.tip,
+        )?;
+        let stored = StoredCoreReplay {
+            format_version: CORE_REPLAY_SNAPSHOT_FORMAT_VERSION,
+            activation_height: self.configuration.activation_height,
+            retention_blocks: self.configuration.retention_blocks,
+            tip: store_tip(self.tip),
+            ironwood_frontier: store_frontier(&self.ironwood_frontier)?,
+            ironwood_checkpoints: self
+                .ironwood_checkpoints
+                .values()
+                .copied()
+                .map(store_checkpoint)
+                .collect(),
+            undo: self
+                .history
+                .values()
+                .map(|undo| {
+                    Ok(StoredCoreUndo {
+                        applied_tip: store_tip(undo.applied_tip),
+                        prior_tip: store_tip(undo.prior_tip),
+                        prior_ironwood_frontier: store_frontier(&undo.prior_ironwood_frontier)?,
+                        checkpoint_undo: undo
+                            .checkpoint_undo
+                            .iter()
+                            .map(|(height, checkpoint)| (*height, checkpoint.map(store_checkpoint)))
+                            .collect(),
+                    })
+                })
+                .collect::<Result<Vec<_>, CoreReplaySnapshotError>>()?,
+        };
+        serde_json::to_vec(&stored).map_err(|_| CoreReplaySnapshotError::Encoding)
+    }
+
+    /// Restores and validates Core-only replay state under an independently
+    /// supplied generic replay configuration.
+    pub fn load_snapshot(
+        configuration: CoreReplayConfiguration,
+        bytes: &[u8],
+    ) -> Result<Self, CoreReplaySnapshotError> {
+        let stored: StoredCoreReplay =
+            serde_json::from_slice(bytes).map_err(|_| CoreReplaySnapshotError::Encoding)?;
+        if stored.format_version != CORE_REPLAY_SNAPSHOT_FORMAT_VERSION {
+            return Err(CoreReplaySnapshotError::UnsupportedFormat);
+        }
+        if stored.activation_height != configuration.activation_height
+            || stored.retention_blocks != configuration.retention_blocks
+        {
+            return Err(CoreReplaySnapshotError::ConfigurationMismatch);
+        }
+        let activation_base = configuration.activation_height - 1;
+        let tip = restore_tip(stored.tip);
+        if tip.height < activation_base {
+            return Err(CoreReplaySnapshotError::InvalidTip);
+        }
+        let ironwood_frontier = restore_frontier(&stored.ironwood_frontier)?;
+        let ironwood_checkpoints = restore_checkpoint_map(stored.ironwood_checkpoints)?;
+        validate_checkpoint_range(configuration, tip.height, &ironwood_checkpoints)?;
+        validate_frontier_tip(&ironwood_frontier, &ironwood_checkpoints, tip)?;
+
+        if stored.undo.len() > configuration.retention_blocks as usize {
+            return Err(CoreReplaySnapshotError::InvalidHistory);
+        }
+        let mut history = BTreeMap::new();
+        for stored_undo in stored.undo {
+            let applied_tip = restore_tip(stored_undo.applied_tip);
+            let prior_tip = restore_tip(stored_undo.prior_tip);
+            if prior_tip.height.checked_add(1) != Some(applied_tip.height) {
+                return Err(CoreReplaySnapshotError::InvalidHistory);
+            }
+            let checkpoint_undo = stored_undo
+                .checkpoint_undo
+                .into_iter()
+                .map(|(height, checkpoint)| {
+                    let checkpoint = checkpoint.map(restore_checkpoint).transpose()?;
+                    if checkpoint.is_some_and(|checkpoint| checkpoint.height != height) {
+                        return Err(CoreReplaySnapshotError::InvalidCheckpoint);
+                    }
+                    Ok((height, checkpoint))
+                })
+                .collect::<Result<Vec<_>, CoreReplaySnapshotError>>()?;
+            if checkpoint_undo
+                .windows(2)
+                .any(|pair| pair[0].0 >= pair[1].0)
+            {
+                return Err(CoreReplaySnapshotError::InvalidHistory);
+            }
+            let undo = CoreReplayUndo {
+                applied_tip,
+                prior_tip,
+                prior_ironwood_frontier: restore_frontier(&stored_undo.prior_ironwood_frontier)?,
+                checkpoint_undo,
+            };
+            if history.insert(applied_tip.height, undo).is_some() {
+                return Err(CoreReplaySnapshotError::InvalidHistory);
+            }
+        }
+        let expected_oldest = tip.height.saturating_sub(history.len() as u32);
+        if history
+            .keys()
+            .copied()
+            .ne(expected_oldest.saturating_add(1)..=tip.height)
+        {
+            return Err(CoreReplaySnapshotError::InvalidHistory);
+        }
+        let replay = Self {
+            configuration,
+            ironwood_frontier,
+            ironwood_checkpoints,
+            tip,
+            history,
+        };
+        let mut validation = replay.clone();
+        while validation.tip.height > expected_oldest {
+            let target = validation.tip.height - 1;
+            validation
+                .rewind_to(target)
+                .map_err(|_| CoreReplaySnapshotError::InvalidHistory)?;
+            validate_checkpoint_range(
+                configuration,
+                validation.tip.height,
+                &validation.ironwood_checkpoints,
+            )?;
+            validate_frontier_tip(
+                &validation.ironwood_frontier,
+                &validation.ironwood_checkpoints,
+                validation.tip,
+            )?;
+        }
+        Ok(replay)
     }
 
     /// Atomically validates and applies one host-selected canonical block.
@@ -525,6 +707,112 @@ impl CoreReplay {
         self.history = history;
         Ok(())
     }
+}
+
+fn store_tip(tip: CoreReplayTip) -> StoredCoreTip {
+    StoredCoreTip {
+        height: tip.height,
+        block_hash: tip.block_hash,
+    }
+}
+
+fn restore_tip(tip: StoredCoreTip) -> CoreReplayTip {
+    CoreReplayTip {
+        height: tip.height,
+        block_hash: tip.block_hash,
+    }
+}
+
+fn store_checkpoint(checkpoint: CoreIronwoodCheckpoint) -> StoredCoreCheckpoint {
+    StoredCoreCheckpoint {
+        height: checkpoint.height,
+        root: checkpoint.root,
+        tree_size: checkpoint.tree_size,
+    }
+}
+
+fn restore_checkpoint(
+    checkpoint: StoredCoreCheckpoint,
+) -> Result<CoreIronwoodCheckpoint, CoreReplaySnapshotError> {
+    Ok(CoreIronwoodCheckpoint {
+        height: checkpoint.height,
+        root: checkpoint.root,
+        tree_size: checkpoint.tree_size,
+    })
+}
+
+fn store_frontier(frontier: &IronwoodFrontier) -> Result<Vec<u8>, CoreReplaySnapshotError> {
+    let mut bytes = Vec::new();
+    zcash_primitives::merkle_tree::write_commitment_tree(frontier, &mut bytes)
+        .map_err(|_| CoreReplaySnapshotError::InvalidIronwoodTree)?;
+    Ok(bytes)
+}
+
+fn restore_frontier(bytes: &[u8]) -> Result<IronwoodFrontier, CoreReplaySnapshotError> {
+    let mut cursor = Cursor::new(bytes);
+    let frontier = zcash_primitives::merkle_tree::read_commitment_tree(&mut cursor)
+        .map_err(|_| CoreReplaySnapshotError::InvalidIronwoodTree)?;
+    if cursor.position() != bytes.len() as u64 {
+        return Err(CoreReplaySnapshotError::InvalidIronwoodTree);
+    }
+    Ok(frontier)
+}
+
+fn restore_checkpoint_map(
+    checkpoints: Vec<StoredCoreCheckpoint>,
+) -> Result<BTreeMap<u32, CoreIronwoodCheckpoint>, CoreReplaySnapshotError> {
+    let count = checkpoints.len();
+    let map = checkpoints
+        .into_iter()
+        .map(|checkpoint| {
+            let checkpoint = restore_checkpoint(checkpoint)?;
+            Ok((checkpoint.height, checkpoint))
+        })
+        .collect::<Result<BTreeMap<_, _>, CoreReplaySnapshotError>>()?;
+    if map.len() != count {
+        return Err(CoreReplaySnapshotError::InvalidCheckpoint);
+    }
+    Ok(map)
+}
+
+fn validate_checkpoint_range(
+    configuration: CoreReplayConfiguration,
+    tip_height: u32,
+    checkpoints: &BTreeMap<u32, CoreIronwoodCheckpoint>,
+) -> Result<(), CoreReplaySnapshotError> {
+    let activation_base = configuration.activation_height - 1;
+    let minimum_oldest = activation_base.max(
+        tip_height
+            .checked_add(1)
+            .ok_or(CoreReplaySnapshotError::InvalidTip)?
+            .saturating_sub(configuration.retention_blocks),
+    );
+    let Some(oldest) = checkpoints.first_key_value().map(|(height, _)| *height) else {
+        return Err(CoreReplaySnapshotError::InvalidCheckpoint);
+    };
+    if oldest < minimum_oldest
+        || oldest > tip_height
+        || checkpoints.keys().copied().ne(oldest..=tip_height)
+    {
+        return Err(CoreReplaySnapshotError::InvalidCheckpoint);
+    }
+    Ok(())
+}
+
+fn validate_frontier_tip(
+    frontier: &IronwoodFrontier,
+    checkpoints: &BTreeMap<u32, CoreIronwoodCheckpoint>,
+    tip: CoreReplayTip,
+) -> Result<(), CoreReplaySnapshotError> {
+    let tree_size =
+        u32::try_from(frontier.size()).map_err(|_| CoreReplaySnapshotError::InvalidIronwoodTree)?;
+    let checkpoint = checkpoints
+        .get(&tip.height)
+        .ok_or(CoreReplaySnapshotError::InvalidCheckpoint)?;
+    if checkpoint.root != frontier.root().to_bytes() || checkpoint.tree_size != tree_size {
+        return Err(CoreReplaySnapshotError::InvalidCheckpoint);
+    }
+    Ok(())
 }
 
 fn validate_candidate(

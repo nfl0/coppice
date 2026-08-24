@@ -14,6 +14,9 @@ workspace = true
 blake2b_simd.workspace = true
 incrementalmerkletree.workspace = true
 orchard.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+zcash_note_encryption.workspace = true
 zcash_primitives.workspace = true
 zcash_protocol.workspace = true
 

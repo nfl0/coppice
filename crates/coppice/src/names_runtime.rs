@@ -1,16 +1,19 @@
 //! Additive Coppice Names v1 application replay over generic Core context.
 //!
-//! This module is not production authority yet. It deliberately decodes the
-//! existing naked Names CPV1 carrier so differential tests can establish exact
-//! equivalence before application-envelope routing is enabled.
+//! This module is not production authority yet. Names consumes generic routed
+//! application envelopes and canonical effects emitted by Core.
 
 use crate::{
     authorization,
     bond::V1BondVerifier,
-    bond_tag, carrier,
+    bond_tag,
     config::{DeploymentParameters, DeploymentValidationError},
     envelope::Operation,
-    names_application::{NamesDeploymentId, names_v1_application_descriptor},
+    names_application::{
+        NamesCoreCompatibilityError, NamesDeploymentId, names_v1_application_descriptor,
+        names_v1_application_key, names_v1_core_runtime_parameters,
+        validate_names_v1_core_compatibility,
+    },
     pending, recent_spent,
     record::NameStatus,
     reveal::{self, AuthenticatedIronwoodCheckpoint, RevealValidationError},
@@ -20,10 +23,16 @@ use crate::{
 use coppice_core::{
     application::{ApplicationDescriptor, ApplicationTip, CoppiceApplication},
     replay::{
-        CandidateTransactionStatus, CoreBlockContext, CoreCanonicalBlockInput,
-        CoreIronwoodCheckpoint, CoreReplay, CoreReplayError, CoreRewindError,
+        CoreCanonicalBlockInput, CoreIronwoodCheckpoint, CoreReplay,
+        CoreReplayActivationCheckpoint, CoreReplayConfiguration, CoreReplayConfigurationError,
+        CoreReplayError, CoreRewindError,
+    },
+    runtime::{
+        ApplicationMessageStatus, CoreRuntime, CoreRuntimeConfigurationError,
+        CoreRuntimeSnapshotError, RuntimeBlockContext,
     },
 };
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -85,6 +94,10 @@ pub enum NamesRewindError {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NamesRuntimeInitializationError {
     InvalidDeployment(DeploymentValidationError),
+    Compatibility(NamesCoreCompatibilityError),
+    CoreReplayConfiguration(CoreReplayConfigurationError),
+    CoreReplay(CoreReplayError),
+    CoreRuntime(CoreRuntimeConfigurationError),
     ActivationMismatch,
     InitialTipMismatch,
     InitialCheckpointMismatch,
@@ -106,9 +119,29 @@ pub enum NamesRuntimeRewindError {
     Names(NamesRewindError),
 }
 
+pub const NAMES_APPLICATION_SNAPSHOT_FORMAT_VERSION: u32 = 1;
+pub const NAMES_RUNTIME_SNAPSHOT_FORMAT_VERSION: u32 = 1;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NamesRuntimeSnapshotError {
+    Encoding,
+    UnsupportedFormat,
+    RuntimeMismatch,
+    ApplicationMismatch,
+    DeploymentMismatch,
+    TipMismatch,
+    RootMismatch,
+    InvalidState,
+    InvalidHistory,
+    MissingCoreCheckpoint,
+    Core(CoreRuntimeSnapshotError),
+    Initialization,
+    VerifierInitializationFailure,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NamesRuntimeAppliedBlock {
-    pub core: CoreBlockContext,
+    pub core: RuntimeBlockContext,
     pub names: NamesAppliedBlock,
 }
 
@@ -148,6 +181,60 @@ struct NamesUndo {
     prior_state_root: [u8; 32],
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+struct StoredApplicationTip {
+    height: u32,
+    block_hash: [u8; 32],
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct StoredNamesState {
+    names: Vec<(String, crate::record::NameRecord)>,
+    pending: Vec<([u8; 32], pending::ChainPosition)>,
+    recent_spent: Vec<([u8; 32], u32)>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct StoredNamesStateUndo {
+    names: Vec<(String, Option<crate::record::NameRecord>)>,
+    pending: Vec<([u8; 32], Option<pending::ChainPosition>)>,
+    recent_spent: Vec<([u8; 32], Option<u32>)>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct StoredNamesUndo {
+    applied_tip: StoredApplicationTip,
+    prior_tip: StoredApplicationTip,
+    state: StoredNamesStateUndo,
+    prior_state_root: [u8; 32],
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct StoredNamesApplication {
+    format_version: u32,
+    application_id: [u8; 32],
+    application_version: u16,
+    deployment_id: [u8; 32],
+    tip: StoredApplicationTip,
+    state: StoredNamesState,
+    state_root: [u8; 32],
+    undo: Vec<StoredNamesUndo>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct StoredNamesRuntime {
+    format_version: u32,
+    runtime_id: [u8; 32],
+    application_id: [u8; 32],
+    application_version: u16,
+    tip: StoredApplicationTip,
+    ironwood_root: [u8; 32],
+    ironwood_tree_size: u32,
+    application_state_root: [u8; 32],
+    core_snapshot: Vec<u8>,
+    application_snapshot: Vec<u8>,
+}
+
 /// Names-specific deterministic state machine. It consumes Core contexts but
 /// neither owns canonical Zcash replay nor selects a fork.
 pub struct NamesApplication {
@@ -165,36 +252,43 @@ pub struct NamesApplication {
 impl NamesApplication {
     fn new(
         deployment: DeploymentParameters,
-        core: &CoreReplay,
+        core: &CoreRuntime,
     ) -> Result<Self, NamesRuntimeInitializationError> {
         let deployment_id = NamesDeploymentId::from_bytes(
             deployment
                 .validate()
                 .map_err(NamesRuntimeInitializationError::InvalidDeployment)?,
         );
-        if deployment.activation_height != core.configuration().activation_height() {
+        validate_names_v1_core_compatibility(
+            core.parameters(),
+            &deployment,
+            names_v1_application_descriptor(deployment.activation_height),
+        )
+        .map_err(NamesRuntimeInitializationError::Compatibility)?;
+        let replay = core.replay();
+        if deployment.activation_height != replay.configuration().activation_height() {
             return Err(NamesRuntimeInitializationError::ActivationMismatch);
         }
         let activation_checkpoint_height = deployment
             .activation_height
             .checked_sub(1)
             .ok_or(NamesRuntimeInitializationError::ArithmeticOverflow)?;
-        let core_tip = core.tip();
+        let core_tip = replay.tip();
         if core_tip.height != activation_checkpoint_height {
             return Err(NamesRuntimeInitializationError::InitialTipMismatch);
         }
-        let checkpoint = core
+        let checkpoint = replay
             .ironwood_checkpoints()
             .get(&activation_checkpoint_height)
             .copied()
             .ok_or(NamesRuntimeInitializationError::InitialCheckpointMismatch)?;
-        if checkpoint.tree_size as usize != core.ironwood_frontier().size()
-            || checkpoint.root != core.ironwood_frontier().root().to_bytes()
+        if checkpoint.tree_size as usize != replay.ironwood_frontier().size()
+            || checkpoint.root != replay.ironwood_frontier().root().to_bytes()
         {
             return Err(NamesRuntimeInitializationError::InitialCheckpointMismatch);
         }
         let retention_blocks = names_v1_replay_retention_blocks(&deployment)?;
-        if core.configuration().retention_blocks() != retention_blocks {
+        if replay.configuration().retention_blocks() != retention_blocks {
             return Err(NamesRuntimeInitializationError::CoreRetentionMismatch);
         }
         let tip = ApplicationTip {
@@ -252,10 +346,188 @@ impl NamesApplication {
         }
     }
 
+    fn save_snapshot(&self, core: &CoreRuntime) -> Result<Vec<u8>, NamesRuntimeSnapshotError> {
+        validate_names_core_position(self.tip, core)?;
+        let checkpoint = core
+            .ironwood_checkpoints()
+            .get(&self.tip.height)
+            .copied()
+            .ok_or(NamesRuntimeSnapshotError::MissingCoreCheckpoint)?;
+        let expected_root = calculate_state_root(
+            &self.deployment,
+            self.deployment_id,
+            &self.state,
+            self.tip,
+            checkpoint,
+        )
+        .map_err(|_| NamesRuntimeSnapshotError::InvalidState)?;
+        if expected_root != self.state_root {
+            return Err(NamesRuntimeSnapshotError::RootMismatch);
+        }
+        let stored = StoredNamesApplication {
+            format_version: NAMES_APPLICATION_SNAPSHOT_FORMAT_VERSION,
+            application_id: self.descriptor.key.id.to_bytes(),
+            application_version: self.descriptor.key.version,
+            deployment_id: self.deployment_id.to_bytes(),
+            tip: store_application_tip(self.tip),
+            state: store_names_state(&self.state),
+            state_root: self.state_root,
+            undo: self
+                .history
+                .values()
+                .map(|undo| StoredNamesUndo {
+                    applied_tip: store_application_tip(undo.applied_tip),
+                    prior_tip: store_application_tip(undo.prior_tip),
+                    state: StoredNamesStateUndo {
+                        names: undo.state.names.clone(),
+                        pending: undo.state.pending.clone(),
+                        recent_spent: undo.state.recent_spent.clone(),
+                    },
+                    prior_state_root: undo.prior_state_root,
+                })
+                .collect(),
+        };
+        serde_json::to_vec(&stored).map_err(|_| NamesRuntimeSnapshotError::Encoding)
+    }
+
+    fn load_snapshot(
+        deployment: DeploymentParameters,
+        core: &CoreRuntime,
+        bytes: &[u8],
+    ) -> Result<Self, NamesRuntimeSnapshotError> {
+        let stored: StoredNamesApplication =
+            serde_json::from_slice(bytes).map_err(|_| NamesRuntimeSnapshotError::Encoding)?;
+        if stored.format_version != NAMES_APPLICATION_SNAPSHOT_FORMAT_VERSION {
+            return Err(NamesRuntimeSnapshotError::UnsupportedFormat);
+        }
+        let descriptor = names_v1_application_descriptor(deployment.activation_height);
+        if stored.application_id != descriptor.key.id.to_bytes()
+            || stored.application_version != descriptor.key.version
+        {
+            return Err(NamesRuntimeSnapshotError::ApplicationMismatch);
+        }
+        let deployment_id = NamesDeploymentId::from_parameters(&deployment)
+            .map_err(|_| NamesRuntimeSnapshotError::DeploymentMismatch)?;
+        if stored.deployment_id != deployment_id.to_bytes() {
+            return Err(NamesRuntimeSnapshotError::DeploymentMismatch);
+        }
+        validate_names_v1_core_compatibility(core.parameters(), &deployment, descriptor)
+            .map_err(|_| NamesRuntimeSnapshotError::Initialization)?;
+        let tip = restore_application_tip(stored.tip);
+        validate_names_core_position(tip, core)?;
+        let state = restore_names_state(stored.state, &deployment, tip.height)?;
+        let retention_blocks = names_v1_replay_retention_blocks(&deployment)
+            .map_err(|_| NamesRuntimeSnapshotError::Initialization)?;
+        if core.configuration().retention_blocks() != retention_blocks
+            || stored.undo.len() > retention_blocks as usize
+        {
+            return Err(NamesRuntimeSnapshotError::InvalidHistory);
+        }
+        let mut history = BTreeMap::new();
+        for stored_undo in stored.undo {
+            if has_duplicate_or_unsorted_keys(&stored_undo.state.names)
+                || has_duplicate_or_unsorted_keys(&stored_undo.state.pending)
+                || has_duplicate_or_unsorted_keys(&stored_undo.state.recent_spent)
+            {
+                return Err(NamesRuntimeSnapshotError::InvalidHistory);
+            }
+            let applied_tip = restore_application_tip(stored_undo.applied_tip);
+            let prior_tip = restore_application_tip(stored_undo.prior_tip);
+            if prior_tip.height.checked_add(1) != Some(applied_tip.height) {
+                return Err(NamesRuntimeSnapshotError::InvalidHistory);
+            }
+            if history
+                .insert(
+                    applied_tip.height,
+                    NamesUndo {
+                        applied_tip,
+                        prior_tip,
+                        state: NamesStateUndo {
+                            names: stored_undo.state.names,
+                            pending: stored_undo.state.pending,
+                            recent_spent: stored_undo.state.recent_spent,
+                        },
+                        prior_state_root: stored_undo.prior_state_root,
+                    },
+                )
+                .is_some()
+            {
+                return Err(NamesRuntimeSnapshotError::InvalidHistory);
+            }
+        }
+        let expected_oldest = tip.height.saturating_sub(history.len() as u32);
+        if history
+            .keys()
+            .copied()
+            .ne(expected_oldest.saturating_add(1)..=tip.height)
+        {
+            return Err(NamesRuntimeSnapshotError::InvalidHistory);
+        }
+        let verifier = V1BondVerifier::new()
+            .map_err(|_| NamesRuntimeSnapshotError::VerifierInitializationFailure)?;
+        let application = Self {
+            deployment,
+            deployment_id,
+            descriptor,
+            state,
+            tip,
+            state_root: stored.state_root,
+            verifier,
+            retention_blocks,
+            history,
+        };
+        application.validate_snapshot_history(core)?;
+        Ok(application)
+    }
+
+    fn validate_snapshot_history(
+        &self,
+        core: &CoreRuntime,
+    ) -> Result<(), NamesRuntimeSnapshotError> {
+        let mut state = self.state.clone();
+        let mut tip = self.tip;
+        let mut expected_root = self.state_root;
+        let mut history = self.history.clone();
+        loop {
+            let checkpoint = core
+                .ironwood_checkpoints()
+                .get(&tip.height)
+                .copied()
+                .ok_or(NamesRuntimeSnapshotError::MissingCoreCheckpoint)?;
+            let computed = calculate_state_root(
+                &self.deployment,
+                self.deployment_id,
+                &state,
+                tip,
+                checkpoint,
+            )
+            .map_err(|_| NamesRuntimeSnapshotError::InvalidState)?;
+            if computed != expected_root {
+                return Err(NamesRuntimeSnapshotError::RootMismatch);
+            }
+            let Some(undo) = history.remove(&tip.height) else {
+                break;
+            };
+            if undo.applied_tip != tip {
+                return Err(NamesRuntimeSnapshotError::InvalidHistory);
+            }
+            state = undo
+                .state
+                .apply_to(&state)
+                .map_err(|_| NamesRuntimeSnapshotError::InvalidState)?;
+            tip = undo.prior_tip;
+            expected_root = undo.prior_state_root;
+        }
+        if !history.is_empty() {
+            return Err(NamesRuntimeSnapshotError::InvalidHistory);
+        }
+        Ok(())
+    }
+
     fn apply_operation(
         &self,
         state: &mut CoppiceState,
-        block: &CoreBlockContext,
+        block: &coppice_core::replay::CoreBlockContext,
         tx_index: u32,
         operation: &Operation,
     ) -> Result<NamesTransactionOutcome, NamesApplicationError> {
@@ -431,43 +703,51 @@ impl CoppiceApplication for NamesApplication {
 
     fn apply_block(
         &mut self,
-        block: &CoreBlockContext,
+        block: &RuntimeBlockContext,
     ) -> Result<Self::BlockOutput, Self::ApplyError> {
-        if self.tip.height.checked_add(1) != Some(block.height()) {
+        let core = block.core();
+        if self.tip.height.checked_add(1) != Some(core.height()) {
             return Err(NamesApplicationError::NonSequentialHeight);
         }
-        if self.tip.block_hash != block.prev_block_hash() {
+        if self.tip.block_hash != core.prev_block_hash() {
             return Err(NamesApplicationError::PredecessorMismatch);
         }
 
         let mut state = self.state.clone();
         let mut transaction_outcomes = Vec::with_capacity(block.transactions().len());
-        for transaction in block.transactions() {
+        for routed in block.transactions() {
+            let transaction = &core.transactions()[routed.core_index()];
             for nullifier in transaction.ironwood_effects().nullifiers() {
                 let bond_tag = bond_tag::derive_v1_bond_tag(nullifier)
                     .map_err(|_| NamesApplicationError::StateInvariantFailure)?;
                 state
-                    .process_prevalidated_bond_tag(bond_tag, block.height())
+                    .process_prevalidated_bond_tag(bond_tag, core.height())
                     .map_err(map_state_fatal)?;
             }
-            let outcome = match transaction.candidate_status() {
-                CandidateTransactionStatus::NotCandidate => NamesTransactionOutcome::NoOperation,
-                CandidateTransactionStatus::ValidatedFullTransaction(validated) => {
-                    match carrier_semantic(carrier::decode_v1_bulletin_for(
-                        validated.transaction(),
-                        self.deployment.rendezvous,
-                        self.deployment_id.to_bytes(),
-                    ))? {
-                        NamesCarrierSemantic::Operation(operation) => self.apply_operation(
+            let outcome = match routed.message() {
+                ApplicationMessageStatus::NotCandidate | ApplicationMessageStatus::NoMessage => {
+                    NamesTransactionOutcome::NoOperation
+                }
+                ApplicationMessageStatus::MalformedTransport(_)
+                | ApplicationMessageStatus::MalformedEnvelope(_) => {
+                    NamesTransactionOutcome::Rejected(NamesProtocolRejection::MalformedCarrier)
+                }
+                ApplicationMessageStatus::Message(message)
+                    if message.key() != names_v1_application_key() =>
+                {
+                    NamesTransactionOutcome::NoOperation
+                }
+                ApplicationMessageStatus::Message(message) => {
+                    match crate::envelope::decode_operation(message.payload()) {
+                        Ok(operation) => self.apply_operation(
                             &mut state,
-                            block,
+                            core,
                             transaction.tx_index(),
                             &operation,
                         )?,
-                        NamesCarrierSemantic::NoOperation => NamesTransactionOutcome::NoOperation,
-                        NamesCarrierSemantic::Rejected(rejection) => {
-                            NamesTransactionOutcome::Rejected(rejection)
-                        }
+                        Err(_) => NamesTransactionOutcome::Rejected(
+                            NamesProtocolRejection::MalformedOperation,
+                        ),
                     }
                 }
             };
@@ -475,12 +755,12 @@ impl CoppiceApplication for NamesApplication {
         }
 
         state
-            .expire_pending_at_end_of_block(block.height(), self.deployment.commit_ttl_blocks)
+            .expire_pending_at_end_of_block(core.height(), self.deployment.commit_ttl_blocks)
             .map_err(map_state_fatal)?;
         let (oldest_retained_height, _) = state
             .prune_recent_spent_at_end_of_block(
                 self.deployment.activation_height,
-                block.height(),
+                core.height(),
                 self.deployment.bond_note_max_age_blocks,
                 self.deployment.commit_ttl_blocks,
             )
@@ -494,11 +774,11 @@ impl CoppiceApplication for NamesApplication {
         let recent_spent_root = state
             .recent_spent_root(oldest_retained_height)
             .map_err(|_| NamesApplicationError::StateInvariantFailure)?;
-        let checkpoint = block.ironwood_checkpoint();
+        let checkpoint = core.ironwood_checkpoint();
         let state_root = state_root::state_root(&StateRootInput {
             deployment_id: self.deployment_id.to_bytes(),
-            height: block.height(),
-            block_hash: block.block_hash(),
+            height: core.height(),
+            block_hash: core.block_hash(),
             ironwood_tree_size: checkpoint.tree_size,
             ironwood_root: checkpoint.root,
             name_tree_root,
@@ -507,8 +787,8 @@ impl CoppiceApplication for NamesApplication {
         })
         .map_err(|_| NamesApplicationError::StateInvariantFailure)?;
         let tip = ApplicationTip {
-            height: block.height(),
-            block_hash: block.block_hash(),
+            height: core.height(),
+            block_hash: core.block_hash(),
         };
         let undo = NamesUndo {
             applied_tip: tip,
@@ -520,8 +800,8 @@ impl CoppiceApplication for NamesApplication {
         self.state = state;
         self.tip = tip;
         self.state_root = state_root;
-        self.history.insert(block.height(), undo);
-        let oldest_undo = block
+        self.history.insert(core.height(), undo);
+        let oldest_undo = core
             .height()
             .saturating_sub(self.retention_blocks)
             .saturating_add(1);
@@ -575,20 +855,20 @@ impl CoppiceApplication for NamesApplication {
 /// Additive composite used only to prove that generic Core replay plus the
 /// first application reproduces the monolithic reducer.
 pub struct NamesRuntime {
-    core: CoreReplay,
+    core: CoreRuntime,
     names: NamesApplication,
 }
 
 impl NamesRuntime {
     pub fn new(
-        core: CoreReplay,
+        core: CoreRuntime,
         deployment: DeploymentParameters,
     ) -> Result<Self, NamesRuntimeInitializationError> {
         let names = NamesApplication::new(deployment, &core)?;
         Ok(Self { core, names })
     }
 
-    pub fn core(&self) -> &CoreReplay {
+    pub fn core(&self) -> &CoreRuntime {
         &self.core
     }
 
@@ -623,6 +903,96 @@ impl NamesRuntime {
         self.core = staged_core;
         Ok(())
     }
+
+    pub fn save_snapshot(&self) -> Result<Vec<u8>, NamesRuntimeSnapshotError> {
+        validate_names_core_position(self.names.tip, &self.core)?;
+        let checkpoint = self
+            .core
+            .ironwood_checkpoints()
+            .get(&self.names.tip.height)
+            .copied()
+            .ok_or(NamesRuntimeSnapshotError::MissingCoreCheckpoint)?;
+        let stored = StoredNamesRuntime {
+            format_version: NAMES_RUNTIME_SNAPSHOT_FORMAT_VERSION,
+            runtime_id: self.core.runtime_id().to_bytes(),
+            application_id: self.names.descriptor.key.id.to_bytes(),
+            application_version: self.names.descriptor.key.version,
+            tip: store_application_tip(self.names.tip),
+            ironwood_root: checkpoint.root,
+            ironwood_tree_size: checkpoint.tree_size,
+            application_state_root: self.names.state_root,
+            core_snapshot: self
+                .core
+                .save_snapshot()
+                .map_err(NamesRuntimeSnapshotError::Core)?,
+            application_snapshot: self.names.save_snapshot(&self.core)?,
+        };
+        serde_json::to_vec(&stored).map_err(|_| NamesRuntimeSnapshotError::Encoding)
+    }
+
+    pub fn load_snapshot(
+        deployment: DeploymentParameters,
+        bytes: &[u8],
+    ) -> Result<Self, NamesRuntimeSnapshotError> {
+        let stored: StoredNamesRuntime =
+            serde_json::from_slice(bytes).map_err(|_| NamesRuntimeSnapshotError::Encoding)?;
+        if stored.format_version != NAMES_RUNTIME_SNAPSHOT_FORMAT_VERSION {
+            return Err(NamesRuntimeSnapshotError::UnsupportedFormat);
+        }
+        let parameters = names_v1_core_runtime_parameters(&deployment)
+            .map_err(|_| NamesRuntimeSnapshotError::Initialization)?;
+        if stored.runtime_id != parameters.core_runtime_id().to_bytes() {
+            return Err(NamesRuntimeSnapshotError::RuntimeMismatch);
+        }
+        let descriptor = names_v1_application_descriptor(deployment.activation_height);
+        if stored.application_id != descriptor.key.id.to_bytes()
+            || stored.application_version != descriptor.key.version
+        {
+            return Err(NamesRuntimeSnapshotError::ApplicationMismatch);
+        }
+        let retention = names_v1_replay_retention_blocks(&deployment)
+            .map_err(|_| NamesRuntimeSnapshotError::Initialization)?;
+        let configuration = CoreReplayConfiguration::new(deployment.activation_height, retention)
+            .map_err(|_| NamesRuntimeSnapshotError::Initialization)?;
+        let core = CoreRuntime::load_snapshot(parameters, configuration, &stored.core_snapshot)
+            .map_err(NamesRuntimeSnapshotError::Core)?;
+        let names =
+            NamesApplication::load_snapshot(deployment, &core, &stored.application_snapshot)?;
+        if store_application_tip(names.tip).height != stored.tip.height
+            || names.tip.block_hash != stored.tip.block_hash
+            || names.state_root != stored.application_state_root
+        {
+            return Err(NamesRuntimeSnapshotError::TipMismatch);
+        }
+        let checkpoint = core
+            .ironwood_checkpoints()
+            .get(&names.tip.height)
+            .ok_or(NamesRuntimeSnapshotError::MissingCoreCheckpoint)?;
+        if checkpoint.root != stored.ironwood_root
+            || checkpoint.tree_size != stored.ironwood_tree_size
+        {
+            return Err(NamesRuntimeSnapshotError::RootMismatch);
+        }
+        Ok(Self { core, names })
+    }
+}
+
+impl NamesRuntime {
+    pub fn from_names_deployment(
+        deployment: DeploymentParameters,
+        checkpoint: CoreReplayActivationCheckpoint,
+    ) -> Result<Self, NamesRuntimeInitializationError> {
+        let parameters = names_v1_core_runtime_parameters(&deployment)
+            .map_err(NamesRuntimeInitializationError::Compatibility)?;
+        let retention = names_v1_replay_retention_blocks(&deployment)?;
+        let configuration = CoreReplayConfiguration::new(deployment.activation_height, retention)
+            .map_err(NamesRuntimeInitializationError::CoreReplayConfiguration)?;
+        let replay = CoreReplay::new(configuration, checkpoint)
+            .map_err(NamesRuntimeInitializationError::CoreReplay)?;
+        let core = CoreRuntime::new(parameters, replay)
+            .map_err(NamesRuntimeInitializationError::CoreRuntime)?;
+        Self::new(core, deployment)
+    }
 }
 
 pub fn names_v1_replay_retention_blocks(
@@ -633,26 +1003,6 @@ pub fn names_v1_replay_retention_blocks(
         .checked_add(deployment.commit_ttl_blocks)
         .and_then(|value| value.checked_add(1))
         .ok_or(NamesRuntimeInitializationError::ArithmeticOverflow)
-}
-
-#[allow(clippy::large_enum_variant)]
-enum NamesCarrierSemantic {
-    NoOperation,
-    Rejected(NamesProtocolRejection),
-    Operation(Operation),
-}
-
-fn carrier_semantic(
-    result: Result<Operation, carrier::V1CarrierError>,
-) -> Result<NamesCarrierSemantic, NamesApplicationError> {
-    match result {
-        Ok(operation) => Ok(NamesCarrierSemantic::Operation(operation)),
-        Err(carrier::V1CarrierError::NotFound) => Ok(NamesCarrierSemantic::NoOperation),
-        Err(carrier::V1CarrierError::Malformed) => Ok(NamesCarrierSemantic::Rejected(
-            NamesProtocolRejection::MalformedCarrier,
-        )),
-        Err(carrier::V1CarrierError::Build) => Err(NamesApplicationError::StateInvariantFailure),
-    }
 }
 
 fn reveal_commitment(deployment: &DeploymentParameters, operation: &Operation) -> Option<[u8; 32]> {
@@ -679,6 +1029,89 @@ fn authenticated_checkpoint(checkpoint: CoreIronwoodCheckpoint) -> Authenticated
         root: checkpoint.root,
         tree_size: checkpoint.tree_size,
     }
+}
+
+fn store_application_tip(tip: ApplicationTip) -> StoredApplicationTip {
+    StoredApplicationTip {
+        height: tip.height,
+        block_hash: tip.block_hash,
+    }
+}
+
+fn restore_application_tip(tip: StoredApplicationTip) -> ApplicationTip {
+    ApplicationTip {
+        height: tip.height,
+        block_hash: tip.block_hash,
+    }
+}
+
+fn store_names_state(state: &CoppiceState) -> StoredNamesState {
+    StoredNamesState {
+        names: state
+            .names
+            .iter()
+            .map(|(name, record)| (name.clone(), record.clone()))
+            .collect(),
+        pending: state
+            .pending
+            .iter()
+            .map(|(commitment, position)| (*commitment, *position))
+            .collect(),
+        recent_spent: state
+            .recent_spent
+            .iter()
+            .map(|(tag, height)| (*tag, *height))
+            .collect(),
+    }
+}
+
+fn restore_names_state(
+    stored: StoredNamesState,
+    deployment: &DeploymentParameters,
+    tip_height: u32,
+) -> Result<CoppiceState, NamesRuntimeSnapshotError> {
+    if has_duplicate_or_unsorted_keys(&stored.names)
+        || has_duplicate_or_unsorted_keys(&stored.pending)
+        || has_duplicate_or_unsorted_keys(&stored.recent_spent)
+    {
+        return Err(NamesRuntimeSnapshotError::InvalidState);
+    }
+    let names = stored.names.into_iter().collect::<BTreeMap<_, _>>();
+    let pending = stored.pending.into_iter().collect::<BTreeMap<_, _>>();
+    let recent_spent = stored.recent_spent.into_iter().collect::<BTreeMap<_, _>>();
+    if names.iter().any(|(name, record)| {
+        !crate::envelope::valid_name(name)
+            || crate::owner::parse_v1_owner_key(record.owner_pk).is_err()
+            || reveal::canonical_v1_address(&record.address, deployment).is_err()
+            || matches!(
+                record.status,
+                NameStatus::Released { terminal_height: 0 }
+                    | NameStatus::BondSpent { terminal_height: 0 }
+            )
+    }) || pending
+        .values()
+        .any(|position| position.block_height > tip_height)
+        || recent_spent.values().any(|height| *height > tip_height)
+    {
+        return Err(NamesRuntimeSnapshotError::InvalidState);
+    }
+    CoppiceState::from_authoritative_parts(names, pending, recent_spent)
+        .map_err(|_| NamesRuntimeSnapshotError::InvalidState)
+}
+
+fn validate_names_core_position(
+    names_tip: ApplicationTip,
+    core: &CoreRuntime,
+) -> Result<(), NamesRuntimeSnapshotError> {
+    let core_tip = core.tip();
+    if names_tip.height != core_tip.height || names_tip.block_hash != core_tip.block_hash {
+        return Err(NamesRuntimeSnapshotError::TipMismatch);
+    }
+    Ok(())
+}
+
+fn has_duplicate_or_unsorted_keys<K: Ord, V>(values: &[(K, V)]) -> bool {
+    values.windows(2).any(|pair| pair[0].0 >= pair[1].0)
 }
 
 fn calculate_state_root(

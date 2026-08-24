@@ -333,7 +333,9 @@ dependencies = [
  "hex",
  "incrementalmerkletree",
  "orchard",
+ "serde",
  "serde_json",
+ "zcash_note_encryption",
  "zcash_primitives",
  "zcash_protocol",
 ]

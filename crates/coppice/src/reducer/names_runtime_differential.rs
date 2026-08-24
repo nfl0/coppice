@@ -66,7 +66,6 @@ fn deployment() -> DeploymentParameters {
 
 fn replay_pair() -> (Reducer, NamesRuntime) {
     let deployment = deployment();
-    let retention = required_reorg_retention_blocks(&deployment).unwrap();
     let checkpoint = ActivationCheckpoint {
         height: ACTIVATION_HEIGHT - 1,
         block_hash: ACTIVATION_HASH,
@@ -74,12 +73,7 @@ fn replay_pair() -> (Reducer, NamesRuntime) {
         ironwood_tree_size: 0,
     };
     let legacy = Reducer::new(deployment.clone(), checkpoint.clone()).unwrap();
-    let core = CoreReplay::new(
-        CoreReplayConfiguration::new(ACTIVATION_HEIGHT, retention).unwrap(),
-        checkpoint,
-    )
-    .unwrap();
-    let runtime = NamesRuntime::new(core, deployment).unwrap();
+    let runtime = NamesRuntime::from_names_deployment(deployment, checkpoint).unwrap();
     assert_eq!(legacy.state(), runtime.names().state());
     assert_eq!(legacy.state_root, runtime.names().state_root());
     assert_eq!(legacy.tip.height, runtime.names().tip().height);
@@ -731,6 +725,11 @@ fn names_application_identity_and_retention_are_explicit_runtime_requirements() 
         )
         .unwrap(),
         checkpoint,
+    )
+    .unwrap();
+    let core = coppice_core::runtime::CoreRuntime::new(
+        crate::names_application::names_v1_core_runtime_parameters(&deployment).unwrap(),
+        core,
     )
     .unwrap();
     assert!(matches!(

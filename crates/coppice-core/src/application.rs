@@ -1,6 +1,6 @@
 use crate::carrier::MAX_CPV1_PAYLOAD_LEN;
 use crate::hash;
-use crate::replay::CoreBlockContext;
+use crate::runtime::RuntimeBlockContext;
 
 pub const APPLICATION_ID_PERSONALIZATION: [u8; 16] = *b"CoppiceAppIdV1\0\0";
 pub const APPLICATION_ENVELOPE_MAGIC: [u8; 4] = *b"CA01";
@@ -84,7 +84,7 @@ pub trait CoppiceApplication {
     fn state_root(&self) -> [u8; 32];
     fn apply_block(
         &mut self,
-        block: &CoreBlockContext,
+        block: &RuntimeBlockContext,
     ) -> Result<Self::BlockOutput, Self::ApplyError>;
     fn rewind_to(&mut self, height: u32) -> Result<(), Self::RewindError>;
 }
