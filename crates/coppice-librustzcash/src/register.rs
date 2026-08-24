@@ -23,14 +23,14 @@ use coppice::{
 use rand_core::{CryptoRng, RngCore};
 
 use crate::{
-    CoppiceLockBackend, ExactCanonicalTipError, FreshnessContextError, HostCanonicalTipSource,
-    InventoryError, IronwoodOutputId, IronwoodViewingCapability, IronwoodWitnessSource,
-    PendingRegistration, PendingRegistrationCollection, PendingRegistrationCollectionError,
-    ReconciliationError, ResolveWitnessError, SelectedBondNote, WalletBondPrivateMaterial,
-    WalletBondProverError, active_canonical_bond_tags, choose_current_anchor,
-    freshness_for_canonical_commit, freshness_for_next_block_commit, inventory::classify_notes,
-    prove_selected_bond, reconcile_locks, require_exact_canonical_tip,
-    resolve_canonical_ironwood_witness, select_fresh_bond_note,
+    BondNoteSelectionPolicy, CoppiceLockBackend, ExactCanonicalTipError, FreshnessContextError,
+    HostCanonicalTipSource, InventoryError, IronwoodOutputId, IronwoodViewingCapability,
+    IronwoodWitnessSource, PendingRegistration, PendingRegistrationCollection,
+    PendingRegistrationCollectionError, ReconciliationError, ResolveWitnessError, SelectedBondNote,
+    WalletBondPrivateMaterial, WalletBondProverError, active_canonical_bond_tags,
+    choose_current_anchor, freshness_for_canonical_commit, freshness_for_next_block_commit,
+    inventory::classify_notes, prove_selected_bond, reconcile_locks, require_exact_canonical_tip,
+    resolve_canonical_ironwood_witness, select_fresh_bond_note_with_policy,
 };
 
 /// Exact canonical operation bytes and index-ordered v1 memo frames.
@@ -164,6 +164,45 @@ pub fn begin_registration<Host, Backend, R>(
     name: &str,
     canonical_address: &[u8],
     owner_choice: RegistrationOwner<'_>,
+    rng: R,
+) -> Result<PreparedCommit, BeginRegistrationError<Host::Error, Backend::Error>>
+where
+    Host: HostCanonicalTipSource,
+    Backend: CoppiceLockBackend,
+    R: RngCore + CryptoRng,
+{
+    begin_registration_with_policy(
+        host_tip_source,
+        reducer,
+        pending_collection,
+        account_id,
+        capability,
+        BondNoteSelectionPolicy::ExactMinimum,
+        lock_backend,
+        name,
+        canonical_address,
+        owner_choice,
+        rng,
+    )
+}
+
+/// Begins registration with an explicit bond-note selection policy.
+///
+/// The default [`begin_registration`] path accepts only an exact-minimum
+/// eligible note. Callers may use [`BondNoteSelectionPolicy::AllowLarger`]
+/// only when the user has explicitly chosen larger-than-minimum bonding.
+#[allow(clippy::too_many_arguments)]
+pub fn begin_registration_with_policy<Host, Backend, R>(
+    host_tip_source: &Host,
+    reducer: &Reducer,
+    pending_collection: &mut PendingRegistrationCollection,
+    account_id: crate::WalletAccountId,
+    capability: IronwoodViewingCapability,
+    bond_policy: BondNoteSelectionPolicy,
+    lock_backend: &mut Backend,
+    name: &str,
+    canonical_address: &[u8],
+    owner_choice: RegistrationOwner<'_>,
     mut rng: R,
 ) -> Result<PreparedCommit, BeginRegistrationError<Host::Error, Backend::Error>>
 where
@@ -194,11 +233,12 @@ where
     let notes = lock_backend
         .owned_unspent_ironwood_notes()
         .map_err(BeginRegistrationError::Inventory)?;
-    let selected_bond = select_fresh_bond_note(
+    let selected_bond = select_fresh_bond_note_with_policy(
         &notes,
         deployment.minimum_bond_value,
         capability,
         &freshness,
+        bond_policy,
     )
     .map_err(BeginRegistrationError::Selection)?
     .ok_or(BeginRegistrationError::NoEligibleBond)?;
@@ -925,6 +965,50 @@ mod tests {
             .unwrap(),
             prepared.carrier().payload()
         );
+    }
+
+    #[test]
+    fn larger_bond_requires_explicit_registration_policy() {
+        let reducer = reducer();
+        let host = Host(reducer.tip());
+        let mut pending = PendingRegistrationCollection::new();
+        let minimum = reducer.deployment().minimum_bond_value;
+        let mut backend = backend(vec![note(minimum + 10, 2)]);
+
+        assert!(matches!(
+            begin_registration(
+                &host,
+                &reducer,
+                &mut pending,
+                account_id(),
+                IronwoodViewingCapability::FullViewing,
+                &mut backend,
+                "large-default",
+                ADDRESS,
+                RegistrationOwner::External(owner()),
+                ChaCha20Rng::from_seed([4; 32]),
+            ),
+            Err(BeginRegistrationError::NoEligibleBond)
+        ));
+        assert!(pending.is_empty());
+        assert!(backend.locks.is_empty());
+
+        let prepared = begin_registration_with_policy(
+            &host,
+            &reducer,
+            &mut pending,
+            account_id(),
+            IronwoodViewingCapability::FullViewing,
+            BondNoteSelectionPolicy::AllowLarger,
+            &mut backend,
+            "large-explicit",
+            ADDRESS,
+            RegistrationOwner::External(owner()),
+            ChaCha20Rng::from_seed([5; 32]),
+        )
+        .unwrap();
+        assert_eq!(prepared.selected_bond.value_zat, minimum + 10);
+        assert_eq!(pending.len(), 1);
     }
 
     #[test]

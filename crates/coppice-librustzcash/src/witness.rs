@@ -13,8 +13,8 @@ use zcash_client_backend::data_api::{ORCHARD_SHARD_HEIGHT, WalletCommitmentTrees
 use zcash_protocol::consensus::BlockHeight;
 
 use crate::{
-    FreshnessEligibility, InventoryError, IronwoodViewingCapability, OwnedIronwoodNote,
-    SelectedBondNote, select_bond_note,
+    BondNoteSelectionPolicy, FreshnessEligibility, InventoryError, IronwoodViewingCapability,
+    OwnedIronwoodNote, SelectedBondNote, select_bond_note_with_policy,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -116,11 +116,29 @@ pub fn select_fresh_bond_note(
     capability: IronwoodViewingCapability,
     context: &BondFreshnessContext,
 ) -> Result<Option<SelectedBondNote>, InventoryError> {
-    select_bond_note(
+    select_fresh_bond_note_with_policy(
+        notes,
+        minimum_bond_value,
+        capability,
+        context,
+        BondNoteSelectionPolicy::ExactMinimum,
+    )
+}
+
+/// Selects a fresh bond note under an explicit larger-note policy.
+pub fn select_fresh_bond_note_with_policy(
+    notes: &[OwnedIronwoodNote],
+    minimum_bond_value: u64,
+    capability: IronwoodViewingCapability,
+    context: &BondFreshnessContext,
+    policy: BondNoteSelectionPolicy,
+) -> Result<Option<SelectedBondNote>, InventoryError> {
+    select_bond_note_with_policy(
         notes,
         minimum_bond_value,
         capability,
         FreshnessEligibility::new(context.position_floor),
+        policy,
     )
 }
 

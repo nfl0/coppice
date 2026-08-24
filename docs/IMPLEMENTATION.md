@@ -362,11 +362,13 @@ Coppice v1 does not cryptographically lock funds at consensus level.
 
 ## I-009 — Bond-note selection
 
-For a new registration, wallet policy SHOULD choose:
+For a new registration, wallet policy SHOULD first choose:
 
-> the smallest spendable eligible Ironwood note whose value is at least the minimum bond.
+> an eligible spendable Ironwood note whose value is exactly the minimum bond.
 
-Do not automatically reserve a huge note merely because it is the oldest qualifying note.
+If no exact-minimum note exists, the wallet MAY offer an explicit bond-preparation self-transfer.
+Larger-than-minimum bonding is an explicit user or policy choice; it MUST NOT be selected merely
+because a larger note satisfies the minimum.
 
 Before confirmation show the user:
 
@@ -383,9 +385,10 @@ Because v1 requires a fresh bond note, a wallet SHOULD support:
 Prepare Coppice bond
 ```
 
-when no suitable recent note exists.
+when no exact-minimum eligible note exists.
 
-This is an ordinary self-transfer that creates a dedicated near-minimum Ironwood note.
+This is an ordinary self-transfer that creates a dedicated exact-minimum Ironwood note and returns
+the remainder, less the transaction fee, as normal Ironwood change.
 
 After it is mined and witnessable, it can be selected for COMMIT.
 

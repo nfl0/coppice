@@ -11,6 +11,31 @@ pub struct SelectedBondNote {
     pub position: u32,
 }
 
+/// Controls whether bond selection may consume more than the deployment's
+/// minimum bond value.
+///
+/// The default is intentionally exact-minimum selection. A wallet may opt in
+/// to [`BondNoteSelectionPolicy::AllowLarger`] when the user has explicitly
+/// chosen to bond a larger note.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BondNoteSelectionPolicy {
+    #[default]
+    ExactMinimum,
+    AllowLarger,
+}
+
+/// The adapter-level action needed to obtain a bond note without silently
+/// reserving a larger note than the minimum.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BondNotePreparation {
+    /// An eligible exact-minimum note is already available.
+    Existing(SelectedBondNote),
+    /// No exact-minimum note is available; a normal self-send may split this
+    /// explicitly selected larger eligible note into a minimum bond and
+    /// ordinary change.
+    Split(SelectedBondNote),
+}
+
 /// Registration-specific freshness supplied by the future witness/chain
 /// adapter.
 ///
@@ -33,10 +58,10 @@ impl FreshnessEligibility {
     }
 }
 
-/// Selects the smallest eligible note whose value meets the minimum bond.
+/// Selects an eligible exact-minimum note.
 ///
-/// Selection is ordered by `(value_zat, output_id)`, so equal-value notes do
-/// not depend on wallet iteration order. Existing active locks, including a
+/// Larger-note selection is available only through
+/// [`select_bond_note_with_policy`]. Existing active locks, including a
 /// Coppice reservation, are not reusable for a new registration.
 pub fn select_bond_note(
     notes: &[OwnedIronwoodNote],
@@ -44,14 +69,35 @@ pub fn select_bond_note(
     capability: IronwoodViewingCapability,
     freshness: FreshnessEligibility,
 ) -> Result<Option<SelectedBondNote>, InventoryError> {
+    select_bond_note_with_policy(
+        notes,
+        minimum_bond_value,
+        capability,
+        freshness,
+        BondNoteSelectionPolicy::ExactMinimum,
+    )
+}
+
+/// Selects an eligible bond note using an explicit larger-note policy.
+///
+/// Selection is ordered by `(value_zat, output_id)`, so equal-value notes do
+/// not depend on wallet iteration order.
+pub fn select_bond_note_with_policy(
+    notes: &[OwnedIronwoodNote],
+    minimum_bond_value: u64,
+    capability: IronwoodViewingCapability,
+    freshness: FreshnessEligibility,
+    policy: BondNoteSelectionPolicy,
+) -> Result<Option<SelectedBondNote>, InventoryError> {
     capability.require_nullifier_derivation()?;
 
     let mut selected: Option<SelectedBondNote> = None;
     for note in notes.iter().copied().filter(|note| {
-        note.value_zat >= minimum_bond_value
-            && note.spendable
-            && freshness.accepts(note)
-            && !note.locked
+        let value_eligible = match policy {
+            BondNoteSelectionPolicy::ExactMinimum => note.value_zat == minimum_bond_value,
+            BondNoteSelectionPolicy::AllowLarger => note.value_zat >= minimum_bond_value,
+        };
+        value_eligible && note.spendable && freshness.accepts(note) && !note.locked
     }) {
         let Some(position) = note.position else {
             continue;
@@ -78,6 +124,29 @@ pub fn select_bond_note(
         }
     }
     Ok(selected)
+}
+
+/// Reports whether the wallet already has an exact-minimum bond note or
+/// whether an explicit self-send preparation can split the smallest eligible
+/// larger note.
+pub fn prepare_bond_note(
+    notes: &[OwnedIronwoodNote],
+    minimum_bond_value: u64,
+    capability: IronwoodViewingCapability,
+    freshness: FreshnessEligibility,
+) -> Result<Option<BondNotePreparation>, InventoryError> {
+    if let Some(note) = select_bond_note(notes, minimum_bond_value, capability, freshness)? {
+        return Ok(Some(BondNotePreparation::Existing(note)));
+    }
+
+    Ok(select_bond_note_with_policy(
+        notes,
+        minimum_bond_value,
+        capability,
+        freshness,
+        BondNoteSelectionPolicy::AllowLarger,
+    )?
+    .map(BondNotePreparation::Split))
 }
 
 #[cfg(test)]
@@ -129,7 +198,7 @@ mod tests {
     }
 
     #[test]
-    fn selects_smallest_qualifying_note_not_oldest_or_largest() {
+    fn default_selection_requires_exact_minimum() {
         let notes = [
             note(1, 100, false, true, Some(1)),
             note(2, 20, false, true, Some(2)),
@@ -140,6 +209,58 @@ mod tests {
             .unwrap();
         assert_eq!(selected.output_id, notes[2].output_id);
         assert_eq!(selected.value_zat, 10);
+    }
+
+    #[test]
+    fn larger_selection_requires_explicit_policy() {
+        let notes = [
+            note(1, 100, false, true, Some(1)),
+            note(2, 20, false, true, Some(2)),
+        ];
+        assert_eq!(
+            select_bond_note(&notes, 10, full_viewing(), freshness(0)).unwrap(),
+            None
+        );
+        let selected = select_bond_note_with_policy(
+            &notes,
+            10,
+            full_viewing(),
+            freshness(0),
+            BondNoteSelectionPolicy::AllowLarger,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(selected.output_id, notes[1].output_id);
+        assert_eq!(selected.value_zat, 20);
+    }
+
+    #[test]
+    fn preparation_prefers_exact_note_over_split() {
+        let exact = note(1, 10, false, true, Some(1));
+        let larger = note(2, 20, false, true, Some(2));
+        assert_eq!(
+            prepare_bond_note(&[larger, exact], 10, full_viewing(), freshness(0)).unwrap(),
+            Some(BondNotePreparation::Existing(SelectedBondNote {
+                output_id: exact.output_id,
+                value_zat: 10,
+                bond_tag: derive_v1_bond_tag(&[1; 32]).unwrap(),
+                position: 1,
+            }))
+        );
+    }
+
+    #[test]
+    fn preparation_selects_larger_note_for_explicit_split() {
+        let larger = note(2, 20, false, true, Some(2));
+        assert_eq!(
+            prepare_bond_note(&[larger], 10, full_viewing(), freshness(0)).unwrap(),
+            Some(BondNotePreparation::Split(SelectedBondNote {
+                output_id: larger.output_id,
+                value_zat: 20,
+                bond_tag: derive_v1_bond_tag(&[2; 32]).unwrap(),
+                position: 2,
+            }))
+        );
     }
 
     #[test]
@@ -158,6 +279,19 @@ mod tests {
         let coppice = note(2, 11, true, true, Some(2));
         assert_eq!(
             select_bond_note(&[foreign, coppice], 10, full_viewing(), freshness(0)).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn preparation_ignores_locked_ineligible_and_insufficient_notes() {
+        let notes = [
+            note(1, 10, true, true, Some(1)),
+            note(2, 20, false, false, Some(2)),
+            note(3, 9, false, true, Some(3)),
+        ];
+        assert_eq!(
+            prepare_bond_note(&notes, 10, full_viewing(), freshness(0)).unwrap(),
             None
         );
     }

@@ -4,6 +4,7 @@
 //! broadcast, or UI integration. It adapts locally derived wallet facts and
 //! the host's public wallet traits, including normal transaction construction.
 
+mod bond_note;
 mod bond_prover;
 mod carrier_tx;
 mod chain;
@@ -52,11 +53,15 @@ pub use register::{
     CompletionMismatch, LifecycleError, ObserveCanonicalCommitError, PrepareRevealError,
     PreparedCarrier, PreparedCommit, PreparedReveal, RegistrationBondMaterialSource,
     RegistrationOwner, RegistrationStage, abandon_expired_registration, abandon_registration,
-    begin_registration, canonical_commit_height, complete_registration, observe_canonical_commit,
-    prepare_reveal, reconcile_canonical_commit_cache, record_commit_broadcast,
-    registration_matches_active_record, registration_stage,
+    begin_registration, begin_registration_with_policy, canonical_commit_height,
+    complete_registration, observe_canonical_commit, prepare_reveal,
+    reconcile_canonical_commit_cache, record_commit_broadcast, registration_matches_active_record,
+    registration_stage,
 };
-pub use selection::{FreshnessEligibility, SelectedBondNote, select_bond_note};
+pub use selection::{
+    BondNotePreparation, BondNoteSelectionPolicy, FreshnessEligibility, SelectedBondNote,
+    prepare_bond_note, select_bond_note, select_bond_note_with_policy,
+};
 pub use source::{
     InputSourceIronwoodNoteSource, IronwoodNoteConversionError, IronwoodNoteSourceError,
 };
@@ -65,9 +70,16 @@ pub use witness::{
     IronwoodWitnessSource, ResolveWitnessError, WalletCommitmentTreesIronwoodWitnessSource,
     WalletIronwoodWitnessError, anchor_for_registration, choose_current_anchor,
     freshness_for_canonical_commit, freshness_for_next_block_commit,
-    resolve_canonical_ironwood_witness, select_fresh_bond_note,
+    resolve_canonical_ironwood_witness, select_fresh_bond_note, select_fresh_bond_note_with_policy,
 };
 
+pub use bond_note::{
+    BondNotePreparationConstructionError, BondNotePreparationProposalError,
+    BondNotePreparationRequestError, BondNotePreparationValidationError, BondNoteSplitError,
+    BondNoteSplitPlan, ConstructedBondNotePreparation, PreparedBondNoteProposal,
+    bond_note_preparation_request, bond_note_preparation_spend_policy,
+    create_bond_note_preparation_transaction, plan_bond_note_split, propose_bond_note_preparation,
+};
 pub use bond_prover::{WalletBondPrivateMaterial, WalletBondProverError, prove_selected_bond};
 pub use carrier_tx::{
     CarrierConstructionError, CarrierProposalError, CarrierProposalValidationError,
