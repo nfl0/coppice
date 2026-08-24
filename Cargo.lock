@@ -306,6 +306,7 @@ name = "coppice"
 version = "0.1.0"
 dependencies = [
  "blake2b_simd",
+ "coppice-core",
  "halo2_gadgets",
  "halo2_proofs",
  "hex",
@@ -322,6 +323,15 @@ dependencies = [
  "zcash_note_encryption",
  "zcash_primitives",
  "zcash_protocol",
+]
+
+[[package]]
+name = "coppice-core"
+version = "0.1.0"
+dependencies = [
+ "blake2b_simd",
+ "hex",
+ "serde_json",
 ]
 
 [[package]]

@@ -10,6 +10,8 @@ Required files:
 ```text
 hashes.json
 deployment.json
+core_runtime_id.json
+application_envelopes.json
 names.json
 owner_keys.json
 bond_tags.json
@@ -28,6 +30,18 @@ coppice_bond_v1.json
 `carrier.json` freezes the indexed CPV1 transport: one-byte frame indices,
 438/505-byte chunk capacities, permutation-independent reconstruction, and the
 16,093-byte maximum payload.
+
+`deployment.json` freezes the existing Names-specific deployment identity. Its
+`CoppiceDeployV1` output is the byte-for-byte `NamesDeploymentId`; it is not the
+generic runtime identity.
+
+`core_runtime_id.json` freezes the application-independent `CoreRuntimeId`,
+including runtime activation and shared CPV1 rendezvous context.
+
+`application_envelopes.json` freezes the `CoppiceAppIdV1` derivation for the
+exact `coppice.names` application identity, Names routing version 1, the CA01
+envelope, and a future-runtime CPV1 frame bound to `CoreRuntimeId`. That frame
+does not switch or replace the qualified production vectors in `carrier.json`.
 
 Every vector entry SHOULD contain:
 

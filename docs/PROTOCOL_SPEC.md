@@ -131,6 +131,8 @@ The v1 personalization labels are:
 
 | Purpose | label | exact 16-byte personalization (hex) |
 |---|---|---|
+| Core runtime identifier | `CoppiceRuntime1` | `436f707069636552756e74696d653100` |
+| application identifier | `CoppiceAppIdV1` | `436f7070696365417070496456310000` |
 | deployment identifier | `CoppiceDeployV1` | `436f70706963654465706c6f79563100` |
 | name identifier | `CoppiceNameV1` | `436f70706963654e616d655631000000` |
 | record hash | `CoppiceRecordV1` | `436f70706963655265636f7264563100` |
@@ -158,9 +160,148 @@ field-valued deployment/context/owner bindings. Implementations MUST NOT replace
 a specified BLAKE2b hash with Poseidon, or a specified Poseidon relation with
 BLAKE2b, without changing the protocol version.
 
-## P-DEP-001 — Deployment parameters
+## P-IDENTITY-001 — Three independent identity domains
 
-Coppice protocol logic is parameterized by a validated deployment.
+The general Coppice runtime separates three identities:
+
+```text
+CoreRuntimeId
+    generic runtime and CPV1 transport binding
+
+ApplicationId || application_version
+    application-envelope routing
+
+NamesDeploymentId
+    Coppice Names v1 cryptography and application state
+```
+
+These values are not interchangeable. In particular, the existing
+`CoppiceDeployV1` value is `NamesDeploymentId`; it is not `CoreRuntimeId`.
+
+Throughout the Names v1 sections below, the historical field name
+`deployment_id` means `NamesDeploymentId` unless a Core runtime section
+explicitly says otherwise. The implementation retains that historical API name
+during the additive extraction so existing protocol bytes do not change.
+
+## P-RUNTIME-ID-001 — Generic Core runtime identifier
+
+`CoreRuntimeId` is the unkeyed BLAKE2b-256 output:
+
+```text
+H(
+    "CoppiceRuntime1",
+    runtime_protocol_id_len_u16 || runtime_protocol_id ||
+    runtime_protocol_version_u16 ||
+    zcash_network_domain_len_u16 || zcash_network_domain ||
+    zcash_network_type_code_u8 ||
+    runtime_activation_height_u32 ||
+    carrier_protocol_id_len_u16 || carrier_protocol_id ||
+    rendezvous_ivk_len_u16 || rendezvous_ivk ||
+    rendezvous_receiver_len_u16 || rendezvous_receiver
+)
+```
+
+All integers are unsigned big-endian. Variable-length fields use exact bytes;
+Core performs no textual normalization. Protocol ID, protocol version, network
+domain, activation height, and carrier protocol ID MUST be nonzero or nonempty
+as appropriate. Lengths MUST fit `u16`.
+
+The qualification vector freezes:
+
+```text
+runtime_protocol_id       = "coppice.runtime"
+runtime_protocol_version  = 1
+zcash_network_domain      = "coppice-runtime-regtest-v1"
+zcash_network_type        = Regtest / 0x03
+runtime_activation_height = 10
+carrier_protocol_id       = "CPV1"
+CoreRuntimeId             = 6d9370bb8eb3f6cf28fc2c1a943196b6
+                            30233eb89d03625877910a49320a8cb0
+```
+
+The shared rendezvous IVK and receiver are the exact bytes in
+`test-vectors/core_runtime_id.json`.
+
+Application IDs, application versions, application activation heights, and all
+application policy parameters are excluded from this preimage. Adding or
+activating an application therefore cannot change `CoreRuntimeId`.
+
+## P-RUNTIME-ACTIVATION-001 — Runtime and application activation
+
+`runtime_activation_height` is the first height processed by the Core runtime
+and is bound into `CoreRuntimeId`.
+
+Every enabled application separately declares an
+`application_activation_height`. It MUST be greater than or equal to the
+runtime activation height. It is not an input to `CoreRuntimeId`.
+
+Before an application's activation, Core may ingest and authenticate canonical
+Zcash history for other active applications, but MUST NOT deliver native
+effects or explicit messages to that inactive application. Coppice Names v1
+initially uses the runtime activation height. Future applications may activate
+later without changing the runtime identity or the state of an existing
+application.
+
+## P-APPLICATION-ID-001 — Deterministic application identity
+
+Each application family freezes one exact, nonempty canonical identity byte
+string. Core performs no Unicode normalization, case folding, or aliasing.
+
+```text
+ApplicationId = H("CoppiceAppIdV1", canonical_application_identity)
+```
+
+The application version is not part of `ApplicationId`; it is a separate
+unsigned 16-bit routing field. Versions of one application family therefore
+share an `ApplicationId` and have distinct `(ApplicationId, version)` keys.
+
+Coppice Names freezes:
+
+```text
+canonical_application_identity = ASCII "coppice.names"
+ApplicationId = 285357b331c4120e22409b577f21ca6d
+                702a3cdb6a2eaae0788a67f7aa022303
+Names v1 application_version = 1
+```
+
+## P-APPLICATION-ENVELOPE-001 — CA01 application envelope
+
+The runtime application envelope is exactly:
+
+```text
+magic[4]("CA01") ||
+application_id[32] ||
+application_version_u16be ||
+application_payload[remaining bytes]
+```
+
+The header is exactly 38 bytes. There is no payload-length field because CPV1
+already authenticates the exact outer payload length and digest. An empty
+application payload is structurally canonical; a recognized application may
+reject it under its own protocol rules.
+
+The complete envelope MUST fit CPV1's 16,093-byte payload limit, so the maximum
+application payload is 16,055 bytes. Truncated headers, a magic other than
+`CA01`, and oversized envelopes are malformed. Unknown application IDs or
+versions are structurally valid and unsupported; they MUST NOT be decoded as a
+different application or cause application-state mutation.
+
+For the general runtime carrier, the CPV1 START binding field is
+`CoreRuntimeId`, and the CPV1 payload digest authenticates the complete CA01
+envelope. `NamesDeploymentId` remains inside Names cryptographic and state
+domains and is not an envelope field.
+
+This repository introduces the identities, envelope, and future-runtime vector
+additively before switching production replay. Until the later coordinated
+cutover, the qualified production carrier path and `carrier.json` retain their
+existing naked-Names payload and existing START binding. Implementations MUST
+NOT add a dual parser: the cutover requires an explicit activation rule and one
+unambiguous format at each height.
+
+## P-DEP-001 — Names deployment parameters
+
+Coppice Names v1 protocol logic is parameterized by a validated Names
+deployment.
 
 The repository's Testnet and Regtest values are qualification/development
 parameters; no public Coppice Testnet or Mainnet deployment has been
@@ -176,7 +317,7 @@ pub struct Rendezvous {
     pub orchard_receiver: [u8; 43],
 }
 
-pub struct DeploymentParameters {
+pub struct DeploymentParameters { // transitional name: NamesDeploymentParameters
     pub network_id: Vec<u8>,
     pub address_network: zcash_protocol::consensus::NetworkType,
     pub activation_height: u32,
@@ -226,16 +367,18 @@ minimum_bond_value = 100_000_000 zatoshis
 The implementation MUST keep this a deployment parameter so the local Regtest
 and Zcash Testnet qualification environments can be configured separately.
 
-## P-DEP-002 — Deployment identifier
+## P-DEP-002 — Names deployment identifier
 
-Every deployment has a deterministic 32-byte `deployment_id`.
+Every Names deployment has a deterministic 32-byte `NamesDeploymentId`. The
+current implementation method remains named `deployment_id()` during the
+additive extraction.
 
 It MUST be computed from the complete canonical deployment parameters.
 
 Use:
 
 ```text
-deployment_id = H(
+NamesDeploymentId = H(
     "CoppiceDeployV1",
     network_id_len_u16 || network_id ||
     network_type_code_u8 ||
@@ -251,17 +394,17 @@ deployment_id = H(
 
 All integers are unsigned big-endian.
 
-This ID is cryptographic domain data.
+This ID is Names-specific cryptographic domain data.
 
 It is included in:
 
 - registration commitments;
 - owner signatures;
 - BondProof protocol binding;
-- state roots;
-- transport routing tag derivation.
+- Names state roots.
 
-A configuration mismatch therefore cannot silently produce compatible protocol state.
+A Names configuration mismatch therefore cannot silently produce compatible
+Names protocol state. It does not identify the generic Core runtime.
 
 ## P-CHAIN-001 — Activation checkpoint
 
@@ -1678,6 +1821,12 @@ is accepted and mined. Carrier construction MUST use the host wallet's normal
 fee calculation; fee cost scales with the number of Ironwood logical actions.
 
 ## P-CARRIER-002 — Carrier memo format
+
+This section specifies the currently qualified pre-cutover Names carrier. The
+general runtime retains every CPV1 framing rule below, but at its explicit
+cutover binds START to `CoreRuntimeId` and carries the CA01 application
+envelope specified by P-APPLICATION-ENVELOPE-001. The two formats are never
+accepted concurrently at one height.
 
 Coppice v1 targets the currently deployed NU6.3/v6 Ironwood note-encryption
 format, in which each Ironwood output carries exactly 512 bytes of memo

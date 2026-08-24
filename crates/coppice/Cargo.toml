@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 blake2b_simd.workspace = true
+coppice-core.workspace = true
 halo2_gadgets.workspace = true
 halo2_proofs.workspace = true
 hex.workspace = true
