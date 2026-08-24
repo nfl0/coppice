@@ -1,4 +1,4 @@
-//! Canonical v1 reducer state and replay-independent, prevalidated mutations.
+//! Canonical Names v1 application state and replay-independent mutations.
 
 use crate::{name_tree, pending, recent_spent, record};
 use std::collections::BTreeMap;

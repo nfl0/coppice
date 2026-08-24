@@ -1328,7 +1328,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_local_commit_is_rejected_from_current_reducer_before_private_work() {
+    fn stale_local_commit_is_rejected_from_current_runtime_before_private_work() {
         let mut runtime = runtime();
         let initial_host = Host(runtime.tip());
         let mut collection = PendingRegistrationCollection::new();

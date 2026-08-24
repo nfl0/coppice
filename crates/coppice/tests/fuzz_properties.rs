@@ -34,7 +34,7 @@ fn arbitrary_operation_and_indexed_frame_bytes_are_panic_free() {
     }
 }
 
-fn reducer() -> NamesRuntime {
+fn runtime() -> NamesRuntime {
     let deployment = DeploymentParameters {
         network_id: REGTEST.network_id.to_vec(),
         address_network: zcash_protocol::consensus::NetworkType::Regtest,
@@ -57,13 +57,13 @@ fn reducer() -> NamesRuntime {
     .unwrap()
 }
 
-fn apply_generated(reducer: &mut NamesRuntime, hash: [u8; 32], append: bool) {
-    let height = reducer.tip().height + 1;
-    reducer
+fn apply_generated(runtime: &mut NamesRuntime, hash: [u8; 32], append: bool) {
+    let height = runtime.tip().height + 1;
+    runtime
         .apply_block(&CoreCanonicalBlockInput {
             height,
             block_hash: hash,
-            prev_block_hash: reducer.tip().block_hash,
+            prev_block_hash: runtime.tip().block_hash,
             branch_id: zcash_protocol::consensus::BranchId::Nu6_3,
             transactions: append
                 .then(|| CoreCanonicalTransactionInput {
@@ -86,7 +86,7 @@ fn apply_generated(reducer: &mut NamesRuntime, hash: [u8; 32], append: bool) {
 #[test]
 fn persisted_delta_reorgs_equal_fresh_replay() {
     for seed in 0u8..8 {
-        let mut local = reducer();
+        let mut local = runtime();
         let mut prefix = vec![];
         for index in 0u8..80 {
             let hash = [seed.wrapping_mul(17).wrapping_add(index); 32];
@@ -105,7 +105,7 @@ fn persisted_delta_reorgs_equal_fresh_replay() {
         let common_height = (REGTEST.activation_height - 1) + common_len as u32;
         local.rewind_to(common_height).unwrap();
 
-        let mut fresh = reducer();
+        let mut fresh = runtime();
         for (hash, append) in &prefix[..common_len] {
             apply_generated(&mut fresh, *hash, *append);
         }

@@ -556,7 +556,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_or_failed_fetch_never_advances_reducer() {
+    fn missing_or_failed_fetch_never_advances_runtime() {
         for value in [Ok(None), Err("transport")] {
             let mut runtime = runtime();
             let before_tip = runtime.tip();
@@ -620,7 +620,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_fetched_transaction_is_reducer_fatal_and_atomic() {
+    fn malformed_fetched_transaction_is_runtime_fatal_and_atomic() {
         let mut runtime = runtime();
         let before_tip = runtime.tip();
         let before_state = runtime.state().clone();

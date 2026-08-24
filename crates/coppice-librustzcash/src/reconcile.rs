@@ -407,7 +407,7 @@ mod tests {
         }
     }
 
-    fn new_reducer() -> NamesRuntime {
+    fn new_runtime() -> NamesRuntime {
         let deployment = deployment();
         NamesRuntime::new(
             deployment.clone(),
@@ -654,7 +654,7 @@ mod tests {
         }
     }
 
-    fn assert_same_reducer(left: &NamesRuntime, right: &NamesRuntime) {
+    fn assert_same_runtime(left: &NamesRuntime, right: &NamesRuntime) {
         assert_eq!(left.tip(), right.tip());
         assert_eq!(left.state(), right.state());
         assert_eq!(
@@ -674,7 +674,7 @@ mod tests {
 
     #[test]
     fn already_current_does_no_history_or_full_transaction_work() {
-        let mut runtime = new_reducer();
+        let mut runtime = new_runtime();
         let mut source = Source::new(BTreeMap::new(), runtime.tip().into());
         let mut full = FullSource::default();
         let outcome =
@@ -688,7 +688,7 @@ mod tests {
     #[test]
     fn activation_and_forward_catch_up_are_ascending_and_complete() {
         let history = chain(&[(1, 1, 11), (2, 2, 12), (3, 3, 13)]);
-        let mut runtime = new_reducer();
+        let mut runtime = new_runtime();
         let mut source = Source::new(history.clone(), tip(3, 3));
         let mut full = FullSource::default();
         let outcome =
@@ -714,7 +714,7 @@ mod tests {
     #[test]
     fn progress_callback_exposes_each_durable_block_boundary_and_can_stop() {
         let history = chain(&[(1, 1, 11), (2, 2, 12), (3, 3, 13)]);
-        let mut runtime = new_reducer();
+        let mut runtime = new_runtime();
         let mut source = Source::new(history, tip(3, 3));
         let mut full = FullSource::default();
         let mut persisted = vec![];
@@ -739,7 +739,7 @@ mod tests {
     fn one_block_reorg_removes_old_effects_and_applies_replacement() {
         let old = chain(&[(1, 10, 20)]);
         let replacement = chain(&[(1, 11, 21)]);
-        let mut runtime = new_reducer();
+        let mut runtime = new_runtime();
         apply_history(&mut runtime, &old);
         let old_root = runtime.ironwood_frontier().root();
         let mut source = Source::new(replacement.clone(), tip(1, 11));
@@ -749,16 +749,16 @@ mod tests {
         assert_eq!(outcome.common_ancestor.unwrap().height, 0);
         assert_eq!(outcome.blocks_rewound, 1);
         assert_ne!(runtime.ironwood_frontier().root(), old_root);
-        let mut fresh = new_reducer();
+        let mut fresh = new_runtime();
         apply_history(&mut fresh, &replacement);
-        assert_same_reducer(&runtime, &fresh);
+        assert_same_runtime(&runtime, &fresh);
     }
 
     #[test]
     fn highest_common_ancestor_is_not_unnecessarily_deep() {
         let old = chain(&[(1, 1, 31), (2, 2, 32), (3, 3, 33), (4, 40, 34)]);
         let replacement = chain(&[(1, 1, 31), (2, 2, 32), (3, 3, 33), (4, 41, 44), (5, 5, 45)]);
-        let mut runtime = new_reducer();
+        let mut runtime = new_runtime();
         apply_history(&mut runtime, &old);
         let mut source = Source::new(replacement.clone(), tip(5, 5));
         let mut full = FullSource::default();
@@ -767,9 +767,9 @@ mod tests {
         assert_eq!(outcome.common_ancestor.unwrap().height, 3);
         assert_eq!(outcome.blocks_rewound, 1);
         assert_eq!(outcome.blocks_applied, 2);
-        let mut fresh = new_reducer();
+        let mut fresh = new_runtime();
         apply_history(&mut fresh, &replacement);
-        assert_same_reducer(&runtime, &fresh);
+        assert_same_runtime(&runtime, &fresh);
     }
 
     #[test]
@@ -782,7 +782,7 @@ mod tests {
             (4, 14, 154),
             (5, 15, 155),
         ]);
-        let mut runtime = new_reducer();
+        let mut runtime = new_runtime();
         apply_history(&mut runtime, &old);
         let mut source = Source::new(replacement.clone(), tip(5, 15));
         let mut full = FullSource::default();
@@ -791,15 +791,15 @@ mod tests {
         assert_eq!(outcome.common_ancestor.unwrap().height, 1);
         assert_eq!(outcome.blocks_rewound, 3);
         assert_eq!(outcome.blocks_applied, 4);
-        let mut fresh = new_reducer();
+        let mut fresh = new_runtime();
         apply_history(&mut fresh, &replacement);
-        assert_same_reducer(&runtime, &fresh);
+        assert_same_runtime(&runtime, &fresh);
     }
 
     #[test]
-    fn reducer_ahead_rewinds_to_host_tip_without_replay() {
+    fn runtime_ahead_rewinds_to_host_tip_without_replay() {
         let history = chain(&[(1, 1, 51), (2, 2, 52), (3, 3, 53)]);
-        let mut runtime = new_reducer();
+        let mut runtime = new_runtime();
         apply_history(&mut runtime, &history);
         let mut source = Source::new(history, tip(2, 2));
         let mut full = FullSource::default();
@@ -816,7 +816,7 @@ mod tests {
         let old = chain(&[(1, 1, 61)]);
         let mut foreign = chain(&[(1, 2, 62)]);
         foreign.get_mut(&1).unwrap().prev_hash = vec![8; 32];
-        let mut runtime = new_reducer();
+        let mut runtime = new_runtime();
         apply_history(&mut runtime, &old);
         let before_tip = runtime.tip();
         let before_root = runtime.ironwood_frontier().root();
@@ -834,7 +834,7 @@ mod tests {
     fn phase6_fork_beyond_retained_horizon_requires_atomic_rebuild() {
         let old = retained_horizon_chain(1);
         let replacement = retained_horizon_chain(2);
-        let mut runtime = new_reducer();
+        let mut runtime = new_runtime();
         apply_history(&mut runtime, &old);
         assert_eq!(runtime.reorg_retention_blocks(), 121);
         assert_eq!(runtime.oldest_rewind_height(), 29);
@@ -854,22 +854,22 @@ mod tests {
 
         // Rebuild from the activation checkpoint, then independently replay
         // the same replacement chain to establish deterministic equivalence.
-        let mut rebuilt = new_reducer();
+        let mut rebuilt = new_runtime();
         apply_history(&mut rebuilt, &replacement);
-        let mut clean = new_reducer();
+        let mut clean = new_runtime();
         apply_history(&mut clean, &replacement);
         assert_eq!(
             rebuilt.save_snapshot().unwrap(),
             clean.save_snapshot().unwrap()
         );
-        assert_same_reducer(&rebuilt, &clean);
+        assert_same_runtime(&rebuilt, &clean);
     }
 
     #[test]
     fn ancestor_source_failure_is_pre_rewind_atomic() {
         let old = chain(&[(1, 1, 71), (2, 2, 72), (3, 3, 73)]);
         let replacement = chain(&[(1, 1, 71), (2, 20, 82), (3, 30, 83)]);
-        let mut runtime = new_reducer();
+        let mut runtime = new_runtime();
         apply_history(&mut runtime, &old);
         let before_tip = runtime.tip();
         let before_state = runtime.state().clone();
@@ -893,7 +893,7 @@ mod tests {
     fn post_rewind_failure_keeps_only_successful_canonical_progress_and_retry_converges() {
         let old = chain(&[(1, 1, 91), (2, 2, 92), (3, 3, 93)]);
         let replacement = chain(&[(1, 10, 101), (2, 20, 102), (3, 30, 103)]);
-        let mut runtime = new_reducer();
+        let mut runtime = new_runtime();
         apply_history(&mut runtime, &old);
         let mut broken = replacement.clone();
         broken.get_mut(&2).unwrap().vtx[0].ironwood_actions[0].cmx = vec![0; 31];
@@ -914,9 +914,9 @@ mod tests {
 
         let mut retry = Source::new(replacement.clone(), tip(3, 30));
         reconcile_canonical_chain(&params(), &mut runtime, &mut retry, &mut full).unwrap();
-        let mut fresh = new_reducer();
+        let mut fresh = new_runtime();
         apply_history(&mut fresh, &replacement);
-        assert_same_reducer(&runtime, &fresh);
+        assert_same_runtime(&runtime, &fresh);
     }
 
     #[test]
@@ -924,7 +924,7 @@ mod tests {
         let old = chain(&[(1, 1, 111)]);
         let mut replacement = chain(&[(1, 10, 112)]);
         replacement.get_mut(&1).unwrap().vtx[0].ironwood_actions[0].cmx = vec![0; 31];
-        let mut runtime = new_reducer();
+        let mut runtime = new_runtime();
         apply_history(&mut runtime, &old);
         let mut source = Source::new(replacement, tip(1, 10));
         let mut full = FullSource::default();
@@ -939,7 +939,7 @@ mod tests {
     #[test]
     fn benign_host_tip_advancement_keeps_the_completed_pass_successful() {
         let history = chain(&[(1, 1, 121)]);
-        let mut runtime = new_reducer();
+        let mut runtime = new_runtime();
         let mut source = Source::new(history.clone(), tip(1, 1));
         source.later_tip = Some(tip(2, 2));
         let mut full = FullSource::default();
@@ -953,7 +953,7 @@ mod tests {
     #[test]
     fn frozen_host_tip_never_chases_an_advancing_transport() {
         let history = chain(&[(1, 1, 131), (2, 2, 132), (3, 3, 133), (4, 4, 134)]);
-        let mut runtime = new_reducer();
+        let mut runtime = new_runtime();
         let mut transport = Source::new(history.clone(), tip(4, 4));
         transport.later_tip = Some(tip(5, 5));
         let mut source = FrozenCanonicalBlockSource::new(transport, tip(3, 3));
@@ -990,7 +990,7 @@ mod tests {
     fn observed_tip_reorg_and_host_rollback_are_explicit() {
         let initial = chain(&[(1, 1, 122)]);
         let replacement = chain(&[(1, 10, 123), (2, 20, 124)]);
-        let mut runtime = new_reducer();
+        let mut runtime = new_runtime();
         let mut source = Source::new(initial, tip(1, 1));
         source.later_tip = Some(tip(2, 20));
         source.later_blocks = Some(replacement);
@@ -1008,7 +1008,7 @@ mod tests {
         );
 
         let initial = chain(&[(1, 1, 125)]);
-        let mut runtime = new_reducer();
+        let mut runtime = new_runtime();
         let mut source = Source::new(initial, tip(1, 1));
         source.later_tip = Some(tip(0, 9));
         assert!(matches!(
@@ -1022,7 +1022,7 @@ mod tests {
     fn rendezvous_candidate_uses_existing_full_transaction_path_once() {
         let mut history = chain(&[(1, 1, 131)]);
         history.get_mut(&1).unwrap().vtx[0].ironwood_actions = vec![candidate_action()];
-        let mut runtime = new_reducer();
+        let mut runtime = new_runtime();
         let mut source = Source::new(history, tip(1, 1));
         let mut full = FullSource::default();
         assert!(matches!(
@@ -1047,7 +1047,7 @@ mod tests {
             history.insert(height, block(height, hash, prev, hash));
             prev = [hash; 32];
         }
-        let mut runtime = new_reducer();
+        let mut runtime = new_runtime();
         let mut source = Source::new(history, tip(200, 200));
         let mut full = FullSource::default();
         let outcome =
@@ -1065,7 +1065,7 @@ mod tests {
     fn malformed_source_identity_errors_are_typed_and_panic_free() {
         let mut full = FullSource::default();
 
-        let mut runtime = new_reducer();
+        let mut runtime = new_runtime();
         let before = runtime.tip();
         let mut missing = Source::new(BTreeMap::new(), tip(1, 1));
         assert!(matches!(
@@ -1112,7 +1112,7 @@ mod tests {
         let old = chain(&[(1, 1, 171), (2, 2, 172), (3, 3, 173)]);
         let mut replacement = chain(&[(1, 1, 171), (2, 12, 182), (3, 13, 183), (4, 14, 184)]);
         replacement.remove(&4);
-        let mut runtime = new_reducer();
+        let mut runtime = new_runtime();
         apply_history(&mut runtime, &old);
         let mut source = Source::new(replacement, tip(4, 14));
         let mut full = FullSource::default();
