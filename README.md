@@ -59,8 +59,9 @@ context. Names state and Names operations belong to Coppice Names v1.
 
 ## Status
 
-The repository contains a production-authoritative code path at frozen
-Coppice baseline `1e9c886c9f0adbdde3a613f9a4bee0d8bdd3bff8`; the companion
+The qualified/frozen executable baseline is Coppice
+`1e9c886c9f0adbdde3a613f9a4bee0d8bdd3bff8`; current repository HEAD may include
+documentation-only commits. The companion
 `zcash-devtool` qualification baseline is `050994b796343ef46ef82273fd306e8c342a31c2`.
 This is pre-release cryptographic software. There is currently no announced
 public Coppice Testnet or Mainnet deployment and no independent security audit.

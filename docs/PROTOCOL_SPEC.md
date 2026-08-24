@@ -1355,7 +1355,8 @@ floor_height =
     )
 ```
 
-The Names application obtains:
+Core supplies the canonical checkpoint for this height. Names v1 consumes it
+to obtain:
 
 ```text
 position_floor =
@@ -1397,13 +1398,15 @@ The anchor MUST satisfy:
 C <= bond_anchor_height < R
 ```
 
-The Names application MUST have independently derived:
+Core MUST independently derive from canonical Zcash history:
 
 ```text
 Ironwood root at end of bond_anchor_height
 ```
 
-and it MUST equal `bond_anchor`.
+Names v1 MUST validate the caller-supplied `bond_anchor` against the
+corresponding Core-derived checkpoint, and it MUST equal that checkpoint's
+root.
 
 A proof against an arbitrary caller-supplied root is invalid.
 
@@ -1411,7 +1414,7 @@ Because `R <= C + commit_ttl_blocks`, the anchor can always be validated from a 
 
 ## P-BOND-010 — Ironwood checkpoint retention
 
-The Names application tracks a rolling sequence:
+Core tracks the canonical Ironwood checkpoint sequence:
 
 ```rust
 pub struct IronwoodCheckpoint {
@@ -1421,7 +1424,7 @@ pub struct IronwoodCheckpoint {
 }
 ```
 
-It needs enough history to answer both:
+Names v1 requires Core to retain enough history to answer both:
 
 - anchor lookup for current REVEALs;
 - freshness position-floor lookup for current REVEALs.
@@ -1432,6 +1435,10 @@ Required protocol window:
 checkpoint_retention_blocks =
     bond_note_max_age_blocks + commit_ttl_blocks + 1
 ```
+
+Names v1 consumes these Core-derived checkpoints for freshness-floor and
+bond-anchor validation. It does not own or independently derive the canonical
+Ironwood frontier or checkpoint sequence.
 
 The implementation MAY retain more.
 
@@ -2115,10 +2122,11 @@ Before decoding a fetched full transaction:
 
 1. parse it with the correct Zcash consensus branch for its height;
 2. verify full transaction `txid` equals compact `txid`;
-3. decrypt/extract only outputs addressed to the exact configured rendezvous
-   receiver;
-4. extract all Ironwood nullifiers and commitments;
-5. verify they exactly equal compact effects for that transaction.
+3. extract the complete Ironwood nullifier and commitment effects and verify
+   that they exactly equal the compact effects for that transaction;
+4. only after Core effect validation succeeds, inspect the full transaction
+   for CPV1 transport: decrypt/extract only outputs addressed to the exact
+   configured rendezvous receiver, then perform CPV1/CA01 routing.
 
 Never hardcode one historical branch ID for all future heights.
 
