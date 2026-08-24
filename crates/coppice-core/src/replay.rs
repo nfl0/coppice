@@ -214,6 +214,7 @@ pub struct CoreBlockContext {
     prev_block_hash: [u8; 32],
     branch_id: BranchId,
     transactions: Box<[CoreTransactionContext]>,
+    prior_ironwood_checkpoints: Box<[CoreIronwoodCheckpoint]>,
     ironwood_checkpoint: CoreIronwoodCheckpoint,
 }
 
@@ -236,6 +237,22 @@ impl CoreBlockContext {
 
     pub fn transactions(&self) -> &[CoreTransactionContext] {
         &self.transactions
+    }
+
+    /// Authenticated checkpoints retained immediately before this block.
+    ///
+    /// Applications consume this pre-block view while processing ordered
+    /// transactions. Core's end-of-block pruning must not make a checkpoint
+    /// disappear before an application can validate the same block.
+    pub fn prior_ironwood_checkpoints(&self) -> &[CoreIronwoodCheckpoint] {
+        &self.prior_ironwood_checkpoints
+    }
+
+    pub fn prior_ironwood_checkpoint(&self, height: u32) -> Option<CoreIronwoodCheckpoint> {
+        self.prior_ironwood_checkpoints
+            .binary_search_by_key(&height, |checkpoint| checkpoint.height)
+            .ok()
+            .map(|index| self.prior_ironwood_checkpoints[index])
     }
 
     pub fn ironwood_checkpoint(&self) -> CoreIronwoodCheckpoint {
@@ -280,6 +297,7 @@ struct CoreReplayUndo {
 }
 
 /// Parallel application-blind canonical replay state.
+#[derive(Clone)]
 pub struct CoreReplay {
     configuration: CoreReplayConfiguration,
     ironwood_frontier: IronwoodFrontier,
@@ -394,6 +412,12 @@ impl CoreReplay {
 
         let mut frontier = self.ironwood_frontier.clone();
         let mut checkpoints = self.ironwood_checkpoints.clone();
+        let prior_ironwood_checkpoints = self
+            .ironwood_checkpoints
+            .values()
+            .copied()
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
         let mut transactions = Vec::with_capacity(block.transactions.len());
 
         for input in &block.transactions {
@@ -460,6 +484,7 @@ impl CoreReplay {
             prev_block_hash: block.prev_block_hash,
             branch_id: block.branch_id,
             transactions: transactions.into_boxed_slice(),
+            prior_ironwood_checkpoints,
             ironwood_checkpoint,
         })
     }

@@ -1,5 +1,6 @@
 use crate::carrier::MAX_CPV1_PAYLOAD_LEN;
 use crate::hash;
+use crate::replay::CoreBlockContext;
 
 pub const APPLICATION_ID_PERSONALIZATION: [u8; 16] = *b"CoppiceAppIdV1\0\0";
 pub const APPLICATION_ENVELOPE_MAGIC: [u8; 4] = *b"CA01";
@@ -61,6 +62,31 @@ impl ApplicationKey {
 pub struct ApplicationDescriptor {
     pub key: ApplicationKey,
     pub activation_height: u32,
+}
+
+/// Canonical application position corresponding to a completed Zcash block.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ApplicationTip {
+    pub height: u32,
+    pub block_hash: [u8; 32],
+}
+
+/// Minimal lifecycle implemented by deterministic applications hosted by the
+/// Coppice runtime. Core supplies ordered, validated Zcash context and remains
+/// unaware of the application's payload, state, and transition semantics.
+pub trait CoppiceApplication {
+    type BlockOutput;
+    type ApplyError;
+    type RewindError;
+
+    fn descriptor(&self) -> ApplicationDescriptor;
+    fn tip(&self) -> ApplicationTip;
+    fn state_root(&self) -> [u8; 32];
+    fn apply_block(
+        &mut self,
+        block: &CoreBlockContext,
+    ) -> Result<Self::BlockOutput, Self::ApplyError>;
+    fn rewind_to(&mut self, height: u32) -> Result<(), Self::RewindError>;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

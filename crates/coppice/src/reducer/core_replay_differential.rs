@@ -660,3 +660,37 @@ fn normalized_checkpoint_types_cover_every_retained_entry() {
         core.ironwood_frontier().size()
     );
 }
+
+#[test]
+fn emitted_context_preserves_the_pre_block_checkpoint_view() {
+    let checkpoint = ActivationCheckpoint {
+        height: ACTIVATION_HEIGHT - 1,
+        block_hash: ACTIVATION_HASH,
+        ironwood_frontier: IronwoodFrontier::empty(),
+        ironwood_tree_size: 0,
+    };
+    let mut core = CoreReplay::new(
+        CoreReplayConfiguration::new(ACTIVATION_HEIGHT, 2).unwrap(),
+        checkpoint,
+    )
+    .unwrap();
+    let first = empty_block(ACTIVATION_HEIGHT, [10; 32], ACTIVATION_HASH);
+    core.apply_block(&first).unwrap();
+    assert!(
+        core.ironwood_checkpoints()
+            .contains_key(&(ACTIVATION_HEIGHT - 1))
+    );
+
+    let second = empty_block(ACTIVATION_HEIGHT + 1, [11; 32], [10; 32]);
+    let context = core.apply_block(&second).unwrap();
+    assert!(
+        context
+            .prior_ironwood_checkpoint(ACTIVATION_HEIGHT - 1)
+            .is_some()
+    );
+    assert!(
+        !core
+            .ironwood_checkpoints()
+            .contains_key(&(ACTIVATION_HEIGHT - 1))
+    );
+}

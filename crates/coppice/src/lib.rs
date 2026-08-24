@@ -11,6 +11,7 @@ pub mod envelope;
 pub mod ironwood;
 pub mod name_tree;
 pub mod names_application;
+pub mod names_runtime;
 pub mod owner;
 pub mod owner_kdf;
 pub mod pending;
