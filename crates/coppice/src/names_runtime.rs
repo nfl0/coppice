@@ -1061,6 +1061,10 @@ impl CanonicalRuntime for NamesRuntime {
         self.core.parameters()
     }
 
+    fn rendezvous(&self) -> &coppice_core::carrier::CoreRendezvous {
+        self.core.rendezvous()
+    }
+
     fn tip(&self) -> coppice_core::replay::CoreReplayTip {
         self.tip()
     }

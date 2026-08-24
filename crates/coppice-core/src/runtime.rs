@@ -5,7 +5,7 @@ use crate::{
         ApplicationActivationError, ApplicationBlockContext, ApplicationDescriptor,
         ApplicationEnvelopeError, ApplicationEnvelopeV1,
     },
-    carrier::CPV1_PROTOCOL_ID,
+    carrier::{CPV1_PROTOCOL_ID, CoreRendezvous},
     identity::{
         CORE_RUNTIME_PROTOCOL_ID_V1, CORE_RUNTIME_PROTOCOL_VERSION_V1, CoreRuntimeId,
         ValidatedCoreRuntimeParameters,
@@ -17,10 +17,8 @@ use crate::{
     },
     transport,
 };
-use orchard::{keys::IncomingViewingKey, note_encryption::IronwoodDomain};
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
-use zcash_note_encryption::try_note_decryption;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CoreRuntimeConfigurationError {
@@ -139,6 +137,7 @@ pub trait CanonicalRuntime {
     type RewindError: Debug;
 
     fn core_parameters(&self) -> &ValidatedCoreRuntimeParameters;
+    fn rendezvous(&self) -> &CoreRendezvous;
     fn tip(&self) -> CoreReplayTip;
     fn oldest_rewind_height(&self) -> u32;
     fn retained_tip_at(&self, height: u32) -> Option<CoreReplayTip>;
@@ -153,6 +152,7 @@ pub trait CanonicalRuntime {
 pub struct CoreRuntime {
     parameters: ValidatedCoreRuntimeParameters,
     runtime_id: CoreRuntimeId,
+    rendezvous: CoreRendezvous,
     replay: CoreReplay,
 }
 
@@ -176,9 +176,11 @@ impl CoreRuntime {
             return Err(CoreRuntimeConfigurationError::ActivationMismatch);
         }
         let runtime_id = parameters.core_runtime_id();
+        let rendezvous = CoreRendezvous::from_validated(&parameters);
         Ok(Self {
             parameters,
             runtime_id,
+            rendezvous,
             replay,
         })
     }
@@ -189,6 +191,10 @@ impl CoreRuntime {
 
     pub fn runtime_id(&self) -> CoreRuntimeId {
         self.runtime_id
+    }
+
+    pub fn rendezvous(&self) -> &CoreRendezvous {
+        &self.rendezvous
     }
 
     pub fn replay(&self) -> &CoreReplay {
@@ -237,7 +243,7 @@ impl CoreRuntime {
                 core_index,
                 message: route_candidate(
                     transaction.candidate_status(),
-                    &self.parameters,
+                    &self.rendezvous,
                     self.runtime_id,
                 ),
             })
@@ -258,7 +264,7 @@ impl CoreRuntime {
         &self,
         transaction: &zcash_primitives::transaction::Transaction,
     ) -> RuntimeTransactionInspection {
-        inspect_transaction(transaction, &self.parameters)
+        inspect_transaction_for(transaction, &self.rendezvous, self.runtime_id)
     }
 
     pub fn rewind_to(&mut self, height: u32) -> Result<(), CoreRewindError> {
@@ -305,6 +311,10 @@ impl CanonicalRuntime for CoreRuntime {
         self.parameters()
     }
 
+    fn rendezvous(&self) -> &CoreRendezvous {
+        self.rendezvous()
+    }
+
     fn tip(&self) -> CoreReplayTip {
         self.tip()
     }
@@ -331,13 +341,13 @@ impl CanonicalRuntime for CoreRuntime {
 
 fn route_candidate(
     candidate: &CandidateTransactionStatus,
-    parameters: &ValidatedCoreRuntimeParameters,
+    rendezvous: &CoreRendezvous,
     runtime_id: CoreRuntimeId,
 ) -> ApplicationMessageStatus {
     let CandidateTransactionStatus::ValidatedFullTransaction(validated) = candidate else {
         return ApplicationMessageStatus::NotCandidate;
     };
-    inspect_transaction_for(validated.transaction(), parameters, runtime_id).message
+    inspect_transaction_for(validated.transaction(), rendezvous, runtime_id).message
 }
 
 /// Routes one transaction at a validated runtime rendezvous without changing
@@ -346,12 +356,13 @@ pub fn inspect_transaction(
     transaction: &zcash_primitives::transaction::Transaction,
     parameters: &ValidatedCoreRuntimeParameters,
 ) -> RuntimeTransactionInspection {
-    inspect_transaction_for(transaction, parameters, parameters.core_runtime_id())
+    let rendezvous = CoreRendezvous::from_validated(parameters);
+    inspect_transaction_for(transaction, &rendezvous, parameters.core_runtime_id())
 }
 
 fn inspect_transaction_for(
     transaction: &zcash_primitives::transaction::Transaction,
-    parameters: &ValidatedCoreRuntimeParameters,
+    rendezvous: &CoreRendezvous,
     runtime_id: CoreRuntimeId,
 ) -> RuntimeTransactionInspection {
     let Some(bundle) = transaction.ironwood_bundle() else {
@@ -360,18 +371,10 @@ fn inspect_transaction_for(
             message: ApplicationMessageStatus::NoMessage,
         };
     };
-    let ivk = Option::<IncomingViewingKey>::from(IncomingViewingKey::from_bytes(
-        &parameters.parameters().rendezvous_ivk,
-    ))
-    .expect("validated Core runtime IVK");
-    let prepared_ivk = ivk.prepare();
     let frames = bundle
         .actions()
         .iter()
-        .filter_map(|action| {
-            try_note_decryption(&IronwoodDomain::for_action(action), &prepared_ivk, action)
-                .map(|(_, _, memo)| memo)
-        })
+        .filter_map(|action| rendezvous.action_memo(action))
         .filter(transport::is_frame)
         .collect::<Vec<_>>()
         .into_boxed_slice();

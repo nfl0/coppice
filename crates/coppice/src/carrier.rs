@@ -30,6 +30,12 @@ pub fn compact_action_is_bulletin(
     action: &orchard::note_encryption::CompactAction,
     rendezvous: Rendezvous,
 ) -> Result<bool, Error> {
-    coppice_core::carrier::compact_action_is_rendezvous(action, &rendezvous.orchard_ivk)
-        .map_err(|_| Error::Build)
+    let context = coppice_core::carrier::CoreRendezvous::try_new(
+        &rendezvous.orchard_ivk,
+        &rendezvous.orchard_receiver,
+    )
+    .map_err(|_| Error::Build)?;
+    Ok(coppice_core::carrier::compact_action_is_rendezvous(
+        action, &context,
+    ))
 }

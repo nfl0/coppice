@@ -7,7 +7,7 @@
 use std::fmt::Debug;
 
 use coppice_core::{
-    carrier,
+    carrier::{self, CoreRendezvous},
     identity::{ValidatedCoreRuntimeParameters, ZcashNetwork},
     replay::{CoreCanonicalBlockInput, CoreCanonicalTransactionInput},
 };
@@ -92,10 +92,10 @@ fn exact_32(bytes: &[u8]) -> Option<[u8; 32]> {
     bytes.try_into().ok()
 }
 
-fn validate_transaction<SourceError: Debug, R: CanonicalRuntime>(
+fn validate_transaction<SourceError: Debug>(
     transaction: usize,
     compact_tx: &CompactTx,
-    runtime: &R,
+    rendezvous: &CoreRendezvous,
 ) -> Result<ValidatedCompactTx, CompactBlockAdapterError<SourceError>> {
     let tx_index = u32::try_from(compact_tx.index)
         .map_err(|_| CompactBlockAdapterError::InvalidTxIndex { transaction })?;
@@ -114,14 +114,7 @@ fn validate_transaction<SourceError: Debug, R: CanonicalRuntime>(
         })?;
         ironwood_nullifiers.push(action.nullifier().to_bytes());
         ironwood_commitments.push(action.cmx().to_bytes());
-        let hit = carrier::compact_action_is_rendezvous(
-            &action,
-            &runtime.core_parameters().parameters().rendezvous_ivk,
-        )
-        .map_err(|_| CompactBlockAdapterError::CandidateDetection {
-            tx_index,
-            action_index,
-        })?;
+        let hit = carrier::compact_action_is_rendezvous(&action, rendezvous);
         candidate |= hit;
     }
 
@@ -176,9 +169,10 @@ where
     }
 
     // Phase A: validate and classify every represented transaction before any fetch.
+    let rendezvous = runtime.rendezvous();
     let mut validated = Vec::with_capacity(compact_block.vtx.len());
     for (transaction, compact_tx) in compact_block.vtx.iter().enumerate() {
-        let tx = validate_transaction(transaction, compact_tx, runtime)?;
+        let tx = validate_transaction(transaction, compact_tx, rendezvous)?;
         if validated
             .last()
             .is_some_and(|prior: &ValidatedCompactTx| prior.input.tx_index >= tx.input.tx_index)
@@ -282,6 +276,7 @@ mod tests {
         },
     };
     use orchard::{
+        keys::IncomingViewingKey,
         note::{ExtractedNoteCommitment, Note, NoteVersion, Nullifier, RandomSeed, Rho},
         note_encryption::{IronwoodDomain, IronwoodNoteEncryption},
         value::NoteValue,
@@ -341,9 +336,7 @@ mod tests {
         .unwrap()
     }
 
-    fn real_rendezvous_action() -> CompactOrchardAction {
-        let recipient =
-            orchard::Address::from_raw_address_bytes(&REGTEST.rendezvous.orchard_receiver).unwrap();
+    fn rendezvous_action(recipient: orchard::Address) -> CompactOrchardAction {
         let nf = Nullifier::from_bytes(&[0; 32]).unwrap();
         let rho = Rho::from_bytes(&nf.to_bytes()).unwrap();
         let rseed = (0u8..=u8::MAX)
@@ -367,6 +360,20 @@ mod tests {
             ephemeral_key: IronwoodDomain::epk_bytes(encryptor.epk()).0.to_vec(),
             ciphertext: ciphertext[..52].to_vec(),
         }
+    }
+
+    fn real_rendezvous_action() -> CompactOrchardAction {
+        let recipient =
+            orchard::Address::from_raw_address_bytes(&REGTEST.rendezvous.orchard_receiver).unwrap();
+        rendezvous_action(recipient)
+    }
+
+    fn alternate_rendezvous_action() -> CompactOrchardAction {
+        let ivk = Option::<IncomingViewingKey>::from(IncomingViewingKey::from_bytes(
+            &REGTEST.rendezvous.orchard_ivk,
+        ))
+        .unwrap();
+        rendezvous_action(ivk.address_at(1u32))
     }
 
     fn noncandidate_action() -> CompactOrchardAction {
@@ -415,6 +422,20 @@ mod tests {
         assert!(names_carrier::compact_action_is_bulletin(&hit, REGTEST.rendezvous).unwrap());
         let miss = CompactAction::try_from(&noncandidate_action()).unwrap();
         assert!(!names_carrier::compact_action_is_bulletin(&miss, REGTEST.rendezvous).unwrap());
+    }
+
+    #[test]
+    fn same_ivk_alternate_receiver_is_not_a_compact_candidate() {
+        let action = alternate_rendezvous_action();
+        let compact = CompactAction::try_from(&action).unwrap();
+        assert!(!names_carrier::compact_action_is_bulletin(&compact, REGTEST.rendezvous).unwrap());
+
+        let runtime = runtime();
+        let input = block(&runtime, vec![compact_tx(0, 1, vec![action])]);
+        let mut source = Source::default();
+        let prepared = prepare_canonical_block(&params(), &runtime, &input, &mut source).unwrap();
+        assert!(!prepared.transactions[0].full_tx_required);
+        assert!(source.calls.is_empty());
     }
 
     #[test]

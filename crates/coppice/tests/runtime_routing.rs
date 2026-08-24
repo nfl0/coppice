@@ -20,11 +20,13 @@ use orchard::{
     Proof,
     builder::{Builder, BundleType},
     bundle::{Authorized as OrchardAuthorized, BundleVersion},
+    keys::IncomingViewingKey,
     primitives::redpallas::{Binding, SigningKey, SpendAuth},
     value::NoteValue,
 };
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
+use std::io::Cursor;
 use zcash_primitives::transaction::{Authorized, TransactionData};
 use zcash_protocol::{
     consensus::{BlockHeight, BranchId, NetworkType},
@@ -75,6 +77,17 @@ fn candidate_transaction(
     tx_index: u32,
     seed: u8,
 ) -> CoreCanonicalTransactionInput {
+    let receiver = coppice::carrier::bulletin_address(deployment.rendezvous).unwrap();
+    candidate_transaction_to_receiver(runtime_id, envelope, tx_index, seed, receiver)
+}
+
+fn candidate_transaction_to_receiver(
+    runtime_id: [u8; 32],
+    envelope: &[u8],
+    tx_index: u32,
+    seed: u8,
+    receiver: orchard::Address,
+) -> CoreCanonicalTransactionInput {
     let frames = transport::encode_frames(runtime_id, envelope).unwrap();
     let version = BundleVersion::ironwood_v3();
     let mut builder = Builder::new(
@@ -84,7 +97,6 @@ fn candidate_transaction(
         orchard::Anchor::empty_tree(),
     )
     .unwrap();
-    let receiver = coppice::carrier::bulletin_address(deployment.rendezvous).unwrap();
     for frame in frames {
         builder
             .add_output(None, receiver, NoteValue::ZERO, frame)
@@ -138,6 +150,14 @@ fn candidate_transaction(
         full_tx_required: true,
         candidate_full_tx: Some(bytes),
     }
+}
+
+fn alternate_rendezvous_receiver(deployment: &DeploymentParameters) -> orchard::Address {
+    let ivk = Option::<IncomingViewingKey>::from(IncomingViewingKey::from_bytes(
+        &deployment.rendezvous.orchard_ivk,
+    ))
+    .unwrap();
+    ivk.address_at(1u32)
 }
 
 fn block(
@@ -385,6 +405,65 @@ fn names_runtime_routes_envelopes_and_restores_split_state_atomically() {
         Err(coppice::names_runtime::NamesRuntimeSnapshotError::TipMismatch)
             | Err(coppice::names_runtime::NamesRuntimeSnapshotError::RootMismatch)
     ));
+}
+
+#[test]
+fn same_ivk_alternate_receiver_is_not_routed_or_applied_by_names() {
+    let deployment = deployment();
+    let mut runtime =
+        NamesRuntime::from_names_deployment(deployment.clone(), checkpoint()).unwrap();
+    let operation = Operation::Commit {
+        commitment: [0x55; 32],
+    };
+    let envelope = encode_names_v1_envelope(&operation).unwrap();
+    let transaction = candidate_transaction_to_receiver(
+        runtime.core().runtime_id().to_bytes(),
+        &envelope,
+        0,
+        8,
+        alternate_rendezvous_receiver(&deployment),
+    );
+    let full_bytes = transaction.candidate_full_tx.as_deref().unwrap();
+    let parsed = zcash_primitives::transaction::Transaction::read(
+        &mut Cursor::new(full_bytes),
+        BranchId::Nu6_3,
+    )
+    .unwrap();
+    let inspection = runtime.core().inspect_transaction(&parsed);
+    let action = parsed
+        .ironwood_bundle()
+        .unwrap()
+        .actions()
+        .iter()
+        .next()
+        .unwrap();
+    assert!(!runtime.core().rendezvous().action_is_rendezvous(action));
+    assert!(inspection.frames().is_empty());
+    assert!(matches!(
+        inspection.message(),
+        ApplicationMessageStatus::NoMessage
+    ));
+
+    let before = runtime.names().state().clone();
+    let applied = runtime
+        .apply_block(&block(
+            runtime.core().tip(),
+            ACTIVATION_HEIGHT,
+            vec![transaction],
+        ))
+        .unwrap();
+    assert!(matches!(
+        applied.core.transactions()[0].message(),
+        ApplicationMessageStatus::NoMessage
+    ));
+    assert_eq!(
+        applied.names.transaction_outcomes,
+        vec![NamesTransactionOutcome::NoOperation]
+    );
+    assert_eq!(runtime.names().state().names, before.names);
+    assert_eq!(runtime.names().state().pending, before.pending);
+    assert_eq!(runtime.names().state().recent_spent.len(), 1);
+    assert!(!runtime.names().state().pending.contains_key(&[0x55; 32]));
 }
 
 #[test]
