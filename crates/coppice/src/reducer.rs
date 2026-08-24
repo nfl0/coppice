@@ -562,6 +562,12 @@ impl Reducer {
         {
             return Err(FatalReducerError::NonCanonicalTxOrder);
         }
+        // Keep the production oracle aligned with Core's generic preflight:
+        // application processing cannot shadow terminal-height overflow.
+        block
+            .height
+            .checked_add(1)
+            .ok_or(FatalReducerError::ArithmeticOverflow)?;
 
         let mut state = self.state.clone();
         let mut tree = self.ironwood_tree.clone();

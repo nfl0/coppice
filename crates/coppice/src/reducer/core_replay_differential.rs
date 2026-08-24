@@ -535,7 +535,7 @@ fn hostile_inputs_candidate_validation_and_atomicity_are_differential() {
 }
 
 #[test]
-fn maximum_height_is_fatal_and_atomic_with_legacy_diagnostic_difference() {
+fn maximum_height_arithmetic_failure_is_differential_and_atomic() {
     let mut deployment = deployment();
     deployment.activation_height = u32::MAX;
     let retention = required_reorg_retention_blocks(&deployment).unwrap();
@@ -556,7 +556,7 @@ fn maximum_height_is_fatal_and_atomic_with_legacy_diagnostic_difference() {
     let core_before = core_observation(&core);
     assert_eq!(
         legacy.apply_block(&block),
-        Err(FatalReducerError::StateInvariantFailure)
+        Err(FatalReducerError::ArithmeticOverflow)
     );
     assert_eq!(
         core.apply_block(&block),

@@ -384,6 +384,13 @@ impl CoreReplay {
         {
             return Err(CoreReplayError::NonCanonicalTxOrder);
         }
+        // A committed tip must have a representable successor height. Check
+        // this before transaction or application processing so terminal-height
+        // failure precedence is generic and deterministic.
+        block
+            .height
+            .checked_add(1)
+            .ok_or(CoreReplayError::ArithmeticOverflow)?;
 
         let mut frontier = self.ironwood_frontier.clone();
         let mut checkpoints = self.ironwood_checkpoints.clone();
