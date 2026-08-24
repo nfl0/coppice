@@ -7,9 +7,18 @@ use coppice_core::application::{
     ApplicationDescriptor, ApplicationEnvelopeError, ApplicationEnvelopeV1, ApplicationId,
     ApplicationKey, derive_application_id,
 };
+use coppice_core::{
+    carrier::CPV1_PROTOCOL_ID,
+    identity::{
+        CORE_RUNTIME_PROTOCOL_ID_V1, CORE_RUNTIME_PROTOCOL_VERSION_V1, CoreRuntimeId,
+        ValidatedCoreRuntimeParameters, ZcashNetwork,
+    },
+};
+use zcash_protocol::consensus::NetworkType;
 
 use crate::{
-    config::{DeploymentEncodingError, DeploymentParameters},
+    config::{DeploymentEncodingError, DeploymentParameters, DeploymentValidationError},
+    constants,
     envelope::{self, Operation},
 };
 
@@ -19,6 +28,8 @@ use crate::{
 /// the family ID and use a different `ApplicationKey::version`.
 pub const NAMES_CANONICAL_APPLICATION_IDENTITY: &[u8] = b"coppice.names";
 pub const NAMES_V1_APPLICATION_VERSION: u16 = 1;
+pub const NAMES_V1_REGTEST_CORE_NETWORK_DOMAIN: &[u8] = b"coppice-runtime-regtest-v1";
+pub const NAMES_V1_TESTNET_CORE_NETWORK_DOMAIN: &[u8] = b"coppice-runtime-testnet-v1";
 
 pub fn names_application_id() -> ApplicationId {
     derive_application_id(NAMES_CANONICAL_APPLICATION_IDENTITY)
@@ -61,6 +72,114 @@ impl NamesDeploymentId {
     pub const fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NamesCoreCompatibilityError {
+    InvalidNamesDeployment(DeploymentValidationError),
+    UnsupportedNamesNetworkDomain,
+    RuntimeProtocol,
+    ZcashNetwork,
+    ZcashNetworkDomain,
+    CarrierProtocol,
+    RendezvousIvk,
+    RendezvousReceiver,
+    ApplicationKey,
+    ApplicationActivation,
+    NamesV1RuntimeActivation,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ValidatedNamesV1CoreContext {
+    core_runtime_id: CoreRuntimeId,
+    names_deployment_id: NamesDeploymentId,
+    application: ApplicationDescriptor,
+}
+
+impl ValidatedNamesV1CoreContext {
+    pub const fn core_runtime_id(&self) -> CoreRuntimeId {
+        self.core_runtime_id
+    }
+
+    pub const fn names_deployment_id(&self) -> NamesDeploymentId {
+        self.names_deployment_id
+    }
+
+    pub const fn application(&self) -> ApplicationDescriptor {
+        self.application
+    }
+}
+
+/// Validates the independently derived Core and Coppice Names v1 contexts.
+///
+/// This comparison never derives either identity from the other context.
+pub fn validate_names_v1_core_compatibility(
+    core: &ValidatedCoreRuntimeParameters,
+    names: &DeploymentParameters,
+    application: ApplicationDescriptor,
+) -> Result<ValidatedNamesV1CoreContext, NamesCoreCompatibilityError> {
+    let names_deployment_id = NamesDeploymentId::from_bytes(
+        names
+            .validate()
+            .map_err(NamesCoreCompatibilityError::InvalidNamesDeployment)?,
+    );
+    let core_parameters = core.parameters();
+
+    if core_parameters.runtime_protocol_id != CORE_RUNTIME_PROTOCOL_ID_V1
+        || core_parameters.runtime_protocol_version != CORE_RUNTIME_PROTOCOL_VERSION_V1
+    {
+        return Err(NamesCoreCompatibilityError::RuntimeProtocol);
+    }
+    if core_parameters.carrier_protocol_id != CPV1_PROTOCOL_ID {
+        return Err(NamesCoreCompatibilityError::CarrierProtocol);
+    }
+    if application.key != names_v1_application_key() {
+        return Err(NamesCoreCompatibilityError::ApplicationKey);
+    }
+
+    let (expected_network, expected_network_domain, expected_address_network) =
+        if names.network_id == constants::REGTEST_NETWORK_ID {
+            (
+                ZcashNetwork::Regtest,
+                NAMES_V1_REGTEST_CORE_NETWORK_DOMAIN,
+                NetworkType::Regtest,
+            )
+        } else if names.network_id == constants::TESTNET_NETWORK_ID {
+            (
+                ZcashNetwork::Test,
+                NAMES_V1_TESTNET_CORE_NETWORK_DOMAIN,
+                NetworkType::Test,
+            )
+        } else {
+            return Err(NamesCoreCompatibilityError::UnsupportedNamesNetworkDomain);
+        };
+
+    if names.address_network != expected_address_network
+        || core_parameters.zcash_network != expected_network
+    {
+        return Err(NamesCoreCompatibilityError::ZcashNetwork);
+    }
+    if core_parameters.zcash_network_domain != expected_network_domain {
+        return Err(NamesCoreCompatibilityError::ZcashNetworkDomain);
+    }
+    if names.rendezvous.orchard_ivk != core_parameters.rendezvous_ivk {
+        return Err(NamesCoreCompatibilityError::RendezvousIvk);
+    }
+    if names.rendezvous.orchard_receiver != core_parameters.rendezvous_receiver {
+        return Err(NamesCoreCompatibilityError::RendezvousReceiver);
+    }
+    if application.activation_height != names.activation_height {
+        return Err(NamesCoreCompatibilityError::ApplicationActivation);
+    }
+    if application.activation_height != core_parameters.runtime_activation_height {
+        return Err(NamesCoreCompatibilityError::NamesV1RuntimeActivation);
+    }
+
+    Ok(ValidatedNamesV1CoreContext {
+        core_runtime_id: core.core_runtime_id(),
+        names_deployment_id,
+        application,
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

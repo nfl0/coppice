@@ -6,5 +6,6 @@
 #![forbid(unsafe_code)]
 
 pub mod application;
+pub mod carrier;
 mod hash;
 pub mod identity;

@@ -1,9 +1,10 @@
+use crate::carrier::MAX_CPV1_PAYLOAD_LEN;
 use crate::hash;
 
 pub const APPLICATION_ID_PERSONALIZATION: [u8; 16] = *b"CoppiceAppIdV1\0\0";
 pub const APPLICATION_ENVELOPE_MAGIC: [u8; 4] = *b"CA01";
 pub const APPLICATION_ENVELOPE_HEADER_LEN: usize = 4 + 32 + 2;
-pub const MAX_APPLICATION_ENVELOPE_LEN: usize = 16_093;
+pub const MAX_APPLICATION_ENVELOPE_LEN: usize = MAX_CPV1_PAYLOAD_LEN;
 pub const MAX_APPLICATION_PAYLOAD_LEN: usize =
     MAX_APPLICATION_ENVELOPE_LEN - APPLICATION_ENVELOPE_HEADER_LEN;
 
@@ -199,6 +200,8 @@ mod tests {
 
     #[test]
     fn envelope_boundaries_and_magic_are_strict() {
+        assert_eq!(MAX_CPV1_PAYLOAD_LEN, 16_093);
+        assert_eq!(MAX_APPLICATION_PAYLOAD_LEN, 16_055);
         let key = ApplicationKey::new(derive_application_id(b"example.app").unwrap(), 1);
         let largest = ApplicationEnvelopeV1::new(key, vec![0; MAX_APPLICATION_PAYLOAD_LEN])
             .unwrap()

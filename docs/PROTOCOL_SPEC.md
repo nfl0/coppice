@@ -206,6 +206,18 @@ Core performs no textual normalization. Protocol ID, protocol version, network
 domain, activation height, and carrier protocol ID MUST be nonzero or nonempty
 as appropriate. Lengths MUST fit `u16`.
 
+Raw `CoreRuntimeParameters` are not identity authority. Before deriving an ID,
+Core MUST:
+
+1. validate every structural constraint above;
+2. parse the 64-byte rendezvous IVK as an Ironwood incoming viewing key;
+3. parse the 43-byte rendezvous receiver as an Ironwood address; and
+4. require the receiver to correspond to the incoming viewing key.
+
+Successful validation produces `ValidatedCoreRuntimeParameters`. Only that
+validated type may expose the canonical preimage or derive `CoreRuntimeId`.
+Invalid raw parameters MUST NOT produce a runtime identity.
+
 The qualification vector freezes:
 
 ```text
@@ -241,6 +253,23 @@ effects or explicit messages to that inactive application. Coppice Names v1
 initially uses the runtime activation height. Future applications may activate
 later without changing the runtime identity or the state of an existing
 application.
+
+Coppice Names v1 performs an application-side compatibility check against a
+validated Core context. It independently validates `NamesDeploymentId`, then
+requires the frozen Core runtime protocol/version, Zcash network and runtime
+network domain, CPV1 carrier context, exact rendezvous bytes, Names application
+key, and activation relationship to agree. It MUST NOT derive `CoreRuntimeId`
+from Names parameters or `NamesDeploymentId` from Core parameters.
+
+Names v1 currently requires:
+
+```text
+names_application_activation_height == names_activation_height
+names_application_activation_height == runtime_activation_height
+```
+
+This is a Names v1 compatibility rule, not a generic Core restriction. A future
+application may activate strictly after the runtime activation height.
 
 ## P-APPLICATION-ID-001 — Deterministic application identity
 
@@ -285,6 +314,11 @@ application payload is 16,055 bytes. Truncated headers, a magic other than
 `CA01`, and oversized envelopes are malformed. Unknown application IDs or
 versions are structurally valid and unsupported; they MUST NOT be decoded as a
 different application or cause application-state mutation.
+
+`coppice-core` owns `MAX_CPV1_PAYLOAD_LEN = 16_093` and derives
+`MAX_APPLICATION_PAYLOAD_LEN = 16_093 - 38 = 16_055`. During additive
+extraction, the existing production constants module may re-export the Core
+limit, but MUST NOT maintain an independent numeric definition.
 
 For the general runtime carrier, the CPV1 START binding field is
 `CoreRuntimeId`, and the CPV1 payload digest authenticates the complete CA01

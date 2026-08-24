@@ -1,7 +1,10 @@
 use crate::hash;
+use orchard::keys::IncomingViewingKey;
 
 /// BLAKE2b-256 personalization for generic runtime identities.
 pub const CORE_RUNTIME_ID_PERSONALIZATION: [u8; 16] = *b"CoppiceRuntime1\0";
+pub const CORE_RUNTIME_PROTOCOL_ID_V1: &[u8] = b"coppice.runtime";
+pub const CORE_RUNTIME_PROTOCOL_VERSION_V1: u16 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CoreRuntimeId([u8; 32]);
@@ -62,10 +65,32 @@ pub enum CoreRuntimeIdentityError {
     RuntimeActivationHeight,
     EmptyCarrierProtocolId,
     LengthTooLarge,
+    InvalidRendezvousIvk,
+    InvalidRendezvousReceiver,
+    RendezvousMismatch,
 }
 
 impl CoreRuntimeParameters {
-    pub fn validate(&self) -> Result<(), CoreRuntimeIdentityError> {
+    /// Validates all generic runtime context before it can derive an identity.
+    pub fn validate(self) -> Result<ValidatedCoreRuntimeParameters, CoreRuntimeIdentityError> {
+        self.validate_structure()?;
+
+        let ivk = Option::<IncomingViewingKey>::from(IncomingViewingKey::from_bytes(
+            &self.rendezvous_ivk,
+        ))
+        .ok_or(CoreRuntimeIdentityError::InvalidRendezvousIvk)?;
+        let receiver = Option::<orchard::Address>::from(orchard::Address::from_raw_address_bytes(
+            &self.rendezvous_receiver,
+        ))
+        .ok_or(CoreRuntimeIdentityError::InvalidRendezvousReceiver)?;
+        if ivk.diversifier_index(&receiver).is_none() {
+            return Err(CoreRuntimeIdentityError::RendezvousMismatch);
+        }
+
+        Ok(ValidatedCoreRuntimeParameters { parameters: self })
+    }
+
+    fn validate_structure(&self) -> Result<(), CoreRuntimeIdentityError> {
         if self.runtime_protocol_id.is_empty() {
             return Err(CoreRuntimeIdentityError::EmptyRuntimeProtocolId);
         }
@@ -94,36 +119,47 @@ impl CoreRuntimeParameters {
 
         Ok(())
     }
+}
 
-    pub fn canonical_preimage(&self) -> Result<Vec<u8>, CoreRuntimeIdentityError> {
-        self.validate()?;
+/// Generic runtime context that has passed structural and cryptographic
+/// validation. Only this type can derive `CoreRuntimeId`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ValidatedCoreRuntimeParameters {
+    parameters: CoreRuntimeParameters,
+}
 
-        fn put_bytes(output: &mut Vec<u8>, bytes: &[u8]) -> Result<(), CoreRuntimeIdentityError> {
+impl ValidatedCoreRuntimeParameters {
+    pub const fn parameters(&self) -> &CoreRuntimeParameters {
+        &self.parameters
+    }
+
+    pub fn into_parameters(self) -> CoreRuntimeParameters {
+        self.parameters
+    }
+
+    pub fn canonical_preimage(&self) -> Vec<u8> {
+        fn put_bytes(output: &mut Vec<u8>, bytes: &[u8]) {
             let len =
-                u16::try_from(bytes.len()).map_err(|_| CoreRuntimeIdentityError::LengthTooLarge)?;
+                u16::try_from(bytes.len()).expect("validated runtime context length must fit u16");
             output.extend_from_slice(&len.to_be_bytes());
             output.extend_from_slice(bytes);
-            Ok(())
         }
 
         let mut output = Vec::new();
-        put_bytes(&mut output, &self.runtime_protocol_id)?;
-        output.extend_from_slice(&self.runtime_protocol_version.to_be_bytes());
-        put_bytes(&mut output, &self.zcash_network_domain)?;
-        output.push(self.zcash_network.code());
-        output.extend_from_slice(&self.runtime_activation_height.to_be_bytes());
-        put_bytes(&mut output, &self.carrier_protocol_id)?;
-        put_bytes(&mut output, &self.rendezvous_ivk)?;
-        put_bytes(&mut output, &self.rendezvous_receiver)?;
-        Ok(output)
+        put_bytes(&mut output, &self.parameters.runtime_protocol_id);
+        output.extend_from_slice(&self.parameters.runtime_protocol_version.to_be_bytes());
+        put_bytes(&mut output, &self.parameters.zcash_network_domain);
+        output.push(self.parameters.zcash_network.code());
+        output.extend_from_slice(&self.parameters.runtime_activation_height.to_be_bytes());
+        put_bytes(&mut output, &self.parameters.carrier_protocol_id);
+        put_bytes(&mut output, &self.parameters.rendezvous_ivk);
+        put_bytes(&mut output, &self.parameters.rendezvous_receiver);
+        output
     }
 
-    pub fn core_runtime_id(&self) -> Result<CoreRuntimeId, CoreRuntimeIdentityError> {
-        let preimage = self.canonical_preimage()?;
-        Ok(CoreRuntimeId::from_bytes(hash::hash(
-            &CORE_RUNTIME_ID_PERSONALIZATION,
-            &preimage,
-        )))
+    pub fn core_runtime_id(&self) -> CoreRuntimeId {
+        let preimage = self.canonical_preimage();
+        CoreRuntimeId::from_bytes(hash::hash(&CORE_RUNTIME_ID_PERSONALIZATION, &preimage))
     }
 }
 
@@ -174,16 +210,17 @@ mod tests {
     #[test]
     fn runtime_identity_vector_matches() {
         let (fixture, parameters) = vector_parameters();
+        let validated = parameters.validate().unwrap();
         assert_eq!(
             hex::encode(CORE_RUNTIME_ID_PERSONALIZATION),
             fixture["personalization_hex"].as_str().unwrap()
         );
         assert_eq!(
-            hex::encode(parameters.canonical_preimage().unwrap()),
+            hex::encode(validated.canonical_preimage()),
             fixture["canonical_preimage_hex"].as_str().unwrap()
         );
         assert_eq!(
-            hex::encode(parameters.core_runtime_id().unwrap().to_bytes()),
+            hex::encode(validated.core_runtime_id().to_bytes()),
             fixture["expected_core_runtime_id_hex"].as_str().unwrap()
         );
     }
@@ -191,7 +228,7 @@ mod tests {
     #[test]
     fn every_runtime_identity_field_is_bound() {
         let (_, parameters) = vector_parameters();
-        let expected = parameters.core_runtime_id().unwrap();
+        let expected = parameters.clone().validate().unwrap().core_runtime_id();
         let mut mutations = Vec::new();
 
         let mut changed = parameters.clone();
@@ -212,16 +249,25 @@ mod tests {
         let mut changed = parameters.clone();
         changed.carrier_protocol_id.push(b'2');
         mutations.push(changed);
-        let mut changed = parameters.clone();
-        changed.rendezvous_ivk[0] ^= 1;
-        mutations.push(changed);
-        let mut changed = parameters.clone();
-        changed.rendezvous_receiver[0] ^= 1;
-        mutations.push(changed);
 
         for changed in mutations {
-            assert_ne!(changed.core_runtime_id().unwrap(), expected);
+            assert_ne!(changed.validate().unwrap().core_runtime_id(), expected);
         }
+
+        let mut alternate = parameters;
+        alternate.rendezvous_ivk = hex::decode(
+            "3c6ec816597b0ab356ec564a094ab4649a770e145bc327f1168e00b45c0c46146a0efaad6c366747a1bb45ae4bb15b4afc5d856b465757a183f104a0fb0fd318",
+        )
+        .unwrap()
+        .try_into()
+        .unwrap();
+        alternate.rendezvous_receiver = hex::decode(
+            "6135f04526a269e5e05e2f255344256bc4f9addbc3d09e22f239fc776455468301dfcc9540c5e59dd2c983",
+        )
+        .unwrap()
+        .try_into()
+        .unwrap();
+        assert_ne!(alternate.validate().unwrap().core_runtime_id(), expected);
     }
 
     #[test]
@@ -231,32 +277,70 @@ mod tests {
         let mut changed = parameters.clone();
         changed.runtime_protocol_id.clear();
         assert_eq!(
-            changed.core_runtime_id(),
+            changed.validate(),
             Err(CoreRuntimeIdentityError::EmptyRuntimeProtocolId)
         );
         let mut changed = parameters.clone();
         changed.runtime_protocol_version = 0;
         assert_eq!(
-            changed.core_runtime_id(),
+            changed.validate(),
             Err(CoreRuntimeIdentityError::RuntimeProtocolVersion)
         );
         let mut changed = parameters.clone();
         changed.zcash_network_domain.clear();
         assert_eq!(
-            changed.core_runtime_id(),
+            changed.validate(),
             Err(CoreRuntimeIdentityError::EmptyZcashNetworkDomain)
         );
         let mut changed = parameters.clone();
         changed.runtime_activation_height = 0;
         assert_eq!(
-            changed.core_runtime_id(),
+            changed.validate(),
             Err(CoreRuntimeIdentityError::RuntimeActivationHeight)
         );
         let mut changed = parameters;
         changed.carrier_protocol_id.clear();
         assert_eq!(
-            changed.core_runtime_id(),
+            changed.validate(),
             Err(CoreRuntimeIdentityError::EmptyCarrierProtocolId)
+        );
+
+        let (_, mut changed) = vector_parameters();
+        changed.runtime_protocol_id = vec![0; usize::from(u16::MAX) + 1];
+        assert_eq!(
+            changed.validate(),
+            Err(CoreRuntimeIdentityError::LengthTooLarge)
+        );
+    }
+
+    #[test]
+    fn rendezvous_must_be_individually_valid_and_correspond() {
+        let (_, parameters) = vector_parameters();
+
+        let mut invalid_ivk = parameters.clone();
+        invalid_ivk.rendezvous_ivk = [0xff; 64];
+        assert_eq!(
+            invalid_ivk.validate(),
+            Err(CoreRuntimeIdentityError::InvalidRendezvousIvk)
+        );
+
+        let mut invalid_receiver = parameters.clone();
+        invalid_receiver.rendezvous_receiver = [0xff; 43];
+        assert_eq!(
+            invalid_receiver.validate(),
+            Err(CoreRuntimeIdentityError::InvalidRendezvousReceiver)
+        );
+
+        let mut mismatched = parameters;
+        mismatched.rendezvous_receiver = hex::decode(
+            "6135f04526a269e5e05e2f255344256bc4f9addbc3d09e22f239fc776455468301dfcc9540c5e59dd2c983",
+        )
+        .unwrap()
+        .try_into()
+        .unwrap();
+        assert_eq!(
+            mismatched.validate(),
+            Err(CoreRuntimeIdentityError::RendezvousMismatch)
         );
     }
 }

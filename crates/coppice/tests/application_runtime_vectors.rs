@@ -1,13 +1,14 @@
 use coppice::{
     carrier_v1,
-    config::{DeploymentParameters, Rendezvous},
+    config::{DeploymentParameters, DeploymentValidationError, Rendezvous},
     constants,
     envelope::{self, Operation},
     names_application::{
         NAMES_CANONICAL_APPLICATION_IDENTITY, NAMES_V1_APPLICATION_VERSION,
-        NamesApplicationEnvelopeError, NamesDeploymentId, decode_names_v1_envelope,
-        encode_names_v1_envelope, names_application_id, names_v1_application_descriptor,
-        names_v1_application_key,
+        NamesApplicationEnvelopeError, NamesCoreCompatibilityError, NamesDeploymentId,
+        decode_names_v1_envelope, encode_names_v1_envelope, names_application_id,
+        names_v1_application_descriptor, names_v1_application_key,
+        validate_names_v1_core_compatibility,
     },
 };
 use coppice_core::{
@@ -18,10 +19,28 @@ use coppice_core::{
     },
     identity::{CoreRuntimeId, CoreRuntimeParameters, ZcashNetwork},
 };
+use orchard::keys::IncomingViewingKey;
 use zcash_protocol::consensus::NetworkType;
 
 fn fixed32(value: &str) -> [u8; 32] {
     hex::decode(value).unwrap().try_into().unwrap()
+}
+
+fn alternate_rendezvous() -> ([u8; 64], [u8; 43]) {
+    (
+        hex::decode(
+            "3c6ec816597b0ab356ec564a094ab4649a770e145bc327f1168e00b45c0c46146a0efaad6c366747a1bb45ae4bb15b4afc5d856b465757a183f104a0fb0fd318",
+        )
+        .unwrap()
+        .try_into()
+        .unwrap(),
+        hex::decode(
+            "6135f04526a269e5e05e2f255344256bc4f9addbc3d09e22f239fc776455468301dfcc9540c5e59dd2c983",
+        )
+        .unwrap()
+        .try_into()
+        .unwrap(),
+    )
 }
 
 fn runtime_fixture() -> (serde_json::Value, CoreRuntimeParameters) {
@@ -111,7 +130,8 @@ fn three_identity_vector_and_future_transport_binding_match() {
     let (_, runtime_parameters) = runtime_fixture();
     let (deployment_fixture, names_parameters) = names_deployment_fixture();
 
-    let core_runtime_id = runtime_parameters.core_runtime_id().unwrap();
+    let validated_core = runtime_parameters.validate().unwrap();
+    let core_runtime_id = validated_core.core_runtime_id();
     let names_deployment_id = NamesDeploymentId::from_parameters(&names_parameters).unwrap();
     assert_eq!(
         core_runtime_id,
@@ -186,6 +206,15 @@ fn three_identity_vector_and_future_transport_binding_match() {
         carrier_v1::reconstruct_frames_v1(&frames, names_deployment_id.to_bytes()),
         Err(carrier_v1::Error::WrongDeployment)
     );
+
+    let compatibility = validate_names_v1_core_compatibility(
+        &validated_core,
+        &names_parameters,
+        names_v1_application_descriptor(names_parameters.activation_height),
+    )
+    .unwrap();
+    assert_eq!(compatibility.core_runtime_id(), core_runtime_id);
+    assert_eq!(compatibility.names_deployment_id(), names_deployment_id);
 }
 
 #[test]
@@ -196,7 +225,8 @@ fn core_runtime_identity_is_independent_of_names_policy_and_application_activati
     .unwrap();
     let (_, runtime_parameters) = runtime_fixture();
     let (_, names_parameters) = names_deployment_fixture();
-    let runtime_id = runtime_parameters.core_runtime_id().unwrap();
+    let validated_core = runtime_parameters.clone().validate().unwrap();
+    let runtime_id = validated_core.core_runtime_id();
     let names_id = NamesDeploymentId::from_parameters(&names_parameters).unwrap();
 
     let mut mutations = Vec::new();
@@ -218,7 +248,7 @@ fn core_runtime_identity_is_independent_of_names_policy_and_application_activati
             NamesDeploymentId::from_parameters(&changed).unwrap(),
             names_id
         );
-        assert_eq!(runtime_parameters.core_runtime_id().unwrap(), runtime_id);
+        assert_eq!(validated_core.core_runtime_id(), runtime_id);
     }
 
     let names_at_runtime =
@@ -241,7 +271,144 @@ fn core_runtime_identity_is_independent_of_names_policy_and_application_activati
         later_application.validate_for_runtime(runtime_parameters.runtime_activation_height),
         Ok(())
     );
-    assert_eq!(runtime_parameters.core_runtime_id().unwrap(), runtime_id);
+    assert_eq!(validated_core.core_runtime_id(), runtime_id);
+}
+
+#[test]
+fn names_core_compatibility_rejects_each_shared_context_mismatch() {
+    let (_, core_parameters) = runtime_fixture();
+    let (_, names_parameters) = names_deployment_fixture();
+    let application = names_v1_application_descriptor(names_parameters.activation_height);
+    let validated_core = core_parameters.clone().validate().unwrap();
+    assert!(
+        validate_names_v1_core_compatibility(&validated_core, &names_parameters, application)
+            .is_ok()
+    );
+
+    let mut invalid_names = names_parameters.clone();
+    invalid_names.minimum_bond_value = 0;
+    assert_eq!(
+        validate_names_v1_core_compatibility(&validated_core, &invalid_names, application),
+        Err(NamesCoreCompatibilityError::InvalidNamesDeployment(
+            DeploymentValidationError::MinimumBondValue
+        ))
+    );
+
+    let mut wrong_protocol = core_parameters.clone();
+    wrong_protocol.runtime_protocol_version += 1;
+    assert_eq!(
+        validate_names_v1_core_compatibility(
+            &wrong_protocol.validate().unwrap(),
+            &names_parameters,
+            application,
+        ),
+        Err(NamesCoreCompatibilityError::RuntimeProtocol)
+    );
+
+    let mut wrong_carrier = core_parameters.clone();
+    wrong_carrier.carrier_protocol_id = b"CPV2".to_vec();
+    assert_eq!(
+        validate_names_v1_core_compatibility(
+            &wrong_carrier.validate().unwrap(),
+            &names_parameters,
+            application,
+        ),
+        Err(NamesCoreCompatibilityError::CarrierProtocol)
+    );
+
+    let mut wrong_network = core_parameters.clone();
+    wrong_network.zcash_network = ZcashNetwork::Test;
+    assert_eq!(
+        validate_names_v1_core_compatibility(
+            &wrong_network.validate().unwrap(),
+            &names_parameters,
+            application,
+        ),
+        Err(NamesCoreCompatibilityError::ZcashNetwork)
+    );
+
+    let mut wrong_domain = core_parameters.clone();
+    wrong_domain.zcash_network_domain.push(b'2');
+    assert_eq!(
+        validate_names_v1_core_compatibility(
+            &wrong_domain.validate().unwrap(),
+            &names_parameters,
+            application,
+        ),
+        Err(NamesCoreCompatibilityError::ZcashNetworkDomain)
+    );
+
+    let mut unsupported_names_domain = names_parameters.clone();
+    unsupported_names_domain.network_id = b"unsupported-names-domain".to_vec();
+    assert_eq!(
+        validate_names_v1_core_compatibility(
+            &validated_core,
+            &unsupported_names_domain,
+            application,
+        ),
+        Err(NamesCoreCompatibilityError::UnsupportedNamesNetworkDomain)
+    );
+
+    let (alternate_ivk, alternate_receiver) = alternate_rendezvous();
+    let mut wrong_rendezvous = core_parameters.clone();
+    wrong_rendezvous.rendezvous_ivk = alternate_ivk;
+    wrong_rendezvous.rendezvous_receiver = alternate_receiver;
+    assert_eq!(
+        validate_names_v1_core_compatibility(
+            &wrong_rendezvous.validate().unwrap(),
+            &names_parameters,
+            application,
+        ),
+        Err(NamesCoreCompatibilityError::RendezvousIvk)
+    );
+
+    let ivk = Option::<IncomingViewingKey>::from(IncomingViewingKey::from_bytes(
+        &core_parameters.rendezvous_ivk,
+    ))
+    .unwrap();
+    let mut wrong_receiver = core_parameters.clone();
+    wrong_receiver.rendezvous_receiver = ivk.address_at(1u32).to_raw_address_bytes();
+    assert_ne!(
+        wrong_receiver.rendezvous_receiver,
+        names_parameters.rendezvous.orchard_receiver
+    );
+    assert_eq!(
+        validate_names_v1_core_compatibility(
+            &wrong_receiver.validate().unwrap(),
+            &names_parameters,
+            application,
+        ),
+        Err(NamesCoreCompatibilityError::RendezvousReceiver)
+    );
+
+    let wrong_application = ApplicationDescriptor {
+        key: ApplicationKey::new(derive_application_id(b"example.other").unwrap(), 1),
+        activation_height: names_parameters.activation_height,
+    };
+    assert_eq!(
+        validate_names_v1_core_compatibility(&validated_core, &names_parameters, wrong_application,),
+        Err(NamesCoreCompatibilityError::ApplicationKey)
+    );
+
+    let later_application = ApplicationDescriptor {
+        key: names_v1_application_key(),
+        activation_height: names_parameters.activation_height + 1,
+    };
+    assert_eq!(
+        later_application.validate_for_runtime(core_parameters.runtime_activation_height),
+        Ok(())
+    );
+    assert_eq!(
+        validate_names_v1_core_compatibility(&validated_core, &names_parameters, later_application,),
+        Err(NamesCoreCompatibilityError::ApplicationActivation)
+    );
+
+    let mut later_names = names_parameters;
+    later_names.activation_height += 1;
+    assert_eq!(
+        validate_names_v1_core_compatibility(&validated_core, &later_names, later_application,),
+        Err(NamesCoreCompatibilityError::NamesV1RuntimeActivation)
+    );
 }
 
 #[test]

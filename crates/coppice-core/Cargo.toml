@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 blake2b_simd.workspace = true
+orchard.workspace = true
 
 [dev-dependencies]
 hex.workspace = true
