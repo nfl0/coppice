@@ -1,6 +1,21 @@
 # Coppice
 
-Coppice is a pre-release adminless naming protocol built on Zcash.
+Coppice is a pre-release deterministic application runtime over Zcash. Coppice
+Names v1 is its first application.
+
+The production path is:
+
+```text
+host-selected CompactBlocks
+  -> candidate-only full transaction fetch
+  -> coppice-core canonical replay and Ironwood checkpoints
+  -> CPV1(CoreRuntimeId) -> CA01(ApplicationId, version)
+  -> independently owned Coppice Names state/root/undo
+```
+
+Core performs no fork choice and contains no Names, bond, owner, address, or
+operation semantics. See `docs/RUNTIME_ARCHITECTURE.md` for the stable crate and
+wallet integration boundaries.
 
 ## Shielded protocol scope
 

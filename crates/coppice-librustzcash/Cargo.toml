@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 coppice.workspace = true
+coppice-core.workspace = true
 orchard.workspace = true
 rand_core.workspace = true
 serde.workspace = true

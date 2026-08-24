@@ -5,7 +5,7 @@
 
 use std::fmt::Debug;
 
-use coppice::reducer::{Reducer, ReplayTip, RewindError};
+use coppice::names_runtime::{CoreReplayTip, NamesRuntime, NamesRuntimeRewindError};
 use zcash_client_backend::proto::compact_formats::CompactBlock;
 use zcash_protocol::consensus::Parameters;
 
@@ -17,8 +17,8 @@ pub struct CanonicalTip {
     pub block_hash: [u8; 32],
 }
 
-impl From<ReplayTip> for CanonicalTip {
-    fn from(tip: ReplayTip) -> Self {
+impl From<CoreReplayTip> for CanonicalTip {
+    fn from(tip: CoreReplayTip) -> Self {
         Self {
             height: tip.height,
             block_hash: tip.block_hash,
@@ -81,12 +81,12 @@ pub enum ReconcileKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ReconcileOutcome {
     pub kind: ReconcileKind,
-    pub original_tip: ReplayTip,
+    pub original_tip: CoreReplayTip,
     pub observed_host_tip: CanonicalTip,
-    pub common_ancestor: Option<ReplayTip>,
+    pub common_ancestor: Option<CoreReplayTip>,
     pub blocks_rewound: u32,
     pub blocks_applied: u32,
-    pub final_tip: ReplayTip,
+    pub final_tip: CoreReplayTip,
 }
 
 #[derive(Debug)]
@@ -103,7 +103,7 @@ pub enum ReconcileError<CanonicalError: Debug, FullTxError: Debug> {
         current: CanonicalTip,
     },
     NoRetainedCommonAncestor,
-    Rewind(RewindError),
+    Rewind(NamesRuntimeRewindError),
     CompactBlockApply {
         height: u32,
         error: CompactBlockApplyError<FullTxError>,
@@ -178,7 +178,7 @@ where
 /// block-atomic and resumable rather than range-transactional.
 pub fn reconcile_canonical_chain<P, C, F>(
     params: &P,
-    reducer: &mut Reducer,
+    runtime: &mut NamesRuntime,
     canonical_source: &mut C,
     full_tx_source: &mut F,
 ) -> Result<ReconcileOutcome, ReconcileError<C::Error, F::Error>>
@@ -189,7 +189,7 @@ where
 {
     reconcile_canonical_chain_with_progress(
         params,
-        reducer,
+        runtime,
         canonical_source,
         full_tx_source,
         |_| true,
@@ -198,21 +198,21 @@ where
 
 /// Reconciles while invoking `persist_progress` after a successful rewind and
 /// after each successfully applied canonical block. Returning `false` stops
-/// immediately at that durable boundary; the reducer remains at exactly the
+/// immediately at that durable boundary; the runtime remains at exactly the
 /// state presented to the callback.
 pub fn reconcile_canonical_chain_with_progress<P, C, F>(
     params: &P,
-    reducer: &mut Reducer,
+    runtime: &mut NamesRuntime,
     canonical_source: &mut C,
     full_tx_source: &mut F,
-    mut persist_progress: impl FnMut(&Reducer) -> bool,
+    mut persist_progress: impl FnMut(&NamesRuntime) -> bool,
 ) -> Result<ReconcileOutcome, ReconcileError<C::Error, F::Error>>
 where
     P: Parameters,
     C: CanonicalBlockSource,
     F: FullTransactionSource,
 {
-    let original_tip = reducer.tip();
+    let original_tip = runtime.tip();
     let observed_host_tip = canonical_source
         .canonical_tip()
         .map_err(ReconcileError::CanonicalBlockSource)?;
@@ -230,7 +230,7 @@ where
         });
     }
 
-    let activation_height = reducer.deployment().activation_height;
+    let activation_height = runtime.deployment().activation_height;
     let activation_base = activation_height
         .checked_sub(1)
         .ok_or(ReconcileError::ArithmeticOverflow)?;
@@ -249,10 +249,10 @@ where
         (ReconcileKind::Forward, None, 0)
     } else {
         let search_top = original_tip.height.min(observed_host_tip.height);
-        let search_floor = reducer.oldest_rewind_height().max(activation_base);
+        let search_floor = runtime.oldest_rewind_height().max(activation_base);
         let mut common = None;
         for height in (search_floor..=search_top).rev() {
-            let Some(local) = reducer.retained_tip_at(height) else {
+            let Some(local) = runtime.retained_tip_at(height) else {
                 continue;
             };
             let canonical_hash = canonical_hash_at::<C, F::Error>(
@@ -271,17 +271,17 @@ where
             .height
             .checked_sub(common.height)
             .ok_or(ReconcileError::ArithmeticOverflow)?;
-        reducer
+        runtime
             .rewind_to(common.height)
             .map_err(ReconcileError::Rewind)?;
-        if !persist_progress(reducer) {
+        if !persist_progress(runtime) {
             return Err(ReconcileError::ProgressPersistenceFailed);
         }
         (ReconcileKind::Reorg, Some(common), rewound)
     };
 
     let mut blocks_applied = 0u32;
-    let start = reducer
+    let start = runtime
         .tip()
         .height
         .checked_add(1)
@@ -304,9 +304,9 @@ where
                     )?,
                 });
             }
-            apply_compact_block(params, reducer, &block, full_tx_source)
+            apply_compact_block(params, runtime, &block, full_tx_source)
                 .map_err(|error| ReconcileError::CompactBlockApply { height, error })?;
-            if !persist_progress(reducer) {
+            if !persist_progress(runtime) {
                 return Err(ReconcileError::ProgressPersistenceFailed);
             }
             blocks_applied = blocks_applied
@@ -349,7 +349,7 @@ where
         common_ancestor,
         blocks_rewound,
         blocks_applied,
-        final_tip: reducer.tip(),
+        final_tip: runtime.tip(),
     })
 }
 
@@ -359,7 +359,7 @@ mod tests {
 
     use coppice::{
         config::{DeploymentParameters, REGTEST, Rendezvous},
-        reducer::{ActivationCheckpoint, IronwoodFrontier},
+        names_runtime::{CoreReplayActivationCheckpoint, IronwoodFrontier},
     };
     use orchard::{
         note::{ExtractedNoteCommitment, Note, NoteVersion, Nullifier, RandomSeed, Rho},
@@ -407,11 +407,11 @@ mod tests {
         }
     }
 
-    fn new_reducer() -> Reducer {
+    fn new_reducer() -> NamesRuntime {
         let deployment = deployment();
-        Reducer::new(
+        NamesRuntime::new(
             deployment.clone(),
-            ActivationCheckpoint {
+            CoreReplayActivationCheckpoint {
                 height: deployment.activation_height - 1,
                 block_hash: [9; 32],
                 ironwood_frontier: IronwoodFrontier::empty(),
@@ -639,10 +639,10 @@ mod tests {
         }
     }
 
-    fn apply_history(reducer: &mut Reducer, blocks: &BTreeMap<u32, CompactBlock>) {
+    fn apply_history(runtime: &mut NamesRuntime, blocks: &BTreeMap<u32, CompactBlock>) {
         let mut full = FullSource::default();
         for block in blocks.values() {
-            apply_compact_block(&params(), reducer, block, &mut full).unwrap();
+            apply_compact_block(&params(), runtime, block, &mut full).unwrap();
         }
         assert_eq!(full.calls, 0);
     }
@@ -654,7 +654,7 @@ mod tests {
         }
     }
 
-    fn assert_same_reducer(left: &Reducer, right: &Reducer) {
+    fn assert_same_reducer(left: &NamesRuntime, right: &NamesRuntime) {
         assert_eq!(left.tip(), right.tip());
         assert_eq!(left.state(), right.state());
         assert_eq!(
@@ -674,11 +674,11 @@ mod tests {
 
     #[test]
     fn already_current_does_no_history_or_full_transaction_work() {
-        let mut reducer = new_reducer();
-        let mut source = Source::new(BTreeMap::new(), reducer.tip().into());
+        let mut runtime = new_reducer();
+        let mut source = Source::new(BTreeMap::new(), runtime.tip().into());
         let mut full = FullSource::default();
         let outcome =
-            reconcile_canonical_chain(&params(), &mut reducer, &mut source, &mut full).unwrap();
+            reconcile_canonical_chain(&params(), &mut runtime, &mut source, &mut full).unwrap();
         assert_eq!(outcome.kind, ReconcileKind::AlreadyCurrent);
         assert!(source.block_calls.is_empty());
         assert_eq!(source.tip_calls, 1);
@@ -688,39 +688,39 @@ mod tests {
     #[test]
     fn activation_and_forward_catch_up_are_ascending_and_complete() {
         let history = chain(&[(1, 1, 11), (2, 2, 12), (3, 3, 13)]);
-        let mut reducer = new_reducer();
+        let mut runtime = new_reducer();
         let mut source = Source::new(history.clone(), tip(3, 3));
         let mut full = FullSource::default();
         let outcome =
-            reconcile_canonical_chain(&params(), &mut reducer, &mut source, &mut full).unwrap();
+            reconcile_canonical_chain(&params(), &mut runtime, &mut source, &mut full).unwrap();
         assert_eq!(outcome.kind, ReconcileKind::Forward);
         assert_eq!(outcome.blocks_applied, 3);
         assert_eq!(source.block_calls, vec![1, 1, 2, 3]);
         assert!(!source.block_calls.contains(&0));
-        assert_eq!(reducer.tip().height, 3);
-        assert_eq!(reducer.ironwood_frontier().size(), 3);
+        assert_eq!(runtime.tip().height, 3);
+        assert_eq!(runtime.ironwood_frontier().size(), 3);
 
         let mut source = Source::new(
             chain(&[(1, 1, 11), (2, 2, 12), (3, 3, 13), (4, 4, 14)]),
             tip(4, 4),
         );
         let outcome =
-            reconcile_canonical_chain(&params(), &mut reducer, &mut source, &mut full).unwrap();
+            reconcile_canonical_chain(&params(), &mut runtime, &mut source, &mut full).unwrap();
         assert_eq!(outcome.kind, ReconcileKind::Forward);
         assert_eq!(outcome.blocks_applied, 1);
-        assert_eq!(reducer.tip().height, 4);
+        assert_eq!(runtime.tip().height, 4);
     }
 
     #[test]
     fn progress_callback_exposes_each_durable_block_boundary_and_can_stop() {
         let history = chain(&[(1, 1, 11), (2, 2, 12), (3, 3, 13)]);
-        let mut reducer = new_reducer();
+        let mut runtime = new_reducer();
         let mut source = Source::new(history, tip(3, 3));
         let mut full = FullSource::default();
         let mut persisted = vec![];
         let error = reconcile_canonical_chain_with_progress(
             &params(),
-            &mut reducer,
+            &mut runtime,
             &mut source,
             &mut full,
             |progress| {
@@ -731,7 +731,7 @@ mod tests {
         .unwrap_err();
         assert!(matches!(error, ReconcileError::ProgressPersistenceFailed));
         assert_eq!(persisted, vec![1, 2]);
-        assert_eq!(reducer.tip().height, 2);
+        assert_eq!(runtime.tip().height, 2);
         assert!(!source.block_calls.contains(&3));
     }
 
@@ -739,37 +739,37 @@ mod tests {
     fn one_block_reorg_removes_old_effects_and_applies_replacement() {
         let old = chain(&[(1, 10, 20)]);
         let replacement = chain(&[(1, 11, 21)]);
-        let mut reducer = new_reducer();
-        apply_history(&mut reducer, &old);
-        let old_root = reducer.ironwood_frontier().root();
+        let mut runtime = new_reducer();
+        apply_history(&mut runtime, &old);
+        let old_root = runtime.ironwood_frontier().root();
         let mut source = Source::new(replacement.clone(), tip(1, 11));
         let mut full = FullSource::default();
         let outcome =
-            reconcile_canonical_chain(&params(), &mut reducer, &mut source, &mut full).unwrap();
+            reconcile_canonical_chain(&params(), &mut runtime, &mut source, &mut full).unwrap();
         assert_eq!(outcome.common_ancestor.unwrap().height, 0);
         assert_eq!(outcome.blocks_rewound, 1);
-        assert_ne!(reducer.ironwood_frontier().root(), old_root);
+        assert_ne!(runtime.ironwood_frontier().root(), old_root);
         let mut fresh = new_reducer();
         apply_history(&mut fresh, &replacement);
-        assert_same_reducer(&reducer, &fresh);
+        assert_same_reducer(&runtime, &fresh);
     }
 
     #[test]
     fn highest_common_ancestor_is_not_unnecessarily_deep() {
         let old = chain(&[(1, 1, 31), (2, 2, 32), (3, 3, 33), (4, 40, 34)]);
         let replacement = chain(&[(1, 1, 31), (2, 2, 32), (3, 3, 33), (4, 41, 44), (5, 5, 45)]);
-        let mut reducer = new_reducer();
-        apply_history(&mut reducer, &old);
+        let mut runtime = new_reducer();
+        apply_history(&mut runtime, &old);
         let mut source = Source::new(replacement.clone(), tip(5, 5));
         let mut full = FullSource::default();
         let outcome =
-            reconcile_canonical_chain(&params(), &mut reducer, &mut source, &mut full).unwrap();
+            reconcile_canonical_chain(&params(), &mut runtime, &mut source, &mut full).unwrap();
         assert_eq!(outcome.common_ancestor.unwrap().height, 3);
         assert_eq!(outcome.blocks_rewound, 1);
         assert_eq!(outcome.blocks_applied, 2);
         let mut fresh = new_reducer();
         apply_history(&mut fresh, &replacement);
-        assert_same_reducer(&reducer, &fresh);
+        assert_same_reducer(&runtime, &fresh);
     }
 
     #[test]
@@ -782,33 +782,33 @@ mod tests {
             (4, 14, 154),
             (5, 15, 155),
         ]);
-        let mut reducer = new_reducer();
-        apply_history(&mut reducer, &old);
+        let mut runtime = new_reducer();
+        apply_history(&mut runtime, &old);
         let mut source = Source::new(replacement.clone(), tip(5, 15));
         let mut full = FullSource::default();
         let outcome =
-            reconcile_canonical_chain(&params(), &mut reducer, &mut source, &mut full).unwrap();
+            reconcile_canonical_chain(&params(), &mut runtime, &mut source, &mut full).unwrap();
         assert_eq!(outcome.common_ancestor.unwrap().height, 1);
         assert_eq!(outcome.blocks_rewound, 3);
         assert_eq!(outcome.blocks_applied, 4);
         let mut fresh = new_reducer();
         apply_history(&mut fresh, &replacement);
-        assert_same_reducer(&reducer, &fresh);
+        assert_same_reducer(&runtime, &fresh);
     }
 
     #[test]
     fn reducer_ahead_rewinds_to_host_tip_without_replay() {
         let history = chain(&[(1, 1, 51), (2, 2, 52), (3, 3, 53)]);
-        let mut reducer = new_reducer();
-        apply_history(&mut reducer, &history);
+        let mut runtime = new_reducer();
+        apply_history(&mut runtime, &history);
         let mut source = Source::new(history, tip(2, 2));
         let mut full = FullSource::default();
         let outcome =
-            reconcile_canonical_chain(&params(), &mut reducer, &mut source, &mut full).unwrap();
+            reconcile_canonical_chain(&params(), &mut runtime, &mut source, &mut full).unwrap();
         assert_eq!(outcome.common_ancestor.unwrap().height, 2);
         assert_eq!(outcome.blocks_rewound, 1);
         assert_eq!(outcome.blocks_applied, 0);
-        assert_eq!(reducer.tip().height, 2);
+        assert_eq!(runtime.tip().height, 2);
     }
 
     #[test]
@@ -816,41 +816,41 @@ mod tests {
         let old = chain(&[(1, 1, 61)]);
         let mut foreign = chain(&[(1, 2, 62)]);
         foreign.get_mut(&1).unwrap().prev_hash = vec![8; 32];
-        let mut reducer = new_reducer();
-        apply_history(&mut reducer, &old);
-        let before_tip = reducer.tip();
-        let before_root = reducer.ironwood_frontier().root();
+        let mut runtime = new_reducer();
+        apply_history(&mut runtime, &old);
+        let before_tip = runtime.tip();
+        let before_root = runtime.ironwood_frontier().root();
         let mut source = Source::new(foreign, tip(1, 2));
         let mut full = FullSource::default();
         assert!(matches!(
-            reconcile_canonical_chain(&params(), &mut reducer, &mut source, &mut full),
+            reconcile_canonical_chain(&params(), &mut runtime, &mut source, &mut full),
             Err(ReconcileError::NoRetainedCommonAncestor)
         ));
-        assert_eq!(reducer.tip(), before_tip);
-        assert_eq!(reducer.ironwood_frontier().root(), before_root);
+        assert_eq!(runtime.tip(), before_tip);
+        assert_eq!(runtime.ironwood_frontier().root(), before_root);
     }
 
     #[test]
     fn phase6_fork_beyond_retained_horizon_requires_atomic_rebuild() {
         let old = retained_horizon_chain(1);
         let replacement = retained_horizon_chain(2);
-        let mut reducer = new_reducer();
-        apply_history(&mut reducer, &old);
-        assert_eq!(reducer.reorg_retention_blocks(), 121);
-        assert_eq!(reducer.oldest_rewind_height(), 29);
-        assert_eq!(reducer.tip().height - 1, 149);
+        let mut runtime = new_reducer();
+        apply_history(&mut runtime, &old);
+        assert_eq!(runtime.reorg_retention_blocks(), 121);
+        assert_eq!(runtime.oldest_rewind_height(), 29);
+        assert_eq!(runtime.tip().height - 1, 149);
 
-        let before = reducer.save_snapshot().unwrap();
+        let before = runtime.save_snapshot().unwrap();
         let mut source = Source::new(
             replacement.clone(),
             tip(150, 2u8.wrapping_mul(0x40).wrapping_add(150u8)),
         );
         let mut full = FullSource::default();
         assert!(matches!(
-            reconcile_canonical_chain(&params(), &mut reducer, &mut source, &mut full),
+            reconcile_canonical_chain(&params(), &mut runtime, &mut source, &mut full),
             Err(ReconcileError::NoRetainedCommonAncestor)
         ));
-        assert_eq!(reducer.save_snapshot().unwrap(), before);
+        assert_eq!(runtime.save_snapshot().unwrap(), before);
 
         // Rebuild from the activation checkpoint, then independently replay
         // the same replacement chain to establish deterministic equivalence.
@@ -869,23 +869,23 @@ mod tests {
     fn ancestor_source_failure_is_pre_rewind_atomic() {
         let old = chain(&[(1, 1, 71), (2, 2, 72), (3, 3, 73)]);
         let replacement = chain(&[(1, 1, 71), (2, 20, 82), (3, 30, 83)]);
-        let mut reducer = new_reducer();
-        apply_history(&mut reducer, &old);
-        let before_tip = reducer.tip();
-        let before_state = reducer.state().clone();
-        let before_root = reducer.ironwood_frontier().root();
-        let before_checkpoints = reducer.ironwood_checkpoints().clone();
+        let mut runtime = new_reducer();
+        apply_history(&mut runtime, &old);
+        let before_tip = runtime.tip();
+        let before_state = runtime.state().clone();
+        let before_root = runtime.ironwood_frontier().root();
+        let before_checkpoints = runtime.ironwood_checkpoints().clone();
         let mut source = Source::new(replacement, tip(3, 30));
         source.fail_at = Some(2);
         let mut full = FullSource::default();
         assert!(matches!(
-            reconcile_canonical_chain(&params(), &mut reducer, &mut source, &mut full),
+            reconcile_canonical_chain(&params(), &mut runtime, &mut source, &mut full),
             Err(ReconcileError::CanonicalBlockSource(SourceError::Failed(2)))
         ));
-        assert_eq!(reducer.tip(), before_tip);
-        assert_eq!(reducer.state(), &before_state);
-        assert_eq!(reducer.ironwood_frontier().root(), before_root);
-        assert_eq!(reducer.ironwood_checkpoints(), &before_checkpoints);
+        assert_eq!(runtime.tip(), before_tip);
+        assert_eq!(runtime.state(), &before_state);
+        assert_eq!(runtime.ironwood_frontier().root(), before_root);
+        assert_eq!(runtime.ironwood_checkpoints(), &before_checkpoints);
         assert_eq!(full.calls, 0);
     }
 
@@ -893,30 +893,30 @@ mod tests {
     fn post_rewind_failure_keeps_only_successful_canonical_progress_and_retry_converges() {
         let old = chain(&[(1, 1, 91), (2, 2, 92), (3, 3, 93)]);
         let replacement = chain(&[(1, 10, 101), (2, 20, 102), (3, 30, 103)]);
-        let mut reducer = new_reducer();
-        apply_history(&mut reducer, &old);
+        let mut runtime = new_reducer();
+        apply_history(&mut runtime, &old);
         let mut broken = replacement.clone();
         broken.get_mut(&2).unwrap().vtx[0].ironwood_actions[0].cmx = vec![0; 31];
         let mut source = Source::new(broken, tip(3, 30));
         let mut full = FullSource::default();
         assert!(matches!(
-            reconcile_canonical_chain(&params(), &mut reducer, &mut source, &mut full),
+            reconcile_canonical_chain(&params(), &mut runtime, &mut source, &mut full),
             Err(ReconcileError::CompactBlockApply { height: 2, .. })
         ));
         assert_eq!(
-            reducer.tip(),
-            ReplayTip {
+            runtime.tip(),
+            CoreReplayTip {
                 height: 1,
                 block_hash: [10; 32]
             }
         );
-        assert!(!reducer.has_rewind_snapshot(2));
+        assert!(!runtime.has_rewind_snapshot(2));
 
         let mut retry = Source::new(replacement.clone(), tip(3, 30));
-        reconcile_canonical_chain(&params(), &mut reducer, &mut retry, &mut full).unwrap();
+        reconcile_canonical_chain(&params(), &mut runtime, &mut retry, &mut full).unwrap();
         let mut fresh = new_reducer();
         apply_history(&mut fresh, &replacement);
-        assert_same_reducer(&reducer, &fresh);
+        assert_same_reducer(&runtime, &fresh);
     }
 
     #[test]
@@ -924,52 +924,52 @@ mod tests {
         let old = chain(&[(1, 1, 111)]);
         let mut replacement = chain(&[(1, 10, 112)]);
         replacement.get_mut(&1).unwrap().vtx[0].ironwood_actions[0].cmx = vec![0; 31];
-        let mut reducer = new_reducer();
-        apply_history(&mut reducer, &old);
+        let mut runtime = new_reducer();
+        apply_history(&mut runtime, &old);
         let mut source = Source::new(replacement, tip(1, 10));
         let mut full = FullSource::default();
         assert!(matches!(
-            reconcile_canonical_chain(&params(), &mut reducer, &mut source, &mut full),
+            reconcile_canonical_chain(&params(), &mut runtime, &mut source, &mut full),
             Err(ReconcileError::CompactBlockApply { height: 1, .. })
         ));
-        assert_eq!(reducer.tip().height, 0);
-        assert_ne!(reducer.tip().block_hash, [1; 32]);
+        assert_eq!(runtime.tip().height, 0);
+        assert_ne!(runtime.tip().block_hash, [1; 32]);
     }
 
     #[test]
     fn benign_host_tip_advancement_keeps_the_completed_pass_successful() {
         let history = chain(&[(1, 1, 121)]);
-        let mut reducer = new_reducer();
+        let mut runtime = new_reducer();
         let mut source = Source::new(history.clone(), tip(1, 1));
         source.later_tip = Some(tip(2, 2));
         let mut full = FullSource::default();
         let outcome =
-            reconcile_canonical_chain(&params(), &mut reducer, &mut source, &mut full).unwrap();
+            reconcile_canonical_chain(&params(), &mut runtime, &mut source, &mut full).unwrap();
         assert_eq!(outcome.observed_host_tip, tip(1, 1));
-        assert_eq!(reducer.tip().height, 1);
+        assert_eq!(runtime.tip().height, 1);
         assert!(!source.block_calls.contains(&2));
     }
 
     #[test]
     fn frozen_host_tip_never_chases_an_advancing_transport() {
         let history = chain(&[(1, 1, 131), (2, 2, 132), (3, 3, 133), (4, 4, 134)]);
-        let mut reducer = new_reducer();
+        let mut runtime = new_reducer();
         let mut transport = Source::new(history.clone(), tip(4, 4));
         transport.later_tip = Some(tip(5, 5));
         let mut source = FrozenCanonicalBlockSource::new(transport, tip(3, 3));
         let mut full = FullSource::default();
         let outcome =
-            reconcile_canonical_chain(&params(), &mut reducer, &mut source, &mut full).unwrap();
+            reconcile_canonical_chain(&params(), &mut runtime, &mut source, &mut full).unwrap();
         assert_eq!(outcome.observed_host_tip, tip(3, 3));
-        assert_eq!(reducer.tip().height, 3);
+        assert_eq!(runtime.tip().height, 3);
         assert!(!source.source().block_calls.contains(&4));
         assert_eq!(source.source().tip_calls, 0);
-        let host = crate::WalletCanonicalTip::from(reducer.tip());
+        let host = crate::WalletCanonicalTip::from(runtime.tip());
         let mut backend = EmptyLockBackend;
         crate::with_coppice_spend_guard(
             crate::CoppiceProtectionMode::Enabled,
             &TestHost(host),
-            &reducer,
+            &runtime,
             &crate::PendingRegistrationCollection::new(),
             crate::WalletAccountId::from_bytes([0x11; 32]),
             crate::IronwoodViewingCapability::FullViewing,
@@ -981,52 +981,52 @@ mod tests {
         let transport = Source::new(history, tip(4, 4));
         let mut source = FrozenCanonicalBlockSource::new(transport, tip(4, 4));
         let outcome =
-            reconcile_canonical_chain(&params(), &mut reducer, &mut source, &mut full).unwrap();
+            reconcile_canonical_chain(&params(), &mut runtime, &mut source, &mut full).unwrap();
         assert_eq!(outcome.blocks_applied, 1);
-        assert_eq!(reducer.tip().height, 4);
+        assert_eq!(runtime.tip().height, 4);
     }
 
     #[test]
     fn observed_tip_reorg_and_host_rollback_are_explicit() {
         let initial = chain(&[(1, 1, 122)]);
         let replacement = chain(&[(1, 10, 123), (2, 20, 124)]);
-        let mut reducer = new_reducer();
+        let mut runtime = new_reducer();
         let mut source = Source::new(initial, tip(1, 1));
         source.later_tip = Some(tip(2, 20));
         source.later_blocks = Some(replacement);
         let mut full = FullSource::default();
         assert!(matches!(
-            reconcile_canonical_chain(&params(), &mut reducer, &mut source, &mut full),
+            reconcile_canonical_chain(&params(), &mut runtime, &mut source, &mut full),
             Err(ReconcileError::CanonicalHistoryChanged { .. })
         ));
         assert_eq!(
-            reducer.tip(),
-            ReplayTip {
+            runtime.tip(),
+            CoreReplayTip {
                 height: 1,
                 block_hash: [1; 32]
             }
         );
 
         let initial = chain(&[(1, 1, 125)]);
-        let mut reducer = new_reducer();
+        let mut runtime = new_reducer();
         let mut source = Source::new(initial, tip(1, 1));
         source.later_tip = Some(tip(0, 9));
         assert!(matches!(
-            reconcile_canonical_chain(&params(), &mut reducer, &mut source, &mut full),
+            reconcile_canonical_chain(&params(), &mut runtime, &mut source, &mut full),
             Err(ReconcileError::CanonicalHistoryChanged { .. })
         ));
-        assert_eq!(reducer.tip().height, 1);
+        assert_eq!(runtime.tip().height, 1);
     }
 
     #[test]
     fn rendezvous_candidate_uses_existing_full_transaction_path_once() {
         let mut history = chain(&[(1, 1, 131)]);
         history.get_mut(&1).unwrap().vtx[0].ironwood_actions = vec![candidate_action()];
-        let mut reducer = new_reducer();
+        let mut runtime = new_reducer();
         let mut source = Source::new(history, tip(1, 1));
         let mut full = FullSource::default();
         assert!(matches!(
-            reconcile_canonical_chain(&params(), &mut reducer, &mut source, &mut full),
+            reconcile_canonical_chain(&params(), &mut runtime, &mut source, &mut full),
             Err(ReconcileError::CompactBlockApply {
                 height: 1,
                 error: CompactBlockApplyError::Prepare(
@@ -1035,7 +1035,7 @@ mod tests {
             })
         ));
         assert_eq!(full.calls, 1);
-        assert_eq!(reducer.tip().height, 0);
+        assert_eq!(runtime.tip().height, 0);
     }
 
     #[test]
@@ -1047,13 +1047,13 @@ mod tests {
             history.insert(height, block(height, hash, prev, hash));
             prev = [hash; 32];
         }
-        let mut reducer = new_reducer();
+        let mut runtime = new_reducer();
         let mut source = Source::new(history, tip(200, 200));
         let mut full = FullSource::default();
         let outcome =
-            reconcile_canonical_chain(&params(), &mut reducer, &mut source, &mut full).unwrap();
+            reconcile_canonical_chain(&params(), &mut runtime, &mut source, &mut full).unwrap();
         assert_eq!(outcome.blocks_applied, 200);
-        assert_eq!(reducer.ironwood_frontier().size(), 200);
+        assert_eq!(runtime.ironwood_frontier().size(), 200);
         // The activation block is intentionally refetched after base-identity
         // discovery; every replay iteration then owns only its current block.
         assert_eq!(source.block_calls.len(), 201);
@@ -1065,20 +1065,20 @@ mod tests {
     fn malformed_source_identity_errors_are_typed_and_panic_free() {
         let mut full = FullSource::default();
 
-        let mut reducer = new_reducer();
-        let before = reducer.tip();
+        let mut runtime = new_reducer();
+        let before = runtime.tip();
         let mut missing = Source::new(BTreeMap::new(), tip(1, 1));
         assert!(matches!(
-            reconcile_canonical_chain(&params(), &mut reducer, &mut missing, &mut full),
+            reconcile_canonical_chain(&params(), &mut runtime, &mut missing, &mut full),
             Err(ReconcileError::MissingCanonicalBlock { height: 1 })
         ));
-        assert_eq!(reducer.tip(), before);
+        assert_eq!(runtime.tip(), before);
 
         let mut wrong_height_blocks = chain(&[(1, 1, 161)]);
         wrong_height_blocks.get_mut(&1).unwrap().height = 2;
         let mut wrong_height = Source::new(wrong_height_blocks, tip(1, 1));
         assert!(matches!(
-            reconcile_canonical_chain(&params(), &mut reducer, &mut wrong_height, &mut full),
+            reconcile_canonical_chain(&params(), &mut runtime, &mut wrong_height, &mut full),
             Err(ReconcileError::InvalidCanonicalIdentity {
                 requested_height: 1
             })
@@ -1088,7 +1088,7 @@ mod tests {
         bad_hash_blocks.get_mut(&1).unwrap().hash = vec![0; 31];
         let mut bad_hash = Source::new(bad_hash_blocks, tip(1, 1));
         assert!(matches!(
-            reconcile_canonical_chain(&params(), &mut reducer, &mut bad_hash, &mut full),
+            reconcile_canonical_chain(&params(), &mut runtime, &mut bad_hash, &mut full),
             Err(ReconcileError::InvalidCanonicalIdentity {
                 requested_height: 1
             })
@@ -1098,12 +1098,12 @@ mod tests {
         bad_prev_blocks.get_mut(&1).unwrap().prev_hash = vec![0; 31];
         let mut bad_prev = Source::new(bad_prev_blocks, tip(1, 1));
         assert!(matches!(
-            reconcile_canonical_chain(&params(), &mut reducer, &mut bad_prev, &mut full),
+            reconcile_canonical_chain(&params(), &mut runtime, &mut bad_prev, &mut full),
             Err(ReconcileError::InvalidCanonicalIdentity {
                 requested_height: 1
             })
         ));
-        assert_eq!(reducer.tip(), before);
+        assert_eq!(runtime.tip(), before);
         assert_eq!(full.calls, 0);
     }
 
@@ -1112,21 +1112,21 @@ mod tests {
         let old = chain(&[(1, 1, 171), (2, 2, 172), (3, 3, 173)]);
         let mut replacement = chain(&[(1, 1, 171), (2, 12, 182), (3, 13, 183), (4, 14, 184)]);
         replacement.remove(&4);
-        let mut reducer = new_reducer();
-        apply_history(&mut reducer, &old);
+        let mut runtime = new_reducer();
+        apply_history(&mut runtime, &old);
         let mut source = Source::new(replacement, tip(4, 14));
         let mut full = FullSource::default();
         assert!(matches!(
-            reconcile_canonical_chain(&params(), &mut reducer, &mut source, &mut full),
+            reconcile_canonical_chain(&params(), &mut runtime, &mut source, &mut full),
             Err(ReconcileError::MissingCanonicalBlock { height: 4 })
         ));
         assert_eq!(
-            reducer.tip(),
-            ReplayTip {
+            runtime.tip(),
+            CoreReplayTip {
                 height: 3,
                 block_hash: [13; 32]
             }
         );
-        assert_eq!(reducer.retained_tip_at(2).unwrap().block_hash, [12; 32]);
+        assert_eq!(runtime.retained_tip_at(2).unwrap().block_hash, [12; 32]);
     }
 }

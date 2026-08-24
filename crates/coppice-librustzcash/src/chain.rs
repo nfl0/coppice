@@ -1,14 +1,17 @@
 //! Panic-free adaptation of hostile protobuf CompactBlocks into canonical Coppice inputs.
 //!
 //! [`FullTransactionSource`] is untrusted transport. Bytes returned for a requested
-//! txid become authoritative only after the core reducer parses them under the
+//! txid become authoritative only after the core runtime parses them under the
 //! canonical branch ID and verifies their txid and compact/full Ironwood effects.
 
 use std::fmt::Debug;
 
 use coppice::{
     carrier,
-    reducer::{AppliedBlock, CanonicalBlockInput, CanonicalTxInput, FatalReducerError, Reducer},
+    names_runtime::{
+        CoreCanonicalBlockInput, CoreCanonicalTransactionInput, NamesRuntime,
+        NamesRuntimeAppliedBlock, NamesRuntimeError,
+    },
 };
 use orchard::note_encryption::CompactAction;
 use zcash_client_backend::proto::compact_formats::{CompactBlock, CompactTx};
@@ -42,11 +45,11 @@ pub enum CompactBlockAdapterError<SourceError: Debug> {
 #[derive(Debug)]
 pub enum CompactBlockApplyError<SourceError: Debug> {
     Prepare(CompactBlockAdapterError<SourceError>),
-    Reducer(FatalReducerError),
+    Runtime(NamesRuntimeError),
 }
 
 struct ValidatedCompactTx {
-    input: CanonicalTxInput,
+    input: CoreCanonicalTransactionInput,
     candidate: bool,
 }
 
@@ -57,7 +60,7 @@ fn exact_32(bytes: &[u8]) -> Option<[u8; 32]> {
 fn validate_transaction<SourceError: Debug>(
     transaction: usize,
     compact_tx: &CompactTx,
-    reducer: &Reducer,
+    runtime: &NamesRuntime,
 ) -> Result<ValidatedCompactTx, CompactBlockAdapterError<SourceError>> {
     let tx_index = u32::try_from(compact_tx.index)
         .map_err(|_| CompactBlockAdapterError::InvalidTxIndex { transaction })?;
@@ -76,7 +79,7 @@ fn validate_transaction<SourceError: Debug>(
         })?;
         ironwood_nullifiers.push(action.nullifier().to_bytes());
         ironwood_commitments.push(action.cmx().to_bytes());
-        let hit = carrier::compact_action_is_bulletin(&action, reducer.deployment().rendezvous)
+        let hit = carrier::compact_action_is_bulletin(&action, runtime.deployment().rendezvous)
             .map_err(|_| CompactBlockAdapterError::CandidateDetection {
                 tx_index,
                 action_index,
@@ -85,7 +88,7 @@ fn validate_transaction<SourceError: Debug>(
     }
 
     Ok(ValidatedCompactTx {
-        input: CanonicalTxInput {
+        input: CoreCanonicalTransactionInput {
             tx_index,
             txid,
             ironwood_nullifiers,
@@ -101,15 +104,15 @@ fn validate_transaction<SourceError: Debug>(
 /// then fetches each candidate transaction exactly once in canonical order.
 pub fn prepare_canonical_block<P, S>(
     params: &P,
-    reducer: &Reducer,
+    runtime: &NamesRuntime,
     compact_block: &CompactBlock,
     full_tx_source: &mut S,
-) -> Result<CanonicalBlockInput, CompactBlockAdapterError<S::Error>>
+) -> Result<CoreCanonicalBlockInput, CompactBlockAdapterError<S::Error>>
 where
     P: Parameters,
     S: FullTransactionSource,
 {
-    if params.network_type() != reducer.deployment().address_network {
+    if params.network_type() != runtime.deployment().address_network {
         return Err(CompactBlockAdapterError::NetworkMismatch);
     }
     let height = u32::try_from(compact_block.height)
@@ -118,7 +121,7 @@ where
         exact_32(&compact_block.hash).ok_or(CompactBlockAdapterError::InvalidBlockHash)?;
     let prev_block_hash =
         exact_32(&compact_block.prev_hash).ok_or(CompactBlockAdapterError::InvalidPrevBlockHash)?;
-    let expected_height = reducer
+    let expected_height = runtime
         .tip()
         .height
         .checked_add(1)
@@ -129,14 +132,14 @@ where
             actual: height,
         });
     }
-    if prev_block_hash != reducer.tip().block_hash {
+    if prev_block_hash != runtime.tip().block_hash {
         return Err(CompactBlockAdapterError::PredecessorMismatch);
     }
 
     // Phase A: validate and classify every represented transaction before any fetch.
     let mut validated = Vec::with_capacity(compact_block.vtx.len());
     for (transaction, compact_tx) in compact_block.vtx.iter().enumerate() {
-        let tx = validate_transaction(transaction, compact_tx, reducer)?;
+        let tx = validate_transaction(transaction, compact_tx, runtime)?;
         if validated
             .last()
             .is_some_and(|prior: &ValidatedCompactTx| prior.input.tx_index >= tx.input.tx_index)
@@ -161,7 +164,7 @@ where
         }
     }
 
-    Ok(CanonicalBlockInput {
+    Ok(CoreCanonicalBlockInput {
         height,
         block_hash,
         prev_block_hash,
@@ -171,22 +174,22 @@ where
 }
 
 /// Prepares the complete block first and delegates the sole state mutation to
-/// the atomic core reducer.
+/// the atomic core runtime.
 pub fn apply_compact_block<P, S>(
     params: &P,
-    reducer: &mut Reducer,
+    runtime: &mut NamesRuntime,
     compact_block: &CompactBlock,
     full_tx_source: &mut S,
-) -> Result<AppliedBlock, CompactBlockApplyError<S::Error>>
+) -> Result<NamesRuntimeAppliedBlock, CompactBlockApplyError<S::Error>>
 where
     P: Parameters,
     S: FullTransactionSource,
 {
-    let input = prepare_canonical_block(params, reducer, compact_block, full_tx_source)
+    let input = prepare_canonical_block(params, runtime, compact_block, full_tx_source)
         .map_err(CompactBlockApplyError::Prepare)?;
-    reducer
+    runtime
         .apply_block(&input)
-        .map_err(CompactBlockApplyError::Reducer)
+        .map_err(CompactBlockApplyError::Runtime)
 }
 
 #[cfg(test)]
@@ -196,7 +199,10 @@ mod tests {
     use coppice::{
         config::{DeploymentParameters, REGTEST, Rendezvous},
         constants::REGTEST_ACTIVATION_HEIGHT,
-        reducer::{ActivationCheckpoint, IronwoodFrontier, TransactionOutcome},
+        names_runtime::{
+            CoreReplayActivationCheckpoint, CoreReplayError, IronwoodFrontier,
+            NamesTransactionOutcome,
+        },
     };
     use orchard::{
         note::{ExtractedNoteCommitment, Note, NoteVersion, Nullifier, RandomSeed, Rho},
@@ -244,11 +250,11 @@ mod tests {
         }
     }
 
-    fn reducer() -> Reducer {
+    fn runtime() -> NamesRuntime {
         let deployment = deployment();
-        Reducer::new(
+        NamesRuntime::new(
             deployment.clone(),
-            ActivationCheckpoint {
+            CoreReplayActivationCheckpoint {
                 height: deployment.activation_height - 1,
                 block_hash: [9; 32],
                 ironwood_frontier: IronwoodFrontier::empty(),
@@ -301,11 +307,11 @@ mod tests {
         }
     }
 
-    fn block(reducer: &Reducer, transactions: Vec<CompactTx>) -> CompactBlock {
+    fn block(runtime: &NamesRuntime, transactions: Vec<CompactTx>) -> CompactBlock {
         CompactBlock {
-            height: u64::from(reducer.tip().height + 1),
+            height: u64::from(runtime.tip().height + 1),
             hash: vec![7; 32],
-            prev_hash: reducer.tip().block_hash.to_vec(),
+            prev_hash: runtime.tip().block_hash.to_vec(),
             vtx: transactions,
             ..Default::default()
         }
@@ -336,39 +342,39 @@ mod tests {
 
     #[test]
     fn malformed_container_fields_are_panic_free_and_do_not_fetch() {
-        let reducer = reducer();
+        let runtime = runtime();
         let mut source = Source::default();
 
         let mut cases = vec![];
-        let mut invalid_height = block(&reducer, vec![]);
+        let mut invalid_height = block(&runtime, vec![]);
         invalid_height.height = u64::from(u32::MAX) + 1;
         cases.push(invalid_height);
         for length in [31, 33] {
-            let mut invalid_hash = block(&reducer, vec![]);
+            let mut invalid_hash = block(&runtime, vec![]);
             invalid_hash.hash = vec![0; length];
             cases.push(invalid_hash);
         }
-        let mut invalid_prev = block(&reducer, vec![]);
+        let mut invalid_prev = block(&runtime, vec![]);
         invalid_prev.prev_hash = vec![0; 31];
         cases.push(invalid_prev);
-        let mut invalid_index = block(&reducer, vec![compact_tx(0, 1, vec![])]);
+        let mut invalid_index = block(&runtime, vec![compact_tx(0, 1, vec![])]);
         invalid_index.vtx[0].index = u64::from(u32::MAX) + 1;
         cases.push(invalid_index);
         for length in [31, 33] {
-            let mut invalid_txid = block(&reducer, vec![compact_tx(0, 1, vec![])]);
+            let mut invalid_txid = block(&runtime, vec![compact_tx(0, 1, vec![])]);
             invalid_txid.vtx[0].txid = vec![0; length];
             cases.push(invalid_txid);
         }
 
         for malformed in cases {
-            assert!(prepare_canonical_block(&params(), &reducer, &malformed, &mut source).is_err());
+            assert!(prepare_canonical_block(&params(), &runtime, &malformed, &mut source).is_err());
         }
         assert!(source.calls.is_empty());
     }
 
     #[test]
     fn every_compact_action_field_is_checked_before_fetch() {
-        let reducer = reducer();
+        let runtime = runtime();
         let valid = real_rendezvous_action();
         let mut malformed = Vec::new();
         for length in [31, 33] {
@@ -398,9 +404,9 @@ mod tests {
 
         let mut source = Source::default();
         for action in malformed {
-            let input = block(&reducer, vec![compact_tx(2, 1, vec![action])]);
+            let input = block(&runtime, vec![compact_tx(2, 1, vec![action])]);
             assert!(matches!(
-                prepare_canonical_block(&params(), &reducer, &input, &mut source),
+                prepare_canonical_block(&params(), &runtime, &input, &mut source),
                 Err(CompactBlockAdapterError::InvalidIronwoodCompactAction { .. })
             ));
         }
@@ -409,26 +415,26 @@ mod tests {
 
     #[test]
     fn static_validation_precedes_fetch_and_sparse_order_is_accepted() {
-        let reducer = reducer();
+        let runtime = runtime();
         let candidate = real_rendezvous_action();
         let malformed = CompactOrchardAction {
             nullifier: vec![0; 31],
             ..candidate.clone()
         };
         let invalid_late = block(
-            &reducer,
+            &runtime,
             vec![
                 compact_tx(2, 1, vec![candidate.clone()]),
                 compact_tx(7, 2, vec![malformed]),
             ],
         );
         let mut source = Source::default();
-        assert!(prepare_canonical_block(&params(), &reducer, &invalid_late, &mut source).is_err());
+        assert!(prepare_canonical_block(&params(), &runtime, &invalid_late, &mut source).is_err());
         assert!(source.calls.is_empty());
 
         for indices in [[2, 11, 7], [2, 2, 11]] {
             let input = block(
-                &reducer,
+                &runtime,
                 indices
                     .into_iter()
                     .enumerate()
@@ -436,20 +442,20 @@ mod tests {
                     .collect(),
             );
             assert!(matches!(
-                prepare_canonical_block(&params(), &reducer, &input, &mut source),
+                prepare_canonical_block(&params(), &runtime, &input, &mut source),
                 Err(CompactBlockAdapterError::NonCanonicalTxOrder)
             ));
         }
 
         let sparse = block(
-            &reducer,
+            &runtime,
             vec![
                 compact_tx(2, 1, vec![]),
                 compact_tx(7, 2, vec![]),
                 compact_tx(11, 3, vec![]),
             ],
         );
-        let prepared = prepare_canonical_block(&params(), &reducer, &sparse, &mut source).unwrap();
+        let prepared = prepare_canonical_block(&params(), &runtime, &sparse, &mut source).unwrap();
         assert_eq!(
             prepared
                 .transactions
@@ -462,10 +468,10 @@ mod tests {
 
     #[test]
     fn candidates_fetch_once_per_transaction_in_canonical_order() {
-        let reducer = reducer();
+        let runtime = runtime();
         let candidate = real_rendezvous_action();
         let input = block(
-            &reducer,
+            &runtime,
             vec![
                 compact_tx(2, 1, vec![candidate.clone(), candidate.clone()]),
                 compact_tx(7, 2, vec![noncandidate_action()]),
@@ -475,7 +481,7 @@ mod tests {
         let mut source = Source::default();
         source.values.insert([1; 32], Ok(Some(vec![1])));
         source.values.insert([3; 32], Ok(Some(vec![3])));
-        let prepared = prepare_canonical_block(&params(), &reducer, &input, &mut source).unwrap();
+        let prepared = prepare_canonical_block(&params(), &runtime, &input, &mut source).unwrap();
         assert_eq!(source.calls, vec![[1; 32], [3; 32]]);
         assert!(prepared.transactions[0].full_tx_required);
         assert!(!prepared.transactions[1].full_tx_required);
@@ -484,18 +490,18 @@ mod tests {
 
     #[test]
     fn zero_and_three_candidate_fetch_counts_are_exact() {
-        let reducer = reducer();
+        let runtime = runtime();
         let no_hits = block(
-            &reducer,
+            &runtime,
             vec![compact_tx(2, 1, vec![noncandidate_action()])],
         );
         let mut source = Source::default();
-        prepare_canonical_block(&params(), &reducer, &no_hits, &mut source).unwrap();
+        prepare_canonical_block(&params(), &runtime, &no_hits, &mut source).unwrap();
         assert!(source.calls.is_empty());
 
         let hit = real_rendezvous_action();
         let three = block(
-            &reducer,
+            &runtime,
             vec![
                 compact_tx(2, 1, vec![hit.clone()]),
                 compact_tx(7, 2, vec![hit.clone()]),
@@ -505,21 +511,21 @@ mod tests {
         for id in 1..=3 {
             source.values.insert([id; 32], Ok(Some(vec![id])));
         }
-        prepare_canonical_block(&params(), &reducer, &three, &mut source).unwrap();
+        prepare_canonical_block(&params(), &runtime, &three, &mut source).unwrap();
         assert_eq!(source.calls, vec![[1; 32], [2; 32], [3; 32]]);
     }
 
     #[test]
     fn preflight_and_late_source_failure_do_not_apply() {
-        let mut reducer = reducer();
+        let mut runtime = runtime();
         let mut wrong_predecessor = block(
-            &reducer,
+            &runtime,
             vec![compact_tx(2, 1, vec![real_rendezvous_action()])],
         );
         wrong_predecessor.prev_hash = vec![8; 32];
         let mut source = Source::default();
         assert!(matches!(
-            apply_compact_block(&params(), &mut reducer, &wrong_predecessor, &mut source),
+            apply_compact_block(&params(), &mut runtime, &wrong_predecessor, &mut source),
             Err(CompactBlockApplyError::Prepare(
                 CompactBlockAdapterError::PredecessorMismatch
             ))
@@ -528,7 +534,7 @@ mod tests {
 
         let hit = real_rendezvous_action();
         let input = block(
-            &reducer,
+            &runtime,
             vec![
                 compact_tx(2, 1, vec![hit.clone()]),
                 compact_tx(7, 2, vec![hit]),
@@ -536,49 +542,49 @@ mod tests {
         );
         source.values.insert([1; 32], Ok(Some(vec![1])));
         source.values.insert([2; 32], Err("late transport"));
-        let before_tip = reducer.tip();
-        let before_root = reducer.ironwood_frontier().root();
+        let before_tip = runtime.tip();
+        let before_root = runtime.ironwood_frontier().root();
         assert!(matches!(
-            apply_compact_block(&params(), &mut reducer, &input, &mut source),
+            apply_compact_block(&params(), &mut runtime, &input, &mut source),
             Err(CompactBlockApplyError::Prepare(
                 CompactBlockAdapterError::FullTransactionSource("late transport")
             ))
         ));
         assert_eq!(source.calls, vec![[1; 32], [2; 32]]);
-        assert_eq!(reducer.tip(), before_tip);
-        assert_eq!(reducer.ironwood_frontier().root(), before_root);
+        assert_eq!(runtime.tip(), before_tip);
+        assert_eq!(runtime.ironwood_frontier().root(), before_root);
     }
 
     #[test]
     fn missing_or_failed_fetch_never_advances_reducer() {
         for value in [Ok(None), Err("transport")] {
-            let mut reducer = reducer();
-            let before_tip = reducer.tip();
-            let before_state = reducer.state().clone();
-            let before_root = reducer.ironwood_frontier().root();
-            let before_checkpoints = reducer.ironwood_checkpoints().clone();
+            let mut runtime = runtime();
+            let before_tip = runtime.tip();
+            let before_state = runtime.state().clone();
+            let before_root = runtime.ironwood_frontier().root();
+            let before_checkpoints = runtime.ironwood_checkpoints().clone();
             let input = block(
-                &reducer,
+                &runtime,
                 vec![compact_tx(2, 1, vec![real_rendezvous_action()])],
             );
             let mut source = Source::default();
             source.values.insert([1; 32], value);
-            assert!(apply_compact_block(&params(), &mut reducer, &input, &mut source).is_err());
-            assert_eq!(reducer.tip(), before_tip);
-            assert_eq!(reducer.state(), &before_state);
-            assert_eq!(reducer.ironwood_frontier().root(), before_root);
-            assert_eq!(reducer.ironwood_checkpoints(), &before_checkpoints);
+            assert!(apply_compact_block(&params(), &mut runtime, &input, &mut source).is_err());
+            assert_eq!(runtime.tip(), before_tip);
+            assert_eq!(runtime.state(), &before_state);
+            assert_eq!(runtime.ironwood_frontier().root(), before_root);
+            assert_eq!(runtime.ironwood_checkpoints(), &before_checkpoints);
         }
     }
 
     #[test]
     fn noncandidate_effects_apply_without_fetch_and_branch_is_parameter_derived() {
-        let mut reducer = reducer();
+        let mut runtime = runtime();
         let action = noncandidate_action();
         let expected_nf: CompactAction = (&action).try_into().unwrap();
-        let input = block(&reducer, vec![compact_tx(7, 1, vec![action])]);
+        let input = block(&runtime, vec![compact_tx(7, 1, vec![action])]);
         let mut source = Source::default();
-        let prepared = prepare_canonical_block(&params(), &reducer, &input, &mut source).unwrap();
+        let prepared = prepare_canonical_block(&params(), &runtime, &input, &mut source).unwrap();
         assert_eq!(
             prepared.branch_id,
             BranchId::for_height(&params(), BlockHeight::from_u32(prepared.height))
@@ -591,50 +597,50 @@ mod tests {
             prepared.transactions[0].ironwood_commitments,
             vec![expected_nf.cmx().to_bytes()]
         );
-        let applied = apply_compact_block(&params(), &mut reducer, &input, &mut source).unwrap();
+        let applied = apply_compact_block(&params(), &mut runtime, &input, &mut source).unwrap();
         assert!(source.calls.is_empty());
         assert_eq!(
-            applied.transaction_outcomes,
-            vec![TransactionOutcome::NoOperation]
+            applied.names.transaction_outcomes,
+            vec![NamesTransactionOutcome::NoOperation]
         );
-        assert_eq!(applied.ironwood_checkpoint.tree_size, 1);
+        assert_eq!(applied.core.ironwood_checkpoint().tree_size, 1);
     }
 
     #[test]
     fn branch_id_changes_with_consensus_parameters() {
-        let reducer = reducer();
-        let input = block(&reducer, vec![]);
+        let runtime = runtime();
+        let input = block(&runtime, vec![]);
         let mut before_nu6_3 = params();
         before_nu6_3.nu6_3 = None;
         let mut source = Source::default();
         let prepared =
-            prepare_canonical_block(&before_nu6_3, &reducer, &input, &mut source).unwrap();
+            prepare_canonical_block(&before_nu6_3, &runtime, &input, &mut source).unwrap();
         assert_eq!(prepared.branch_id, BranchId::Nu6_2);
         assert_ne!(prepared.branch_id, BranchId::Nu6_3);
     }
 
     #[test]
     fn malformed_fetched_transaction_is_reducer_fatal_and_atomic() {
-        let mut reducer = reducer();
-        let before_tip = reducer.tip();
-        let before_state = reducer.state().clone();
-        let before_root = reducer.ironwood_frontier().root();
-        let before_checkpoints = reducer.ironwood_checkpoints().clone();
+        let mut runtime = runtime();
+        let before_tip = runtime.tip();
+        let before_state = runtime.state().clone();
+        let before_root = runtime.ironwood_frontier().root();
+        let before_checkpoints = runtime.ironwood_checkpoints().clone();
         let input = block(
-            &reducer,
+            &runtime,
             vec![compact_tx(2, 1, vec![real_rendezvous_action()])],
         );
         let mut source = Source::default();
         source.values.insert([1; 32], Ok(Some(vec![0; 4])));
         assert!(matches!(
-            apply_compact_block(&params(), &mut reducer, &input, &mut source),
-            Err(CompactBlockApplyError::Reducer(
-                FatalReducerError::InvalidFullTransaction
-            ))
+            apply_compact_block(&params(), &mut runtime, &input, &mut source),
+            Err(CompactBlockApplyError::Runtime(NamesRuntimeError::Core(
+                CoreReplayError::InvalidFullTransaction
+            )))
         ));
-        assert_eq!(reducer.tip(), before_tip);
-        assert_eq!(reducer.state(), &before_state);
-        assert_eq!(reducer.ironwood_frontier().root(), before_root);
-        assert_eq!(reducer.ironwood_checkpoints(), &before_checkpoints);
+        assert_eq!(runtime.tip(), before_tip);
+        assert_eq!(runtime.state(), &before_state);
+        assert_eq!(runtime.ironwood_frontier().root(), before_root);
+        assert_eq!(runtime.ironwood_checkpoints(), &before_checkpoints);
     }
 }

@@ -8,7 +8,7 @@
 
 use std::fmt::Debug;
 
-use coppice::{config::DeploymentParameters, reducer::Reducer};
+use coppice::{config::DeploymentParameters, names_runtime::NamesRuntime};
 use sapling::prover::{OutputProver, SpendProver};
 use zcash_address::ZcashAddress;
 use zcash_client_backend::{
@@ -238,7 +238,7 @@ fn cleanup_rejected_bond_proposal<E>(
 pub fn propose_bond_note_preparation<Host, DbT, ParamsT, InputsT, ChangeT, CommitmentTreeErrT>(
     mode: CoppiceProtectionMode,
     host_tip_source: &Host,
-    reducer: &Reducer,
+    runtime: &NamesRuntime,
     pending: &PendingRegistrationCollection,
     capability: IronwoodViewingCapability,
     wallet_db: &mut DbT,
@@ -268,10 +268,10 @@ where
     InputsT: InputSelector<InputSource = DbT>,
     ChangeT: ChangeStrategy<MetaSource = DbT>,
 {
-    if params.network_type() != reducer.deployment().address_network {
+    if params.network_type() != runtime.deployment().address_network {
         return Err(BondNotePreparationProposalError::NetworkMismatch);
     }
-    let expected_height = reducer
+    let expected_height = runtime
         .tip()
         .height
         .checked_add(1)
@@ -284,8 +284,8 @@ where
             target_height: expected_height,
         });
     }
-    let bond_value_zat = reducer.deployment().minimum_bond_value;
-    let request = bond_note_preparation_request(reducer.deployment(), recipient)
+    let bond_value_zat = runtime.deployment().minimum_bond_value;
+    let request = bond_note_preparation_request(runtime.deployment(), recipient)
         .map_err(BondNotePreparationProposalError::Request)?;
     let spend_policy = bond_note_preparation_spend_policy();
     let target_height = zcash_client_backend::data_api::wallet::TargetHeight::from(expected_height);
@@ -300,7 +300,7 @@ where
     let (proposal_result, _) = with_coppice_spend_guard(
         mode,
         host_tip_source,
-        reducer,
+        runtime,
         pending,
         account_id,
         backend.capability(),

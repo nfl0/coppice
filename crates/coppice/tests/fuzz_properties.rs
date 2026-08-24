@@ -1,11 +1,12 @@
 use coppice::{
-    carrier_v1::reconstruct_frames_v1,
     config::{DeploymentParameters, REGTEST},
     envelope::decode_operation,
-    reducer::{
-        ActivationCheckpoint, CanonicalBlockInput, CanonicalTxInput, IronwoodFrontier, Reducer,
+    names_runtime::{
+        CoreCanonicalBlockInput, CoreCanonicalTransactionInput, CoreReplayActivationCheckpoint,
+        IronwoodFrontier, NamesRuntime,
     },
 };
+use coppice_core::transport::reconstruct_frames;
 use incrementalmerkletree::Hashable;
 use orchard::tree::MerkleHashOrchard;
 use rand_chacha::{
@@ -29,11 +30,11 @@ fn arbitrary_operation_and_indexed_frame_bytes_are_panic_free() {
         for frame in &mut frames {
             rng.fill_bytes(frame);
         }
-        let _ = reconstruct_frames_v1(&frames, [0x42; 32]);
+        let _ = reconstruct_frames(&frames, [0x42; 32]);
     }
 }
 
-fn reducer() -> Reducer {
+fn reducer() -> NamesRuntime {
     let deployment = DeploymentParameters {
         network_id: REGTEST.network_id.to_vec(),
         address_network: zcash_protocol::consensus::NetworkType::Regtest,
@@ -44,9 +45,9 @@ fn reducer() -> Reducer {
         bond_note_max_age_blocks: 100,
         rendezvous: REGTEST.rendezvous,
     };
-    Reducer::new(
+    NamesRuntime::new(
         deployment,
-        ActivationCheckpoint {
+        CoreReplayActivationCheckpoint {
             height: REGTEST.activation_height - 1,
             block_hash: [0x99; 32],
             ironwood_frontier: IronwoodFrontier::empty(),
@@ -56,16 +57,16 @@ fn reducer() -> Reducer {
     .unwrap()
 }
 
-fn apply_generated(reducer: &mut Reducer, hash: [u8; 32], append: bool) {
+fn apply_generated(reducer: &mut NamesRuntime, hash: [u8; 32], append: bool) {
     let height = reducer.tip().height + 1;
     reducer
-        .apply_block(&CanonicalBlockInput {
+        .apply_block(&CoreCanonicalBlockInput {
             height,
             block_hash: hash,
             prev_block_hash: reducer.tip().block_hash,
             branch_id: zcash_protocol::consensus::BranchId::Nu6_3,
             transactions: append
-                .then(|| CanonicalTxInput {
+                .then(|| CoreCanonicalTransactionInput {
                     tx_index: 0,
                     txid: [0; 32],
                     ironwood_nullifiers: vec![],
@@ -93,8 +94,11 @@ fn persisted_delta_reorgs_equal_fresh_replay() {
             apply_generated(&mut local, hash, append);
             prefix.push((hash, append));
         }
-        local = Reducer::load_snapshot(local.deployment().clone(), &local.save_snapshot().unwrap())
-            .unwrap();
+        local = NamesRuntime::load_snapshot(
+            local.deployment().clone(),
+            &local.save_snapshot().unwrap(),
+        )
+        .unwrap();
 
         let rewind_count = 1 + usize::from(seed % 31);
         let common_len = prefix.len() - rewind_count;
@@ -112,9 +116,11 @@ fn persisted_delta_reorgs_equal_fresh_replay() {
             apply_generated(&mut fresh, hash, append);
         }
 
-        let restored =
-            Reducer::load_snapshot(local.deployment().clone(), &local.save_snapshot().unwrap())
-                .unwrap();
+        let restored = NamesRuntime::load_snapshot(
+            local.deployment().clone(),
+            &local.save_snapshot().unwrap(),
+        )
+        .unwrap();
         assert_eq!(restored.tip(), fresh.tip());
         assert_eq!(restored.state(), fresh.state());
         assert_eq!(restored.ironwood_frontier(), fresh.ironwood_frontier());

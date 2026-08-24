@@ -6,10 +6,10 @@ use std::fmt::Debug;
 use coppice::{
     authorization,
     envelope::{self, Operation},
+    names_runtime::NamesRuntime,
     owner::{self, OwnerSigningKey, owner_key_bytes},
     owner_kdf::{OwnerKdfError, derive_v1_owner_signing_key},
     record::{NameRecord, NameStatus},
-    reducer::Reducer,
     reveal::{RevealValidationError, canonical_v1_address},
 };
 use zcash_client_backend::data_api::{
@@ -65,7 +65,7 @@ pub enum OwnerOperationError<HostError> {
 }
 
 fn owner_signing_key<'a>(
-    reducer: &Reducer,
+    runtime: &NamesRuntime,
     name: &str,
     record: &NameRecord,
     authority: OwnerAuthority<'a>,
@@ -76,7 +76,7 @@ fn owner_signing_key<'a>(
         OwnerAuthority::DefaultSoftware(account_key) => {
             *derived = Some(derive_v1_owner_signing_key(
                 *account_key,
-                reducer.deployment_id(),
+                runtime.deployment_id(),
                 owner::name_id(name),
                 record.bond_tag,
             )?);
@@ -86,7 +86,7 @@ fn owner_signing_key<'a>(
 }
 
 fn sign_and_frame<HostError>(
-    reducer: &Reducer,
+    runtime: &NamesRuntime,
     name: &str,
     previous: &NameRecord,
     mut operation: Operation,
@@ -96,14 +96,14 @@ fn sign_and_frame<HostError>(
         return Err(OwnerOperationError::NameNotActive);
     }
     let mut derived = None;
-    let signing_key = owner_signing_key(reducer, name, previous, authority, &mut derived)
+    let signing_key = owner_signing_key(runtime, name, previous, authority, &mut derived)
         .map_err(OwnerOperationError::OwnerDerivation)?;
     let verification_key = owner_key_bytes(&signing_key.into());
     if verification_key != previous.owner_pk {
         return Err(OwnerOperationError::OwnerKeyMismatch);
     }
     let signature =
-        authorization::sign_v1(reducer.deployment_id(), signing_key, &operation, previous)
+        authorization::sign_v1(runtime.deployment_id(), signing_key, &operation, previous)
             .map_err(|_| OwnerOperationError::Authorization)?;
     match &mut operation {
         Operation::Update {
@@ -114,14 +114,14 @@ fn sign_and_frame<HostError>(
         } => *target = signature.to_vec(),
         _ => return Err(OwnerOperationError::Authorization),
     }
-    if !authorization::verify_v1(reducer.deployment_id(), &operation, previous) {
+    if !authorization::verify_v1(runtime.deployment_id(), &operation, previous) {
         return Err(OwnerOperationError::Authorization);
     }
     let sequence = match &operation {
         Operation::Update { sequence, .. } | Operation::Release { sequence, .. } => *sequence,
         _ => return Err(OwnerOperationError::Authorization),
     };
-    let carrier = PreparedCarrier::from_operation(reducer.deployment_id(), &operation)
+    let carrier = PreparedCarrier::from_operation(runtime.core().runtime_id(), &operation)
         .map_err(OwnerOperationError::Carrier)?;
     Ok(PreparedOwnerOperation {
         name: name.to_owned(),
@@ -133,14 +133,14 @@ fn sign_and_frame<HostError>(
 
 pub fn prepare_update<Host: HostCanonicalTipSource>(
     host: &Host,
-    reducer: &Reducer,
+    runtime: &NamesRuntime,
     name: &str,
     new_address: &[u8],
     authority: OwnerAuthority<'_>,
 ) -> Result<PreparedOwnerOperation, OwnerOperationError<Host::Error>> {
-    require_exact_canonical_tip(host, reducer).map_err(OwnerOperationError::Tip)?;
+    require_exact_canonical_tip(host, runtime).map_err(OwnerOperationError::Tip)?;
     let name = envelope::normalize_name(name).map_err(|_| OwnerOperationError::InvalidName)?;
-    let previous = reducer
+    let previous = runtime
         .state()
         .names
         .get(&name)
@@ -148,14 +148,14 @@ pub fn prepare_update<Host: HostCanonicalTipSource>(
     if previous.status != NameStatus::Active {
         return Err(OwnerOperationError::NameNotActive);
     }
-    let address = canonical_v1_address(new_address, reducer.deployment())
+    let address = canonical_v1_address(new_address, runtime.deployment())
         .map_err(OwnerOperationError::InvalidAddress)?;
     let sequence = previous
         .sequence
         .checked_add(1)
         .ok_or(OwnerOperationError::SequenceOverflow)?;
     sign_and_frame(
-        reducer,
+        runtime,
         &name,
         previous,
         Operation::Update {
@@ -170,13 +170,13 @@ pub fn prepare_update<Host: HostCanonicalTipSource>(
 
 pub fn prepare_release<Host: HostCanonicalTipSource>(
     host: &Host,
-    reducer: &Reducer,
+    runtime: &NamesRuntime,
     name: &str,
     authority: OwnerAuthority<'_>,
 ) -> Result<PreparedOwnerOperation, OwnerOperationError<Host::Error>> {
-    require_exact_canonical_tip(host, reducer).map_err(OwnerOperationError::Tip)?;
+    require_exact_canonical_tip(host, runtime).map_err(OwnerOperationError::Tip)?;
     let name = envelope::normalize_name(name).map_err(|_| OwnerOperationError::InvalidName)?;
-    let previous = reducer
+    let previous = runtime
         .state()
         .names
         .get(&name)
@@ -189,7 +189,7 @@ pub fn prepare_release<Host: HostCanonicalTipSource>(
         .checked_add(1)
         .ok_or(OwnerOperationError::SequenceOverflow)?;
     sign_and_frame(
-        reducer,
+        runtime,
         &name,
         previous,
         Operation::Release {
@@ -218,14 +218,14 @@ pub enum PaymentResolutionError<HostError> {
 }
 
 fn verified_destination<HostError>(
-    reducer: &Reducer,
+    runtime: &NamesRuntime,
     name: &str,
     record: &NameRecord,
 ) -> Result<VerifiedDestination, PaymentResolutionError<HostError>> {
     if record.status != NameStatus::Active {
         return Err(PaymentResolutionError::NameNotActive);
     }
-    let address = canonical_v1_address(&record.address, reducer.deployment())
+    let address = canonical_v1_address(&record.address, runtime.deployment())
         .map_err(PaymentResolutionError::InvalidCanonicalAddress)?;
     Ok(VerifiedDestination {
         name: name.to_owned(),
@@ -236,17 +236,17 @@ fn verified_destination<HostError>(
 
 pub fn resolve_for_payment<Host: HostCanonicalTipSource>(
     host: &Host,
-    reducer: &Reducer,
+    runtime: &NamesRuntime,
     name: &str,
 ) -> Result<VerifiedDestination, PaymentResolutionError<Host::Error>> {
-    require_exact_canonical_tip(host, reducer).map_err(PaymentResolutionError::Tip)?;
+    require_exact_canonical_tip(host, runtime).map_err(PaymentResolutionError::Tip)?;
     let name = envelope::normalize_name(name).map_err(|_| PaymentResolutionError::InvalidName)?;
-    let record = reducer
+    let record = runtime
         .state()
         .names
         .get(&name)
         .ok_or(PaymentResolutionError::NameNotFound)?;
-    verified_destination(reducer, &name, record)
+    verified_destination(runtime, &name, record)
 }
 
 /// Exact note and owner-scoped policy for an explicit Break Bond transaction.
@@ -281,7 +281,7 @@ pub enum BreakBondError<HostError, BackendError: Debug> {
 
 pub fn prepare_break_bond<Host, Backend>(
     host: &Host,
-    reducer: &Reducer,
+    runtime: &NamesRuntime,
     name: &str,
     capability: IronwoodViewingCapability,
     backend: &Backend,
@@ -290,9 +290,9 @@ where
     Host: HostCanonicalTipSource,
     Backend: CoppiceLockBackend,
 {
-    require_exact_canonical_tip(host, reducer).map_err(BreakBondError::Tip)?;
+    require_exact_canonical_tip(host, runtime).map_err(BreakBondError::Tip)?;
     let name = envelope::normalize_name(name).map_err(|_| BreakBondError::InvalidName)?;
-    let record = reducer
+    let record = runtime
         .state()
         .names
         .get(&name)
@@ -322,16 +322,16 @@ mod tests {
     use super::*;
     use coppice::{
         config::{DeploymentParameters, REGTEST},
+        names_runtime::{CoreReplayActivationCheckpoint, IronwoodFrontier},
         owner_kdf::derive_v1_owner_signing_key,
-        reducer::{ActivationCheckpoint, IronwoodFrontier},
     };
     use std::convert::Infallible;
     use zcash_protocol::consensus::NetworkType;
 
     const ADDRESS: &[u8] = b"uregtest15zjdhgeu9vfwkrgxvxyuynkprgryyww0cl668tpj0ykhl7nvvh7v7ln89f0v8c36vwyffxglg24zh5d4622ela80w065cc28mv7gf423";
 
-    fn reducer() -> Reducer {
-        Reducer::new(
+    fn runtime() -> NamesRuntime {
+        NamesRuntime::new(
             DeploymentParameters {
                 network_id: REGTEST.network_id.to_vec(),
                 address_network: NetworkType::Regtest,
@@ -342,7 +342,7 @@ mod tests {
                 bond_note_max_age_blocks: 100,
                 rendezvous: REGTEST.rendezvous,
             },
-            ActivationCheckpoint {
+            CoreReplayActivationCheckpoint {
                 height: 99,
                 block_hash: [9; 32],
                 ironwood_frontier: IronwoodFrontier::empty(),
@@ -352,11 +352,14 @@ mod tests {
         .unwrap()
     }
 
-    fn fixture_record(reducer: &Reducer, account_key: [u8; 32]) -> (NameRecord, OwnerSigningKey) {
+    fn fixture_record(
+        runtime: &NamesRuntime,
+        account_key: [u8; 32],
+    ) -> (NameRecord, OwnerSigningKey) {
         let bond_tag = [0x42; 32];
         let key = derive_v1_owner_signing_key(
             account_key,
-            reducer.deployment_id(),
+            runtime.deployment_id(),
             owner::name_id("alice"),
             bond_tag,
         )
@@ -375,8 +378,8 @@ mod tests {
 
     #[test]
     fn update_and_release_use_exact_next_sequence_and_owner_authorization() {
-        let reducer = reducer();
-        let (record, key) = fixture_record(&reducer, [7; 32]);
+        let runtime = runtime();
+        let (record, key) = fixture_record(&runtime, [7; 32]);
         for operation in [
             Operation::Update {
                 name: "alice".to_owned(),
@@ -391,7 +394,7 @@ mod tests {
             },
         ] {
             let prepared = sign_and_frame::<Infallible>(
-                &reducer,
+                &runtime,
                 "alice",
                 &record,
                 operation,
@@ -400,7 +403,7 @@ mod tests {
             .unwrap();
             assert_eq!(prepared.sequence, 8);
             assert!(authorization::verify_v1(
-                reducer.deployment_id(),
+                runtime.deployment_id(),
                 prepared.operation(),
                 &record,
             ));
@@ -413,8 +416,8 @@ mod tests {
 
     #[test]
     fn default_owner_restores_and_wrong_owner_or_terminal_record_fail_closed() {
-        let reducer = reducer();
-        let (record, _) = fixture_record(&reducer, [7; 32]);
+        let runtime = runtime();
+        let (record, _) = fixture_record(&runtime, [7; 32]);
         let operation = Operation::Release {
             name: "alice".to_owned(),
             sequence: 8,
@@ -422,7 +425,7 @@ mod tests {
         };
         assert!(
             sign_and_frame::<Infallible>(
-                &reducer,
+                &runtime,
                 "alice",
                 &record,
                 operation.clone(),
@@ -431,10 +434,10 @@ mod tests {
             .is_ok()
         );
 
-        let (_, wrong_key) = fixture_record(&reducer, [8; 32]);
+        let (_, wrong_key) = fixture_record(&runtime, [8; 32]);
         assert!(matches!(
             sign_and_frame::<Infallible>(
-                &reducer,
+                &runtime,
                 "alice",
                 &record,
                 operation.clone(),
@@ -448,7 +451,7 @@ mod tests {
         };
         assert!(matches!(
             sign_and_frame::<Infallible>(
-                &reducer,
+                &runtime,
                 "alice",
                 &terminal,
                 operation,
@@ -460,16 +463,16 @@ mod tests {
 
     #[test]
     fn payment_resolution_and_break_bond_policy_are_fail_closed_and_owner_scoped() {
-        let reducer = reducer();
-        let (record, _) = fixture_record(&reducer, [7; 32]);
-        let destination = verified_destination::<Infallible>(&reducer, "alice", &record).unwrap();
+        let runtime = runtime();
+        let (record, _) = fixture_record(&runtime, [7; 32]);
+        let destination = verified_destination::<Infallible>(&runtime, "alice", &record).unwrap();
         assert_eq!(destination.address, ADDRESS);
         let mut terminal = record;
         terminal.status = NameStatus::BondSpent {
             terminal_height: 102,
         };
         assert!(matches!(
-            verified_destination::<Infallible>(&reducer, "alice", &terminal),
+            verified_destination::<Infallible>(&runtime, "alice", &terminal),
             Err(PaymentResolutionError::NameNotActive)
         ));
 

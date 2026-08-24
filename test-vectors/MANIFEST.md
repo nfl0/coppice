@@ -40,8 +40,10 @@ including runtime activation and shared CPV1 rendezvous context.
 
 `application_envelopes.json` freezes the `CoppiceAppIdV1` derivation for the
 exact `coppice.names` application identity, Names routing version 1, the CA01
-envelope, and a future-runtime CPV1 frame bound to `CoreRuntimeId`. That frame
-does not switch or replace the qualified production vectors in `carrier.json`.
+envelope, and the production CPV1 frame bound to `CoreRuntimeId`.
+`carrier.json` remains unchanged because it freezes the parameterized CPV1
+framing algorithm rather than assigning semantic ownership to its sample
+32-byte binding value.
 
 Every vector entry SHOULD contain:
 

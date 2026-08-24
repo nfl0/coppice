@@ -1,7 +1,7 @@
 //! Coppice Names v1 identity and generic application-envelope adapters.
 //!
-//! These APIs are additive. Production replay and carrier decoding continue to
-//! use the existing qualified path until the runtime cutover is implemented.
+//! Names uses its frozen deployment identity internally while Core owns
+//! runtime transport identity and application routing.
 
 use coppice_core::application::{
     ApplicationDescriptor, ApplicationEnvelopeError, ApplicationEnvelopeV1, ApplicationId,

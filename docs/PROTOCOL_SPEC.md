@@ -1,9 +1,9 @@
 # Coppice Protocol Specification
 
-**Status:** Draft / v1 architecture and protocol artifacts frozen; implementation in progress
+**Status:** Draft / general runtime architecture production-authoritative for development deployments
 **Protocol version:** 1  
 **Wire version:** 1  
-**Last architecture decision:** 2026-08-22
+**Last architecture decision:** 2026-08-24
 
 ## 1. Purpose and authority
 
@@ -316,21 +316,26 @@ versions are structurally valid and unsupported; they MUST NOT be decoded as a
 different application or cause application-state mutation.
 
 `coppice-core` owns `MAX_CPV1_PAYLOAD_LEN = 16_093` and derives
-`MAX_APPLICATION_PAYLOAD_LEN = 16_093 - 38 = 16_055`. During additive
-extraction, the existing production constants module may re-export the Core
-limit, but MUST NOT maintain an independent numeric definition.
+`MAX_APPLICATION_PAYLOAD_LEN = 16_093 - 38 = 16_055`. No application or wallet
+adapter may maintain an independent numeric definition.
 
 For the general runtime carrier, the CPV1 START binding field is
 `CoreRuntimeId`, and the CPV1 payload digest authenticates the complete CA01
 envelope. `NamesDeploymentId` remains inside Names cryptographic and state
 domains and is not an envelope field.
 
-This repository introduces the identities, envelope, and future-runtime vector
-additively before switching production replay. Until the later coordinated
-cutover, the qualified production carrier path and `carrier.json` retain their
-existing naked-Names payload and existing START binding. Implementations MUST
-NOT add a dual parser: the cutover requires an explicit activation rule and one
-unambiguous format at each height.
+The general runtime format is authoritative at every processed height beginning
+with `runtime_activation_height`: START binds `CoreRuntimeId`, and the payload
+is exactly one CA01 envelope. Coppice Names v1 accepts only its frozen
+`ApplicationId || application_version` route and then decodes the unchanged
+Names operation payload. There is no naked-Names fallback or dual parser.
+
+The Testnet and Regtest deployments are qualification/development deployments
+with no announced public history. Existing pre-cutover local snapshots are a
+development persistence format and MUST be rebuilt from the configured
+activation checkpoint. The unchanged `carrier.json` vectors remain normative
+for the parameterized CPV1 framing algorithm; `application_envelopes.json`
+freezes the production Names v1 routing bytes.
 
 ## P-DEP-001 — Names deployment parameters
 
@@ -351,7 +356,7 @@ pub struct Rendezvous {
     pub orchard_receiver: [u8; 43],
 }
 
-pub struct DeploymentParameters { // transitional name: NamesDeploymentParameters
+pub struct DeploymentParameters { // Names v1 deployment parameters
     pub network_id: Vec<u8>,
     pub address_network: zcash_protocol::consensus::NetworkType,
     pub activation_height: u32,
@@ -404,8 +409,8 @@ and Zcash Testnet qualification environments can be configured separately.
 ## P-DEP-002 — Names deployment identifier
 
 Every Names deployment has a deterministic 32-byte `NamesDeploymentId`. The
-current implementation method remains named `deployment_id()` during the
-additive extraction.
+historical Names-facing convenience method remains named `deployment_id()`;
+typed architecture APIs expose `NamesDeploymentId`.
 
 It MUST be computed from the complete canonical deployment parameters.
 
@@ -1856,11 +1861,10 @@ fee calculation; fee cost scales with the number of Ironwood logical actions.
 
 ## P-CARRIER-002 — Carrier memo format
 
-This section specifies the currently qualified pre-cutover Names carrier. The
-general runtime retains every CPV1 framing rule below, but at its explicit
-cutover binds START to `CoreRuntimeId` and carries the CA01 application
-envelope specified by P-APPLICATION-ENVELOPE-001. The two formats are never
-accepted concurrently at one height.
+This section specifies the Core-owned CPV1 transport. START binds
+`CoreRuntimeId` and carries the CA01 application envelope specified by
+P-APPLICATION-ENVELOPE-001. A naked application payload or Names-bound START is
+not accepted at any runtime height.
 
 Coppice v1 targets the currently deployed NU6.3/v6 Ironwood note-encryption
 format, in which each Ironwood output carries exactly 512 bytes of memo
@@ -1915,7 +1919,7 @@ zip302_arbitrary_u8(0xFF) ||
 magic[4]("CPV1") ||
 frame_type_u8(0x00) ||
 frame_index_u8(0x00) ||
-deployment_id[32] ||
+core_runtime_id[32] ||
 frame_count_u8 ||
 payload_length_u16 ||
 payload_digest[32] ||
@@ -2006,8 +2010,8 @@ needed.
 
 No txid grinding exists.
 
-No operation identifier exists outside the payload because v1 permits exactly
-one logical Coppice operation per carrier transaction.
+Application routing is inside the authenticated CA01 payload. CPV1 itself
+permits exactly one logical application envelope per carrier transaction.
 
 With the current v1 protocol maxima, the largest REVEAL payload is 8,906 bytes.
 It therefore requires:
@@ -2030,15 +2034,15 @@ rather than silently changing this frame format.
 ## P-CARRIER-003 — Frame validation
 
 For a transaction whose compact Ironwood data indicates one or more outputs
-decryptable under the deployment rendezvous IVK, all matching full-transaction
+decryptable under the runtime rendezvous IVK, all matching full-transaction
 frames are parsed independently and reordered by `frame_index`.
 
-A valid Coppice carrier for this deployment requires:
+A valid Coppice carrier for this runtime requires:
 
 - exactly one START frame;
 - START to have `frame_index = 0`;
 - every CONT to have `1 <= frame_index < 32`;
-- `deployment_id` in START to equal this deployment;
+- `core_runtime_id` in START to equal this runtime;
 - `1 <= frame_count <= 32`;
 - `0 < payload_length <= MAX_PAYLOAD_LEN`;
 - `frame_count == required_frames(payload_length)`;
@@ -2052,13 +2056,13 @@ A valid Coppice carrier for this deployment requires:
 - concatenated payload length to equal `payload_length`;
 - `H("CoppicePayloadV1", payload)` to equal `payload_digest`.
 
-If the recognized START frame has a different `deployment_id`, the
-transaction is not a carrier for this deployment and is ignored by this
-deployment's operation decoder.
+If the recognized START frame has a different `core_runtime_id`, the
+transaction is not a carrier for this runtime and is ignored by this runtime.
 
-Any ambiguity after a START identifying this deployment is a malformed Coppice
-operation and reduces to a deterministic protocol rejection; the transaction's
-ordinary Ironwood nullifier and commitment effects still apply.
+Any ambiguity after a START identifying this runtime is malformed transport.
+It is delivered as a deterministic application rejection only to the routed
+application lifecycle; the transaction's ordinary Ironwood nullifier and
+commitment effects still apply.
 
 ## P-CARRIER-004 — One logical operation per transaction
 
@@ -2210,8 +2214,10 @@ For each transaction in ascending `tx_index`:
 3. derive RecentSpent tags;
 4. terminate any matching active bonds;
 5. append all Ironwood commitments to the frontier;
-6. decode/reconstruct the optional Coppice carrier;
-7. apply at most one Coppice operation.
+6. decode/reconstruct the optional Core carrier and CA01 route;
+7. deliver canonical effects plus the routed message to each active,
+   independently owned application;
+8. apply at most one Names operation when the route is Coppice Names v1.
 
 The key rule is:
 
@@ -2231,13 +2237,15 @@ After all transactions in block `H`:
 6. compute NameTree root;
 7. compute pending commitment root;
 8. compute RecentSpent root;
-9. compute Coppice state root;
-10. advance reducer tip to `(H, block_hash)`.
+9. compute the Names application state root;
+10. atomically advance the Names application tip to `(H, block_hash)`;
+11. commit the already-staged Core tip/frontier/checkpoint and application
+    state together at the runtime boundary.
 
 ## P-REDUCE-006 — Replay tip
 
 ```rust
-pub struct ReplayTip {
+pub struct CoreReplayTip {
     pub height: u32,
     pub block_hash: [u8; 32],
 }

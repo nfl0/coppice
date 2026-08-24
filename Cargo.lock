@@ -345,6 +345,7 @@ name = "coppice-librustzcash"
 version = "0.1.0"
 dependencies = [
  "coppice",
+ "coppice-core",
  "hex",
  "incrementalmerkletree",
  "orchard",

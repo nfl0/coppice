@@ -4,11 +4,12 @@
 use std::fmt::Debug;
 
 use coppice::{
-    carrier::{V1CarrierError, inspect_v1_bulletin_for},
-    config::{DeploymentParameters, Rendezvous},
-    constants::MAX_TRANSACTION_LEN,
-    envelope,
-    reducer::Reducer,
+    config::DeploymentParameters, constants::MAX_TRANSACTION_LEN, envelope,
+    names_application::names_v1_application_key, names_runtime::NamesRuntime,
+};
+use coppice_core::{
+    identity::ValidatedCoreRuntimeParameters,
+    runtime::{ApplicationMessageStatus, inspect_transaction},
 };
 use sapling::prover::{OutputProver, SpendProver};
 use zcash_client_backend::{
@@ -93,8 +94,7 @@ pub fn carrier_transaction_request(
 pub struct PreparedCarrierProposal<'a, FeeRuleT, NoteRef> {
     proposal: Proposal<FeeRuleT, NoteRef>,
     prepared: &'a PreparedCarrier,
-    rendezvous: Rendezvous,
-    deployment_id: [u8; 32],
+    runtime_parameters: ValidatedCoreRuntimeParameters,
 }
 
 impl<FeeRuleT, NoteRef> PreparedCarrierProposal<'_, FeeRuleT, NoteRef> {
@@ -147,7 +147,7 @@ pub enum CarrierProposalError<HostError, LockError: Debug, ProposalError, Cleanu
 pub fn propose_carrier_transaction<'a, Host, DbT, ParamsT, InputsT, ChangeT, CommitmentTreeErrT>(
     mode: CoppiceProtectionMode,
     host_tip_source: &Host,
-    reducer: &Reducer,
+    runtime: &NamesRuntime,
     pending: &PendingRegistrationCollection,
     capability: IronwoodViewingCapability,
     wallet_db: &mut DbT,
@@ -178,15 +178,15 @@ where
     InputsT: InputSelector<InputSource = DbT>,
     ChangeT: ChangeStrategy<MetaSource = DbT>,
 {
-    if params.network_type() != reducer.deployment().address_network {
+    if params.network_type() != runtime.deployment().address_network {
         return Err(CarrierProposalError::NetworkMismatch);
     }
     if spend_policy.locked_input_policy().admits_locked() {
         return Err(CarrierProposalError::LockedInputsPermitted);
     }
-    let request = carrier_transaction_request(reducer.deployment(), prepared)
+    let request = carrier_transaction_request(runtime.deployment(), prepared)
         .map_err(CarrierProposalError::Request)?;
-    let expected_height = reducer
+    let expected_height = runtime
         .tip()
         .height
         .checked_add(1)
@@ -212,7 +212,7 @@ where
     let (proposal_result, _) = with_coppice_spend_guard(
         mode,
         host_tip_source,
-        reducer,
+        runtime,
         pending,
         account_id,
         reconcile_capability,
@@ -268,8 +268,7 @@ where
     Ok(PreparedCarrierProposal {
         proposal,
         prepared,
-        rendezvous: reducer.deployment().rendezvous,
-        deployment_id: reducer.deployment_id(),
+        runtime_parameters: runtime.core().parameters().clone(),
     })
 }
 
@@ -298,12 +297,20 @@ pub enum PostBuildInvariantError<DbError> {
     ConstructedTransactionUnavailable(DbError),
     MissingConstructedTransaction,
     MissingIronwoodBundle,
-    BulletinDecode(V1CarrierError),
+    BulletinDecode(PostBuildRoutingError),
     BulletinFrameCountMismatch { expected: usize, actual: usize },
     BulletinFrameMismatch { index: usize },
     PayloadMismatch,
     Serialization,
     TransactionTooLarge { size: usize },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PostBuildRoutingError {
+    NotFound,
+    MalformedTransport,
+    MalformedEnvelope,
+    WrongApplication,
 }
 
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
@@ -361,11 +368,7 @@ where
             reason: PostBuildInvariantError::MissingIronwoodBundle,
         });
     }
-    let inspection = inspect_v1_bulletin_for(&tx, prepared.rendezvous, prepared.deployment_id)
-        .map_err(|error| CarrierConstructionError::PostBuildInvariant {
-            txid,
-            reason: PostBuildInvariantError::BulletinDecode(error),
-        })?;
+    let inspection = inspect_transaction(&tx, &prepared.runtime_parameters);
     if inspection.frames().len() != prepared.prepared.frames().len() {
         return Err(CarrierConstructionError::PostBuildInvariant {
             txid,
@@ -383,12 +386,46 @@ where
             });
         }
     }
-    if inspection.operation() != &expected_operation
-        || envelope::encode_operation(inspection.operation())
-            .ok()
-            .as_deref()
-            != Some(prepared.prepared.payload())
-        || inspection.payload() != prepared.prepared.payload()
+    let message = match inspection.message() {
+        ApplicationMessageStatus::Message(message)
+            if message.key() == names_v1_application_key() =>
+        {
+            message
+        }
+        ApplicationMessageStatus::Message(_) => {
+            return Err(CarrierConstructionError::PostBuildInvariant {
+                txid,
+                reason: PostBuildInvariantError::BulletinDecode(
+                    PostBuildRoutingError::WrongApplication,
+                ),
+            });
+        }
+        ApplicationMessageStatus::MalformedTransport(_) => {
+            return Err(CarrierConstructionError::PostBuildInvariant {
+                txid,
+                reason: PostBuildInvariantError::BulletinDecode(
+                    PostBuildRoutingError::MalformedTransport,
+                ),
+            });
+        }
+        ApplicationMessageStatus::MalformedEnvelope(_) => {
+            return Err(CarrierConstructionError::PostBuildInvariant {
+                txid,
+                reason: PostBuildInvariantError::BulletinDecode(
+                    PostBuildRoutingError::MalformedEnvelope,
+                ),
+            });
+        }
+        ApplicationMessageStatus::NotCandidate | ApplicationMessageStatus::NoMessage => {
+            return Err(CarrierConstructionError::PostBuildInvariant {
+                txid,
+                reason: PostBuildInvariantError::BulletinDecode(PostBuildRoutingError::NotFound),
+            });
+        }
+    };
+    if envelope::decode_operation(message.payload()).ok().as_ref() != Some(&expected_operation)
+        || message.payload() != prepared.prepared.payload()
+        || message.encode() != prepared.prepared.application_envelope()
     {
         return Err(CarrierConstructionError::PostBuildInvariant {
             txid,
@@ -456,7 +493,9 @@ mod tests {
     }
 
     fn prepared(deployment: &DeploymentParameters, operation: Operation) -> PreparedCarrier {
-        PreparedCarrier::from_operation(deployment.deployment_id().unwrap(), &operation).unwrap()
+        let parameters =
+            coppice::names_application::names_v1_core_runtime_parameters(deployment).unwrap();
+        PreparedCarrier::from_operation(parameters.core_runtime_id(), &operation).unwrap()
     }
 
     fn assert_request(operation: Operation, expected_frames: usize) {

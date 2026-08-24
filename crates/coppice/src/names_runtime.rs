@@ -1,7 +1,7 @@
-//! Additive Coppice Names v1 application replay over generic Core context.
+//! Production Coppice Names v1 application replay over generic Core context.
 //!
-//! This module is not production authority yet. Names consumes generic routed
-//! application envelopes and canonical effects emitted by Core.
+//! Names consumes generic routed application envelopes and canonical effects
+//! emitted by Core; it does not own canonical Zcash replay or fork choice.
 
 use crate::{
     authorization,
@@ -20,13 +20,13 @@ use crate::{
     state::{CoppiceState, StateMutationError},
     state_root::{self, StateRootInput},
 };
+pub use coppice_core::replay::{
+    CoreCanonicalBlockInput, CoreCanonicalTransactionInput, CoreIronwoodCheckpoint, CoreReplay,
+    CoreReplayActivationCheckpoint, CoreReplayConfiguration, CoreReplayConfigurationError,
+    CoreReplayError, CoreReplayTip, CoreRewindError, IronwoodFrontier,
+};
 use coppice_core::{
     application::{ApplicationDescriptor, ApplicationTip, CoppiceApplication},
-    replay::{
-        CoreCanonicalBlockInput, CoreIronwoodCheckpoint, CoreReplay,
-        CoreReplayActivationCheckpoint, CoreReplayConfiguration, CoreReplayConfigurationError,
-        CoreReplayError, CoreRewindError,
-    },
     runtime::{
         ApplicationMessageStatus, CoreRuntime, CoreRuntimeConfigurationError,
         CoreRuntimeSnapshotError, RuntimeBlockContext,
@@ -322,6 +322,18 @@ impl NamesApplication {
 
     pub fn state(&self) -> &CoppiceState {
         &self.state
+    }
+
+    pub fn descriptor(&self) -> ApplicationDescriptor {
+        self.descriptor
+    }
+
+    pub fn tip(&self) -> ApplicationTip {
+        self.tip
+    }
+
+    pub fn state_root(&self) -> [u8; 32] {
+        self.state_root
     }
 
     pub fn oldest_rewind_height(&self) -> u32 {
@@ -852,15 +864,14 @@ impl CoppiceApplication for NamesApplication {
     }
 }
 
-/// Additive composite used only to prove that generic Core replay plus the
-/// first application reproduces the monolithic reducer.
+/// Production composition of generic Core replay and Coppice Names v1.
 pub struct NamesRuntime {
     core: CoreRuntime,
     names: NamesApplication,
 }
 
 impl NamesRuntime {
-    pub fn new(
+    pub fn from_core(
         core: CoreRuntime,
         deployment: DeploymentParameters,
     ) -> Result<Self, NamesRuntimeInitializationError> {
@@ -874,6 +885,62 @@ impl NamesRuntime {
 
     pub fn names(&self) -> &NamesApplication {
         &self.names
+    }
+
+    pub fn deployment(&self) -> &DeploymentParameters {
+        self.names.deployment()
+    }
+
+    pub fn names_deployment_id(&self) -> NamesDeploymentId {
+        self.names.deployment_id()
+    }
+
+    /// Frozen Coppice Names v1 deployment identity used by Names
+    /// cryptography. This is deliberately distinct from CoreRuntimeId.
+    pub fn deployment_id(&self) -> [u8; 32] {
+        self.names.deployment_id().to_bytes()
+    }
+
+    pub fn state(&self) -> &CoppiceState {
+        self.names.state()
+    }
+
+    pub fn state_root(&self) -> [u8; 32] {
+        self.names.state_root()
+    }
+
+    pub fn tip(&self) -> coppice_core::replay::CoreReplayTip {
+        self.core.tip()
+    }
+
+    pub fn ironwood_frontier(&self) -> &coppice_core::replay::IronwoodFrontier {
+        self.core.ironwood_frontier()
+    }
+
+    pub fn ironwood_checkpoints(&self) -> &BTreeMap<u32, CoreIronwoodCheckpoint> {
+        self.core.ironwood_checkpoints()
+    }
+
+    pub fn oldest_rewind_height(&self) -> u32 {
+        debug_assert_eq!(
+            self.core.oldest_rewind_height(),
+            self.names.oldest_rewind_height()
+        );
+        self.core.oldest_rewind_height()
+    }
+
+    pub fn reorg_retention_blocks(&self) -> u32 {
+        self.core.configuration().retention_blocks()
+    }
+
+    pub fn has_rewind_snapshot(&self, height: u32) -> bool {
+        self.core.has_rewind_snapshot(height) && self.names.has_rewind_snapshot(height)
+    }
+
+    pub fn retained_tip_at(&self, height: u32) -> Option<coppice_core::replay::CoreReplayTip> {
+        let core = self.core.retained_tip_at(height)?;
+        let names = self.names.retained_tip_at(height)?;
+        (core.height == names.height && core.block_hash == names.block_hash).then_some(core)
     }
 
     pub fn apply_block(
@@ -978,6 +1045,13 @@ impl NamesRuntime {
 }
 
 impl NamesRuntime {
+    pub fn new(
+        deployment: DeploymentParameters,
+        checkpoint: CoreReplayActivationCheckpoint,
+    ) -> Result<Self, NamesRuntimeInitializationError> {
+        Self::from_names_deployment(deployment, checkpoint)
+    }
+
     pub fn from_names_deployment(
         deployment: DeploymentParameters,
         checkpoint: CoreReplayActivationCheckpoint,
@@ -991,7 +1065,7 @@ impl NamesRuntime {
             .map_err(NamesRuntimeInitializationError::CoreReplay)?;
         let core = CoreRuntime::new(parameters, replay)
             .map_err(NamesRuntimeInitializationError::CoreRuntime)?;
-        Self::new(core, deployment)
+        Self::from_core(core, deployment)
     }
 }
 

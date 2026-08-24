@@ -1,11 +1,11 @@
 //! Wallet-facing Ironwood freshness and historical-witness preparation.
 //!
-//! The reducer's authenticated checkpoints are chain authority. A wallet tree
+//! The runtime's authenticated checkpoints are chain authority. A wallet tree
 //! is proving infrastructure only, and may lack or prune historical data. A
 //! richer backend may later implement [`IronwoodWitnessSource`] to reconstruct
 //! older witnesses, but callers must never silently substitute another anchor.
 
-use coppice::reducer::Reducer;
+use coppice::names_runtime::NamesRuntime;
 use incrementalmerkletree::Position;
 use orchard::tree::{Anchor, MerklePath};
 use shardtree::{ShardTree, error::ShardTreeError, store::ShardStore};
@@ -48,10 +48,10 @@ pub enum FreshnessContextError {
 }
 
 fn freshness_at(
-    reducer: &Reducer,
+    runtime: &NamesRuntime,
     commit_height: u32,
 ) -> Result<BondFreshnessContext, FreshnessContextError> {
-    let deployment = reducer.deployment();
+    let deployment = runtime.deployment();
     if commit_height < deployment.activation_height {
         return Err(FreshnessContextError::CommitBeforeActivation {
             commit_height,
@@ -66,7 +66,7 @@ fn freshness_at(
     )?;
     let floor_height =
         activation_floor.max(commit_height.saturating_sub(deployment.bond_note_max_age_blocks));
-    let checkpoint = reducer.ironwood_checkpoints().get(&floor_height).ok_or(
+    let checkpoint = runtime.ironwood_checkpoints().get(&floor_height).ok_or(
         FreshnessContextError::CheckpointUnavailable {
             height: floor_height,
         },
@@ -80,24 +80,24 @@ fn freshness_at(
 }
 
 pub fn freshness_for_canonical_commit(
-    reducer: &Reducer,
+    runtime: &NamesRuntime,
     commit_height: u32,
 ) -> Result<BondFreshnessContext, FreshnessContextError> {
-    let tip_height = reducer.tip().height;
+    let tip_height = runtime.tip().height;
     if commit_height > tip_height {
         return Err(FreshnessContextError::CanonicalCommitAboveTip {
             commit_height,
             tip_height,
         });
     }
-    freshness_at(reducer, commit_height)
+    freshness_at(runtime, commit_height)
 }
 
 pub fn freshness_for_next_block_commit(
-    reducer: &Reducer,
+    runtime: &NamesRuntime,
     commit_height: u32,
 ) -> Result<BondFreshnessContext, FreshnessContextError> {
-    let tip_height = reducer.tip().height;
+    let tip_height = runtime.tip().height;
     let next_height = tip_height
         .checked_add(1)
         .ok_or(FreshnessContextError::TipHeightOverflow { tip_height })?;
@@ -107,7 +107,7 @@ pub fn freshness_for_next_block_commit(
             next_height,
         });
     }
-    freshness_at(reducer, commit_height)
+    freshness_at(runtime, commit_height)
 }
 
 pub fn select_fresh_bond_note(
@@ -264,7 +264,7 @@ pub enum ResolveWitnessError<E> {
 }
 
 pub fn anchor_for_registration(
-    reducer: &Reducer,
+    runtime: &NamesRuntime,
     commit_height: u32,
     anchor_height: u32,
 ) -> Result<AnchorContext, ResolveWitnessError<std::convert::Infallible>> {
@@ -274,14 +274,14 @@ pub fn anchor_for_registration(
             anchor_height,
         });
     }
-    let tip_height = reducer.tip().height;
+    let tip_height = runtime.tip().height;
     if anchor_height > tip_height {
         return Err(ResolveWitnessError::AnchorAboveTip {
             anchor_height,
             tip_height,
         });
     }
-    let checkpoint = reducer.ironwood_checkpoints().get(&anchor_height).ok_or(
+    let checkpoint = runtime.ironwood_checkpoints().get(&anchor_height).ok_or(
         ResolveWitnessError::CheckpointUnavailable {
             height: anchor_height,
         },
@@ -295,19 +295,19 @@ pub fn anchor_for_registration(
 }
 
 pub fn choose_current_anchor(
-    reducer: &Reducer,
+    runtime: &NamesRuntime,
     commit_height: u32,
 ) -> Result<AnchorContext, ResolveWitnessError<std::convert::Infallible>> {
-    anchor_for_registration(reducer, commit_height, reducer.tip().height)
+    anchor_for_registration(runtime, commit_height, runtime.tip().height)
 }
 
 pub fn resolve_canonical_ironwood_witness<S: IronwoodWitnessSource>(
-    reducer: &Reducer,
+    runtime: &NamesRuntime,
     source: &mut S,
     position: u32,
     anchor_height: u32,
 ) -> Result<IronwoodWitness, ResolveWitnessError<S::Error>> {
-    let checkpoint = reducer.ironwood_checkpoints().get(&anchor_height).ok_or(
+    let checkpoint = runtime.ironwood_checkpoints().get(&anchor_height).ok_or(
         ResolveWitnessError::CheckpointUnavailable {
             height: anchor_height,
         },
@@ -350,7 +350,11 @@ mod tests {
 
     use coppice::{
         config::{DeploymentParameters, Rendezvous},
-        reducer::{ActivationCheckpoint, CanonicalBlockInput, CanonicalTxInput, IronwoodFrontier},
+        constants::REGTEST_NETWORK_ID,
+        names_runtime::{
+            CoreCanonicalBlockInput, CoreCanonicalTransactionInput, CoreReplayActivationCheckpoint,
+            IronwoodFrontier,
+        },
     };
     use incrementalmerkletree::{Hashable, Marking, Retention};
     use orchard::tree::MerkleHashOrchard;
@@ -362,7 +366,7 @@ mod tests {
 
     fn deployment(max_age: u32) -> DeploymentParameters {
         DeploymentParameters {
-            network_id: b"test".to_vec(),
+            network_id: REGTEST_NETWORK_ID.to_vec(),
             address_network: NetworkType::Regtest,
             activation_height: 100,
             minimum_bond_value: 10,
@@ -373,10 +377,10 @@ mod tests {
         }
     }
 
-    fn reducer(max_age: u32) -> Reducer {
-        Reducer::new(
+    fn runtime(max_age: u32) -> NamesRuntime {
+        NamesRuntime::new(
             deployment(max_age),
-            ActivationCheckpoint {
+            CoreReplayActivationCheckpoint {
                 height: 99,
                 block_hash: [99; 32],
                 ironwood_frontier: IronwoodFrontier::empty(),
@@ -386,11 +390,11 @@ mod tests {
         .unwrap()
     }
 
-    fn apply_block(reducer: &mut Reducer, commitments: usize) {
-        let tip = reducer.tip();
+    fn apply_block(runtime: &mut NamesRuntime, commitments: usize) {
+        let tip = runtime.tip();
         let height = tip.height.checked_add(1).unwrap();
         let transactions = (commitments > 0)
-            .then(|| CanonicalTxInput {
+            .then(|| CoreCanonicalTransactionInput {
                 tx_index: 0,
                 txid: [height as u8; 32],
                 ironwood_nullifiers: vec![],
@@ -402,8 +406,8 @@ mod tests {
             })
             .into_iter()
             .collect();
-        reducer
-            .apply_block(&CanonicalBlockInput {
+        runtime
+            .apply_block(&CoreCanonicalBlockInput {
                 height,
                 block_hash: [height as u8; 32],
                 prev_block_hash: tip.block_hash,
@@ -419,9 +423,9 @@ mod tests {
         Option::from(MerkleHashOrchard::from_bytes(&bytes)).unwrap()
     }
 
-    fn advance_to(reducer: &mut Reducer, height: u32) {
-        while reducer.tip().height < height {
-            apply_block(reducer, 0);
+    fn advance_to(runtime: &mut NamesRuntime, height: u32) {
+        while runtime.tip().height < height {
+            apply_block(runtime, 0);
         }
     }
 
@@ -454,12 +458,12 @@ mod tests {
 
     #[test]
     fn freshness_formula_activation_saturation_and_normal_boundaries() {
-        let mut early = reducer(50);
+        let mut early = runtime(50);
         apply_block(&mut early, 0);
         let context = freshness_for_canonical_commit(&early, 100).unwrap();
         assert_eq!(context.floor_height, 99);
 
-        let mut saturated = reducer(150);
+        let mut saturated = runtime(150);
         apply_block(&mut saturated, 0);
         assert_eq!(
             freshness_for_canonical_commit(&saturated, 100)
@@ -468,7 +472,7 @@ mod tests {
             99
         );
 
-        let mut normal = reducer(100);
+        let mut normal = runtime(100);
         advance_to(&mut normal, 250);
         assert_eq!(
             freshness_for_canonical_commit(&normal, 250)
@@ -480,20 +484,20 @@ mod tests {
 
     #[test]
     fn commit_height_modes_are_bounded_and_missing_floor_is_explicit() {
-        let mut reducer = reducer(100);
-        apply_block(&mut reducer, 0);
-        assert!(freshness_for_next_block_commit(&reducer, 101).is_ok());
+        let mut runtime = runtime(100);
+        apply_block(&mut runtime, 0);
+        assert!(freshness_for_next_block_commit(&runtime, 101).is_ok());
         assert!(matches!(
-            freshness_for_next_block_commit(&reducer, 102),
+            freshness_for_next_block_commit(&runtime, 102),
             Err(FreshnessContextError::NotNextBlock { .. })
         ));
         assert!(matches!(
-            freshness_for_canonical_commit(&reducer, 101),
+            freshness_for_canonical_commit(&runtime, 101),
             Err(FreshnessContextError::CanonicalCommitAboveTip { .. })
         ));
-        advance_to(&mut reducer, 250);
+        advance_to(&mut runtime, 250);
         assert_eq!(
-            freshness_for_canonical_commit(&reducer, 100),
+            freshness_for_canonical_commit(&runtime, 100),
             Err(FreshnessContextError::CheckpointUnavailable { height: 99 })
         );
     }
@@ -570,16 +574,16 @@ mod tests {
 
     #[test]
     fn canonical_resolution_checks_order_position_height_and_root() {
-        let mut reducer = reducer(100);
-        apply_block(&mut reducer, 1);
-        let checkpoint = reducer.ironwood_checkpoints()[&100];
+        let mut runtime = runtime(100);
+        apply_block(&mut runtime, 1);
+        let checkpoint = runtime.ironwood_checkpoints()[&100];
 
         let mut missing = FakeSource {
             witness: None,
             calls: 0,
         };
         assert!(matches!(
-            resolve_canonical_ironwood_witness(&reducer, &mut missing, 0, 101),
+            resolve_canonical_ironwood_witness(&runtime, &mut missing, 0, 101),
             Err(ResolveWitnessError::CheckpointUnavailable { height: 101 })
         ));
         assert_eq!(missing.calls, 0);
@@ -589,7 +593,7 @@ mod tests {
             calls: 0,
         };
         assert!(matches!(
-            resolve_canonical_ironwood_witness(&reducer, &mut outside, 1, 100),
+            resolve_canonical_ironwood_witness(&runtime, &mut outside, 1, 100),
             Err(ResolveWitnessError::PositionOutsideTree { .. })
         ));
         assert_eq!(outside.calls, 0);
@@ -632,7 +636,7 @@ mod tests {
             ),
         ] {
             let result = resolve_canonical_ironwood_witness(
-                &reducer,
+                &runtime,
                 &mut FakeSource {
                     witness: Some(witness),
                     calls: 0,
@@ -661,19 +665,19 @@ mod tests {
 
     #[test]
     fn reorg_rejects_old_branch_root_and_accepts_current_root() {
-        let mut reducer = reducer(100);
-        apply_block(&mut reducer, 1);
-        let old_root = reducer.ironwood_checkpoints()[&100].root;
-        reducer.rewind_to(99).unwrap();
-        apply_block(&mut reducer, 2);
-        let replacement_root = reducer.ironwood_checkpoints()[&100].root;
+        let mut runtime = runtime(100);
+        apply_block(&mut runtime, 1);
+        let old_root = runtime.ironwood_checkpoints()[&100].root;
+        runtime.rewind_to(99).unwrap();
+        apply_block(&mut runtime, 2);
+        let replacement_root = runtime.ironwood_checkpoints()[&100].root;
         assert_ne!(old_root, replacement_root);
 
         let mut old = test_witness(0, 100);
         old.root = old_root;
         assert!(matches!(
             resolve_canonical_ironwood_witness(
-                &reducer,
+                &runtime,
                 &mut FakeSource {
                     witness: Some(old),
                     calls: 0
@@ -688,7 +692,7 @@ mod tests {
         replacement.root = replacement_root;
         assert!(
             resolve_canonical_ironwood_witness(
-                &reducer,
+                &runtime,
                 &mut FakeSource {
                     witness: Some(replacement),
                     calls: 0

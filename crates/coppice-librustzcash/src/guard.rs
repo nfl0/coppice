@@ -1,6 +1,6 @@
 use std::fmt::Debug;
 
-use coppice::reducer::{Reducer, ReplayTip};
+use coppice::names_runtime::{CoreReplayTip, NamesRuntime};
 
 use crate::{
     CoppiceLockBackend, IronwoodViewingCapability, PendingRegistrationCollection,
@@ -18,8 +18,8 @@ pub struct WalletCanonicalTip {
     pub block_hash: [u8; 32],
 }
 
-impl From<ReplayTip> for WalletCanonicalTip {
-    fn from(tip: ReplayTip) -> Self {
+impl From<CoreReplayTip> for WalletCanonicalTip {
+    fn from(tip: CoreReplayTip) -> Self {
         Self {
             height: tip.height,
             block_hash: tip.block_hash,
@@ -52,12 +52,12 @@ pub enum ExactCanonicalTipError<E> {
 
 pub fn require_exact_canonical_tip<Host: HostCanonicalTipSource>(
     host_tip_source: &Host,
-    reducer: &Reducer,
+    runtime: &NamesRuntime,
 ) -> Result<WalletCanonicalTip, ExactCanonicalTipError<Host::Error>> {
     let host_tip = host_tip_source
         .canonical_tip()
         .map_err(ExactCanonicalTipError::HostTipUnavailable)?;
-    let coppice_tip = WalletCanonicalTip::from(reducer.tip());
+    let coppice_tip = WalletCanonicalTip::from(runtime.tip());
     if host_tip.height != coppice_tip.height {
         return Err(ExactCanonicalTipError::HeightMismatch {
             host_height: host_tip.height,
@@ -110,7 +110,7 @@ pub enum SpendGuardError<HostError, BackendError: Debug> {
 /// Runs a proposal callback only after the protected Coppice preconditions
 /// have succeeded.
 ///
-/// `Off` deliberately does not read the host tip, reducer state, or lock
+/// `Off` deliberately does not read the host tip, runtime state, or lock
 /// backend. `Enabled` and `GuardOnly` always perform exact tip comparison and
 /// a fresh lock reconciliation before invoking `proposal_fn`; this also repairs
 /// locks that were cleared by an external generic wallet recovery operation.
@@ -123,7 +123,7 @@ pub enum SpendGuardError<HostError, BackendError: Debug> {
 pub fn with_coppice_spend_guard<Host, Backend, Proposal>(
     mode: CoppiceProtectionMode,
     host_tip_source: &Host,
-    reducer: &Reducer,
+    runtime: &NamesRuntime,
     pending: &PendingRegistrationCollection,
     account_id: WalletAccountId,
     capability: IronwoodViewingCapability,
@@ -138,7 +138,7 @@ where
         return Ok((proposal_fn(lock_backend), None));
     }
 
-    require_exact_canonical_tip(host_tip_source, reducer).map_err(|error| match error {
+    require_exact_canonical_tip(host_tip_source, runtime).map_err(|error| match error {
         ExactCanonicalTipError::HostTipUnavailable(error) => {
             SpendGuardError::HostTipUnavailable(error)
         }
@@ -160,7 +160,7 @@ where
         },
     })?;
 
-    let active_tags = active_canonical_bond_tags(reducer);
+    let active_tags = active_canonical_bond_tags(runtime);
     let report = reconcile_locks(&active_tags, pending, account_id, capability, lock_backend)
         .map_err(SpendGuardError::ReconciliationFailed)?;
     Ok((proposal_fn(lock_backend), Some(report)))
@@ -173,8 +173,8 @@ mod tests {
     use coppice::{
         config::{DeploymentParameters, REGTEST, Rendezvous},
         constants::REGTEST_ACTIVATION_HEIGHT,
+        names_runtime::{CoreReplayActivationCheckpoint, IronwoodFrontier, NamesRuntime},
         owner::{OwnerSigningKey, owner_key_bytes},
-        reducer::{ActivationCheckpoint, IronwoodFrontier, Reducer},
         registration::registration_commitment,
     };
     use zcash_client_backend::wallet::LockOwner;
@@ -322,10 +322,10 @@ mod tests {
         }
     }
 
-    fn reducer() -> Reducer {
-        Reducer::new(
+    fn runtime() -> NamesRuntime {
+        NamesRuntime::new(
             deployment(),
-            ActivationCheckpoint {
+            CoreReplayActivationCheckpoint {
                 height: REGTEST_ACTIVATION_HEIGHT - 1,
                 block_hash: [9; 32],
                 ironwood_frontier: IronwoodFrontier::empty(),
@@ -335,9 +335,9 @@ mod tests {
         .unwrap()
     }
 
-    fn matching_host(reducer: &Reducer) -> FakeHost {
+    fn matching_host(runtime: &NamesRuntime) -> FakeHost {
         FakeHost {
-            result: Ok(reducer.tip().into()),
+            result: Ok(runtime.tip().into()),
         }
     }
 
@@ -399,11 +399,11 @@ mod tests {
         proposal: impl FnOnce(&mut FakeBackend) -> Proposal,
     ) -> Result<(Proposal, Option<ReconciliationReport>), SpendGuardError<HostError, BackendError>>
     {
-        let reducer = reducer();
+        let runtime = runtime();
         with_coppice_spend_guard(
             mode,
             host,
-            &reducer,
+            &runtime,
             pending,
             account_id(),
             IronwoodViewingCapability::FullViewing,
@@ -437,11 +437,11 @@ mod tests {
 
     #[test]
     fn height_mismatch_does_not_call_proposal() {
-        let reducer = reducer();
+        let runtime = runtime();
         let host = FakeHost {
             result: Ok(WalletCanonicalTip {
-                height: reducer.tip().height + 1,
-                block_hash: reducer.tip().block_hash,
+                height: runtime.tip().height + 1,
+                block_hash: runtime.tip().block_hash,
             }),
         };
         let mut backend = FakeBackend::new(Vec::new());
@@ -462,10 +462,10 @@ mod tests {
 
     #[test]
     fn hash_mismatch_at_equal_height_does_not_call_proposal() {
-        let reducer = reducer();
+        let runtime = runtime();
         let host = FakeHost {
             result: Ok(WalletCanonicalTip {
-                height: reducer.tip().height,
+                height: runtime.tip().height,
                 block_hash: [8; 32],
             }),
         };
@@ -487,8 +487,8 @@ mod tests {
 
     #[test]
     fn exact_tip_and_reconciliation_call_proposal_once() {
-        let reducer = reducer();
-        let host = matching_host(&reducer);
+        let runtime = runtime();
+        let host = matching_host(&runtime);
         let mut backend = FakeBackend::new(Vec::new());
         let called = std::cell::Cell::new(0);
         let result = run(
@@ -510,10 +510,10 @@ mod tests {
 
     #[test]
     fn guard_only_has_the_same_proposal_gate_as_enabled() {
-        let reducer = reducer();
+        let runtime = runtime();
         let host = FakeHost {
             result: Ok(WalletCanonicalTip {
-                height: reducer.tip().height,
+                height: runtime.tip().height,
                 block_hash: [8; 32],
             }),
         };
@@ -564,14 +564,14 @@ mod tests {
 
     #[test]
     fn incoming_only_fails_closed_before_proposal() {
-        let reducer = reducer();
-        let host = matching_host(&reducer);
+        let runtime = runtime();
+        let host = matching_host(&runtime);
         let mut backend = FakeBackend::new(Vec::new());
         let called = std::cell::Cell::new(0);
         let result = with_coppice_spend_guard(
             CoppiceProtectionMode::Enabled,
             &host,
-            &reducer,
+            &runtime,
             &empty_pending(),
             account_id(),
             IronwoodViewingCapability::IncomingOnly,
@@ -589,15 +589,15 @@ mod tests {
 
     #[test]
     fn missing_pending_note_fails_closed_before_proposal() {
-        let reducer = reducer();
-        let host = matching_host(&reducer);
+        let runtime = runtime();
+        let host = matching_host(&runtime);
         let pending = collection_with(pending_for(tag(1)));
         let mut backend = FakeBackend::new(Vec::new());
         let called = std::cell::Cell::new(0);
         let result = with_coppice_spend_guard(
             CoppiceProtectionMode::Enabled,
             &host,
-            &reducer,
+            &runtime,
             &pending,
             account_id(),
             IronwoodViewingCapability::FullViewing,
@@ -615,8 +615,8 @@ mod tests {
 
     #[test]
     fn generic_backend_failure_fails_closed_before_proposal() {
-        let reducer = reducer();
-        let host = matching_host(&reducer);
+        let runtime = runtime();
+        let host = matching_host(&runtime);
         let mut backend = FakeBackend {
             notes: Vec::new(),
             locks: BTreeMap::new(),
@@ -642,8 +642,8 @@ mod tests {
 
     #[test]
     fn foreign_lock_conflict_fails_closed_and_preserves_foreign_lock() {
-        let reducer = reducer();
-        let host = matching_host(&reducer);
+        let runtime = runtime();
+        let host = matching_host(&runtime);
         let bond_tag = tag(2);
         let output_id = note(2).output_id;
         let foreign = LockOwner::new([0xf2; 32]);
@@ -654,7 +654,7 @@ mod tests {
         let result = with_coppice_spend_guard(
             CoppiceProtectionMode::Enabled,
             &host,
-            &reducer,
+            &runtime,
             &pending,
             account_id(),
             IronwoodViewingCapability::FullViewing,
@@ -673,15 +673,15 @@ mod tests {
 
     #[test]
     fn callback_observes_unrelated_foreign_lock_on_same_backend() {
-        let reducer = reducer();
-        let host = matching_host(&reducer);
+        let runtime = runtime();
+        let host = matching_host(&runtime);
         let output_id = note(9).output_id;
         let foreign = LockOwner::new([0xa9; 32]);
         let mut backend = FakeBackend::new(vec![note(9)]).with_lock(output_id, foreign);
         with_coppice_spend_guard(
             CoppiceProtectionMode::Enabled,
             &host,
-            &reducer,
+            &runtime,
             &empty_pending(),
             account_id(),
             IronwoodViewingCapability::FullViewing,
@@ -694,8 +694,8 @@ mod tests {
 
     #[test]
     fn protected_guard_repairs_an_externally_cleared_lock_before_proposal() {
-        let reducer = reducer();
-        let host = matching_host(&reducer);
+        let runtime = runtime();
+        let host = matching_host(&runtime);
         let bond_tag = tag(3);
         let output_id = note(3).output_id;
         let pending = collection_with(pending_for(bond_tag));
@@ -703,7 +703,7 @@ mod tests {
         with_coppice_spend_guard(
             CoppiceProtectionMode::Enabled,
             &host,
-            &reducer,
+            &runtime,
             &pending,
             account_id(),
             IronwoodViewingCapability::FullViewing,
@@ -721,7 +721,7 @@ mod tests {
         with_coppice_spend_guard(
             CoppiceProtectionMode::GuardOnly,
             &host,
-            &reducer,
+            &runtime,
             &pending,
             account_id(),
             IronwoodViewingCapability::FullViewing,

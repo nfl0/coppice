@@ -402,7 +402,7 @@ mod tests {
         };
         let payload = encode_operation(&operation).unwrap();
         assert_eq!(payload.len(), 8_906);
-        let frames = crate::carrier_v1::encode_frames_v1([0; 32], &payload).unwrap();
+        let frames = coppice_core::transport::encode_frames([0; 32], &payload).unwrap();
         assert_eq!(frames.len(), 18);
         assert!(frames.len() <= usize::from(constants::MAX_FRAMES));
     }

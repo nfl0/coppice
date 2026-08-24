@@ -1,5 +1,4 @@
 use coppice::{
-    carrier_v1,
     config::{DeploymentParameters, DeploymentValidationError, Rendezvous},
     constants,
     envelope::{self, Operation},
@@ -18,6 +17,7 @@ use coppice_core::{
         MAX_APPLICATION_ENVELOPE_LEN, derive_application_id,
     },
     identity::{CoreRuntimeId, CoreRuntimeParameters, ZcashNetwork},
+    transport,
 };
 use orchard::keys::IncomingViewingKey;
 use zcash_protocol::consensus::NetworkType;
@@ -120,7 +120,7 @@ fn names_deployment_fixture() -> (serde_json::Value, DeploymentParameters) {
 }
 
 #[test]
-fn three_identity_vector_and_future_transport_binding_match() {
+fn three_identity_vector_and_production_transport_binding_match() {
     let fixture: serde_json::Value = serde_json::from_str(include_str!(
         "../../../test-vectors/application_envelopes.json"
     ))
@@ -187,24 +187,24 @@ fn three_identity_vector_and_future_transport_binding_match() {
     assert_eq!(decode_names_v1_envelope(&encoded), Ok(operation));
     assert_eq!(MAX_APPLICATION_ENVELOPE_LEN, constants::MAX_PAYLOAD_LEN);
 
-    let frames = carrier_v1::encode_frames_v1(core_runtime_id.to_bytes(), &encoded).unwrap();
+    let frames = transport::encode_frames(core_runtime_id.to_bytes(), &encoded).unwrap();
     assert_eq!(frames.len(), 1);
     assert_eq!(
         frames[0].as_slice(),
         hex::decode(
-            names["expected_future_runtime_cpv1_frame_hex"]
+            names["expected_production_cpv1_frame_hex"]
                 .as_str()
                 .unwrap()
         )
         .unwrap()
     );
     assert_eq!(
-        carrier_v1::reconstruct_frames_v1(&frames, core_runtime_id.to_bytes()).unwrap(),
+        transport::reconstruct_frames(&frames, core_runtime_id.to_bytes()).unwrap(),
         encoded
     );
     assert_eq!(
-        carrier_v1::reconstruct_frames_v1(&frames, names_deployment_id.to_bytes()),
-        Err(carrier_v1::Error::WrongDeployment)
+        transport::reconstruct_frames(&frames, names_deployment_id.to_bytes()),
+        Err(transport::Error::WrongRuntime)
     );
 
     let compatibility = validate_names_v1_core_compatibility(

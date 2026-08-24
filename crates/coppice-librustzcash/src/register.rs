@@ -8,18 +8,19 @@ use std::{convert::Infallible, fmt::Debug};
 
 use coppice::{
     bond::V1BondProver,
-    carrier_v1,
     config::DeploymentValidationError,
     envelope::{self, Operation},
+    names_application::{NamesApplicationEnvelopeError, encode_names_v1_envelope},
+    names_runtime::NamesRuntime,
     owner::{name_id, owner_key_bytes, parse_v1_owner_key},
     owner_kdf::{OwnerKdfError, derive_v1_owner_verification_key},
     pending::PendingTimingError,
     record::{NameRecord, NameStatus},
-    reducer::Reducer,
     registration::registration_commitment,
     reveal::{RevealValidationError, canonical_v1_address},
     state::CoppiceState,
 };
+use coppice_core::{identity::CoreRuntimeId, transport};
 use rand_core::{CryptoRng, RngCore};
 
 use crate::{
@@ -38,13 +39,20 @@ use crate::{
 /// This intentionally has no `Debug`: REVEAL bytes contain the registration
 /// secret before publication.
 pub struct PreparedCarrier {
-    payload: Vec<u8>,
+    operation_payload: Vec<u8>,
+    application_envelope: Vec<u8>,
     frames: Vec<[u8; 512]>,
 }
 
 impl PreparedCarrier {
+    /// Exact frozen Coppice Names v1 operation bytes.
     pub fn payload(&self) -> &[u8] {
-        &self.payload
+        &self.operation_payload
+    }
+
+    /// Exact CA01 application envelope carried by CPV1.
+    pub fn application_envelope(&self) -> &[u8] {
+        &self.application_envelope
     }
 
     pub fn frames(&self) -> &[[u8; 512]] {
@@ -52,28 +60,35 @@ impl PreparedCarrier {
     }
 
     pub(crate) fn from_operation(
-        deployment_id: [u8; 32],
+        runtime_id: CoreRuntimeId,
         operation: &Operation,
     ) -> Result<Self, CarrierPreparationError> {
-        let payload = envelope::encode_operation(operation)
+        let operation_payload = envelope::encode_operation(operation)
             .map_err(CarrierPreparationError::OperationEncoding)?;
-        let frames = carrier_v1::encode_frames_v1(deployment_id, &payload)
+        let application_envelope = encode_names_v1_envelope(operation)
+            .map_err(CarrierPreparationError::ApplicationEnvelope)?;
+        let frames = transport::encode_frames(runtime_id.to_bytes(), &application_envelope)
             .map_err(CarrierPreparationError::Framing)?;
-        Ok(Self { payload, frames })
+        Ok(Self {
+            operation_payload,
+            application_envelope,
+            frames,
+        })
     }
 }
 
 fn prepare_carrier(
-    reducer: &Reducer,
+    runtime: &NamesRuntime,
     operation: &Operation,
 ) -> Result<PreparedCarrier, CarrierPreparationError> {
-    PreparedCarrier::from_operation(reducer.deployment_id(), operation)
+    PreparedCarrier::from_operation(runtime.core().runtime_id(), operation)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CarrierPreparationError {
     OperationEncoding(envelope::Error),
-    Framing(carrier_v1::Error),
+    ApplicationEnvelope(NamesApplicationEnvelopeError),
+    Framing(transport::Error),
 }
 
 /// A COMMIT handoff that cannot be obtained until its bond is locked and its
@@ -118,7 +133,7 @@ pub enum RegistrationOwner<'a> {
 pub enum RegistrationStage {
     Prepared,
     CommitBroadcast,
-    /// The semantic commitment exists in the last observed canonical reducer
+    /// The semantic commitment exists in the last observed canonical runtime
     /// state, independently of which transaction carried it.
     CommitCanonical,
 }
@@ -156,7 +171,7 @@ pub enum BeginRegistrationError<HostError, BackendError: Debug> {
 #[allow(clippy::too_many_arguments)]
 pub fn begin_registration<Host, Backend, R>(
     host_tip_source: &Host,
-    reducer: &Reducer,
+    runtime: &NamesRuntime,
     pending_collection: &mut PendingRegistrationCollection,
     account_id: crate::WalletAccountId,
     capability: IronwoodViewingCapability,
@@ -173,7 +188,7 @@ where
 {
     begin_registration_with_policy(
         host_tip_source,
-        reducer,
+        runtime,
         pending_collection,
         account_id,
         capability,
@@ -194,7 +209,7 @@ where
 #[allow(clippy::too_many_arguments)]
 pub fn begin_registration_with_policy<Host, Backend, R>(
     host_tip_source: &Host,
-    reducer: &Reducer,
+    runtime: &NamesRuntime,
     pending_collection: &mut PendingRegistrationCollection,
     account_id: crate::WalletAccountId,
     capability: IronwoodViewingCapability,
@@ -210,8 +225,8 @@ where
     Backend: CoppiceLockBackend,
     R: RngCore + CryptoRng,
 {
-    require_exact_canonical_tip(host_tip_source, reducer).map_err(BeginRegistrationError::Tip)?;
-    let deployment = reducer.deployment();
+    require_exact_canonical_tip(host_tip_source, runtime).map_err(BeginRegistrationError::Tip)?;
+    let deployment = runtime.deployment();
     deployment
         .validate()
         .map_err(BeginRegistrationError::InvalidDeployment)?;
@@ -223,12 +238,12 @@ where
             RevealValidationError::NonCanonicalAddress,
         ));
     }
-    let commit_height = reducer
+    let commit_height = runtime
         .tip()
         .height
         .checked_add(1)
         .ok_or(BeginRegistrationError::CommitHeightOverflow)?;
-    let freshness = freshness_for_next_block_commit(reducer, commit_height)
+    let freshness = freshness_for_next_block_commit(runtime, commit_height)
         .map_err(BeginRegistrationError::Freshness)?;
     let notes = lock_backend
         .owned_unspent_ironwood_notes()
@@ -250,7 +265,7 @@ where
         RegistrationOwner::DefaultSoftware(spending_key) => owner_key_bytes(
             &derive_v1_owner_verification_key(
                 *spending_key,
-                reducer.deployment_id(),
+                runtime.deployment_id(),
                 name_id(&name),
                 selected_bond.bond_tag,
             )
@@ -279,7 +294,7 @@ where
         commitment,
     )
     .map_err(BeginRegistrationError::PendingValidation)?;
-    let carrier = prepare_carrier(reducer, &Operation::Commit { commitment })
+    let carrier = prepare_carrier(runtime, &Operation::Commit { commitment })
         .map_err(BeginRegistrationError::Carrier)?;
 
     lock_backend
@@ -321,21 +336,21 @@ pub fn record_commit_broadcast(
         })
 }
 
-/// Observes the semantic commitment in the current canonical reducer state.
-/// The reducer's `ChainPosition`, not this wallet's broadcast txid, supplies
+/// Observes the semantic commitment in the current canonical runtime state.
+/// The runtime's `ChainPosition`, not this wallet's broadcast txid, supplies
 /// the cached height. Repeated observations follow reorg height changes.
 pub fn observe_canonical_commit<Host: HostCanonicalTipSource>(
     host_tip_source: &Host,
-    reducer: &Reducer,
+    runtime: &NamesRuntime,
     pending: &mut PendingRegistrationCollection,
     commitment: &[u8; 32],
 ) -> Result<u32, ObserveCanonicalCommitError<Host::Error>> {
-    require_exact_canonical_tip(host_tip_source, reducer)
+    require_exact_canonical_tip(host_tip_source, runtime)
         .map_err(ObserveCanonicalCommitError::Tip)?;
     if pending.get(commitment).is_none() {
         return Err(ObserveCanonicalCommitError::UnknownCommitment);
     }
-    let height = canonical_commit_height(reducer.state(), commitment)
+    let height = canonical_commit_height(runtime.state(), commitment)
         .map_err(|_| ObserveCanonicalCommitError::CanonicalCommitMissing)?;
     pending
         .observe_canonical_commit_height(commitment, height)
@@ -344,15 +359,15 @@ pub fn observe_canonical_commit<Host: HostCanonicalTipSource>(
 }
 
 /// Reconciles every local canonical-COMMIT cache entry bidirectionally with
-/// the current authenticated reducer state. A reorg that removes a commitment
+/// the current authenticated runtime state. A reorg that removes a commitment
 /// clears the cached height instead of leaving a misleading canonical stage.
 pub fn reconcile_canonical_commit_cache(
-    reducer: &Reducer,
+    runtime: &NamesRuntime,
     pending: &mut PendingRegistrationCollection,
 ) -> Result<(), PendingRegistrationCollectionError> {
     let commitments = pending.commitments().collect::<Vec<_>>();
     for commitment in commitments {
-        match reducer.state().pending.get(&commitment) {
+        match runtime.state().pending.get(&commitment) {
             Some(position) => {
                 pending.observe_canonical_commit_height(&commitment, position.block_height)?
             }
@@ -373,7 +388,7 @@ pub enum ObserveCanonicalCommitError<HostError> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CanonicalCommitMissing;
 
-/// Resolves the protocol COMMIT height from canonical reducer state only.
+/// Resolves the protocol COMMIT height from canonical runtime state only.
 /// Wallet transport metadata is deliberately absent from this API.
 pub fn canonical_commit_height(
     state: &CoppiceState,
@@ -422,7 +437,7 @@ pub enum PrepareRevealError<HostError, BackendError: Debug, WitnessError, Materi
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn prepare_reveal<Host, Backend, Witness, Material, R>(
     host_tip_source: &Host,
-    reducer: &Reducer,
+    runtime: &NamesRuntime,
     pending_collection: &PendingRegistrationCollection,
     capability: IronwoodViewingCapability,
     lock_backend: &mut Backend,
@@ -442,27 +457,27 @@ where
     Material: RegistrationBondMaterialSource,
     R: RngCore + CryptoRng,
 {
-    require_exact_canonical_tip(host_tip_source, reducer).map_err(PrepareRevealError::Tip)?;
+    require_exact_canonical_tip(host_tip_source, runtime).map_err(PrepareRevealError::Tip)?;
     let pending = pending_collection
         .get(commitment)
         .cloned()
         .ok_or(PrepareRevealError::UnknownPending)?;
-    let commit_height = canonical_commit_height(reducer.state(), commitment)
+    let commit_height = canonical_commit_height(runtime.state(), commitment)
         .map_err(|_| PrepareRevealError::CanonicalCommitMissing)?;
-    let tip_height = reducer.tip().height;
+    let tip_height = runtime.tip().height;
     if crate::pending_commit_expired(
         commit_height,
-        reducer.deployment().commit_ttl_blocks,
+        runtime.deployment().commit_ttl_blocks,
         tip_height,
     )
     .map_err(PrepareRevealError::Timing)?
     {
         return Err(PrepareRevealError::CommitExpired);
     }
-    let freshness = freshness_for_canonical_commit(reducer, commit_height)
+    let freshness = freshness_for_canonical_commit(runtime, commit_height)
         .map_err(PrepareRevealError::Freshness)?;
 
-    let active_tags = active_canonical_bond_tags(reducer);
+    let active_tags = active_canonical_bond_tags(runtime);
     reconcile_locks(
         &active_tags,
         pending_collection,
@@ -504,9 +519,9 @@ where
         position,
     };
     let anchor =
-        choose_current_anchor(reducer, commit_height).map_err(PrepareRevealError::Anchor)?;
+        choose_current_anchor(runtime, commit_height).map_err(PrepareRevealError::Anchor)?;
     let witness = resolve_canonical_ironwood_witness(
-        reducer,
+        runtime,
         witness_source,
         selected.position,
         anchor.anchor_height,
@@ -517,7 +532,7 @@ where
         .map_err(PrepareRevealError::PrivateMaterial)?;
     let proof = prove_selected_bond(
         prover,
-        reducer.deployment(),
+        runtime.deployment(),
         pending.name(),
         pending.address(),
         pending.owner_pk(),
@@ -540,7 +555,7 @@ where
         secret: pending.secret(),
     };
     let recomputed = registration_commitment(
-        reducer.deployment(),
+        runtime.deployment(),
         pending.name(),
         pending.owner_pk(),
         pending.bond_tag(),
@@ -555,7 +570,7 @@ where
         Operation::Reveal { bond_proof, .. } => bond_proof.len(),
         _ => unreachable!(),
     };
-    let carrier = prepare_carrier(reducer, &operation).map_err(PrepareRevealError::Carrier)?;
+    let carrier = prepare_carrier(runtime, &operation).map_err(PrepareRevealError::Carrier)?;
     Ok(PreparedReveal {
         commitment: pending.commitment(),
         anchor_height: anchor.anchor_height,
@@ -611,7 +626,7 @@ pub enum LifecycleError<HostError, BackendError: Debug> {
 }
 
 fn staged_remove_and_reconcile<Backend: CoppiceLockBackend>(
-    reducer: &Reducer,
+    runtime: &NamesRuntime,
     pending: &mut PendingRegistrationCollection,
     capability: IronwoodViewingCapability,
     lock_backend: &mut Backend,
@@ -626,7 +641,7 @@ fn staged_remove_and_reconcile<Backend: CoppiceLockBackend>(
         .remove(commitment)
         .ok_or(LifecycleError::UnknownPending)?;
     reconcile_locks(
-        &active_canonical_bond_tags(reducer),
+        &active_canonical_bond_tags(runtime),
         &staged,
         account_id,
         capability,
@@ -640,7 +655,7 @@ fn staged_remove_and_reconcile<Backend: CoppiceLockBackend>(
 #[allow(clippy::too_many_arguments)]
 pub fn complete_registration<Host, Backend>(
     host_tip_source: &Host,
-    reducer: &Reducer,
+    runtime: &NamesRuntime,
     pending: &mut PendingRegistrationCollection,
     capability: IronwoodViewingCapability,
     lock_backend: &mut Backend,
@@ -650,13 +665,13 @@ where
     Host: HostCanonicalTipSource,
     Backend: CoppiceLockBackend,
 {
-    require_exact_canonical_tip(host_tip_source, reducer).map_err(LifecycleError::Tip)?;
+    require_exact_canonical_tip(host_tip_source, runtime).map_err(LifecycleError::Tip)?;
     let local = pending
         .get(commitment)
         .ok_or(LifecycleError::UnknownPending)?;
-    registration_matches_active_record(local, reducer.state().names.get(local.name()))
+    registration_matches_active_record(local, runtime.state().names.get(local.name()))
         .map_err(LifecycleError::CompletionMismatch)?;
-    staged_remove_and_reconcile(reducer, pending, capability, lock_backend, commitment).map_err(
+    staged_remove_and_reconcile(runtime, pending, capability, lock_backend, commitment).map_err(
         |error| match error {
             LifecycleError::UnknownPending => LifecycleError::UnknownPending,
             LifecycleError::Reconciliation(error) => LifecycleError::Reconciliation(error),
@@ -667,7 +682,7 @@ where
 
 pub fn abandon_registration<Host, Backend>(
     host_tip_source: &Host,
-    reducer: &Reducer,
+    runtime: &NamesRuntime,
     pending: &mut PendingRegistrationCollection,
     capability: IronwoodViewingCapability,
     lock_backend: &mut Backend,
@@ -677,8 +692,8 @@ where
     Host: HostCanonicalTipSource,
     Backend: CoppiceLockBackend,
 {
-    require_exact_canonical_tip(host_tip_source, reducer).map_err(LifecycleError::Tip)?;
-    staged_remove_and_reconcile(reducer, pending, capability, lock_backend, commitment).map_err(
+    require_exact_canonical_tip(host_tip_source, runtime).map_err(LifecycleError::Tip)?;
+    staged_remove_and_reconcile(runtime, pending, capability, lock_backend, commitment).map_err(
         |error| match error {
             LifecycleError::UnknownPending => LifecycleError::UnknownPending,
             LifecycleError::Reconciliation(error) => LifecycleError::Reconciliation(error),
@@ -689,7 +704,7 @@ where
 
 pub fn abandon_expired_registration<Host, Backend>(
     host_tip_source: &Host,
-    reducer: &Reducer,
+    runtime: &NamesRuntime,
     pending: &mut PendingRegistrationCollection,
     capability: IronwoodViewingCapability,
     lock_backend: &mut Backend,
@@ -699,24 +714,24 @@ where
     Host: HostCanonicalTipSource,
     Backend: CoppiceLockBackend,
 {
-    require_exact_canonical_tip(host_tip_source, reducer).map_err(LifecycleError::Tip)?;
+    require_exact_canonical_tip(host_tip_source, runtime).map_err(LifecycleError::Tip)?;
     let local = pending
         .get(commitment)
         .ok_or(LifecycleError::UnknownPending)?;
-    let commit_height = canonical_commit_height(reducer.state(), commitment)
+    let commit_height = canonical_commit_height(runtime.state(), commitment)
         .ok()
         .or(local.commit_height())
         .ok_or(LifecycleError::CanonicalCommitMissing)?;
     if !crate::pending_commit_expired(
         commit_height,
-        reducer.deployment().commit_ttl_blocks,
-        reducer.tip().height,
+        runtime.deployment().commit_ttl_blocks,
+        runtime.tip().height,
     )
     .map_err(LifecycleError::Timing)?
     {
         return Err(LifecycleError::NotExpired);
     }
-    staged_remove_and_reconcile(reducer, pending, capability, lock_backend, commitment).map_err(
+    staged_remove_and_reconcile(runtime, pending, capability, lock_backend, commitment).map_err(
         |error| match error {
             LifecycleError::UnknownPending => LifecycleError::UnknownPending,
             LifecycleError::Reconciliation(error) => LifecycleError::Reconciliation(error),
@@ -733,11 +748,14 @@ mod tests {
         bond::V1BondProver,
         config::{DeploymentParameters, REGTEST, Rendezvous},
         constants::REGTEST_ACTIVATION_HEIGHT,
+        names_runtime::{
+            CoreCanonicalBlockInput, CoreReplayActivationCheckpoint, CoreReplayTip,
+            IronwoodFrontier,
+        },
         owner::{OwnerSigningKey, owner_key_bytes},
         pending::{ChainPosition, PendingCommitments},
         recent_spent::RecentSpent,
         record::NameRecord,
-        reducer::{ActivationCheckpoint, CanonicalBlockInput, IronwoodFrontier, ReplayTip},
         state::CoppiceState,
     };
     use rand_chacha::ChaCha20Rng;
@@ -766,11 +784,11 @@ mod tests {
         }
     }
 
-    fn reducer() -> Reducer {
+    fn runtime() -> NamesRuntime {
         let activation_floor = deployment().activation_height - 1;
-        Reducer::new(
+        NamesRuntime::new(
             deployment(),
-            ActivationCheckpoint {
+            CoreReplayActivationCheckpoint {
                 height: activation_floor,
                 block_hash: [9; 32],
                 ironwood_frontier: IronwoodFrontier::empty(),
@@ -780,24 +798,24 @@ mod tests {
         .unwrap()
     }
 
-    fn advance_empty(reducer: &mut Reducer, height: u32) {
-        reducer
-            .apply_block(&CanonicalBlockInput {
+    fn advance_empty(runtime: &mut NamesRuntime, height: u32) {
+        runtime
+            .apply_block(&CoreCanonicalBlockInput {
                 height,
                 block_hash: [height as u8; 32],
-                prev_block_hash: reducer.tip().block_hash,
+                prev_block_hash: runtime.tip().block_hash,
                 branch_id: BranchId::Nu6_3,
                 transactions: vec![],
             })
             .unwrap();
     }
 
-    fn next_height(reducer: &Reducer) -> u32 {
-        reducer.tip().height.checked_add(1).unwrap()
+    fn next_height(runtime: &NamesRuntime) -> u32 {
+        runtime.tip().height.checked_add(1).unwrap()
     }
 
     #[derive(Clone, Copy)]
-    struct Host(ReplayTip);
+    struct Host(CoreReplayTip);
 
     impl HostCanonicalTipSource for Host {
         type Error = ();
@@ -911,14 +929,14 @@ mod tests {
 
     #[test]
     fn begin_locks_then_persists_and_builds_exact_commit_carrier() {
-        let reducer = reducer();
-        let host = Host(reducer.tip());
+        let runtime = runtime();
+        let host = Host(runtime.tip());
         let mut pending = PendingRegistrationCollection::new();
-        let minimum = reducer.deployment().minimum_bond_value;
+        let minimum = runtime.deployment().minimum_bond_value;
         let mut backend = backend(vec![note(minimum + 10, 2), note(minimum, 1)]);
         let prepared = begin_registration(
             &host,
-            &reducer,
+            &runtime,
             &mut pending,
             account_id(),
             IronwoodViewingCapability::FullViewing,
@@ -941,7 +959,7 @@ mod tests {
         assert_eq!(registration_stage(local), RegistrationStage::Prepared);
         assert_eq!(
             registration_commitment(
-                reducer.deployment(),
+                runtime.deployment(),
                 local.name(),
                 local.owner_pk(),
                 local.bond_tag(),
@@ -958,27 +976,27 @@ mod tests {
             }
         );
         assert_eq!(
-            carrier_v1::reconstruct_frames_v1(
+            transport::reconstruct_frames(
                 prepared.carrier().frames(),
-                reducer.deployment_id(),
+                runtime.core().runtime_id().to_bytes(),
             )
             .unwrap(),
-            prepared.carrier().payload()
+            prepared.carrier().application_envelope()
         );
     }
 
     #[test]
     fn larger_bond_requires_explicit_registration_policy() {
-        let reducer = reducer();
-        let host = Host(reducer.tip());
+        let runtime = runtime();
+        let host = Host(runtime.tip());
         let mut pending = PendingRegistrationCollection::new();
-        let minimum = reducer.deployment().minimum_bond_value;
+        let minimum = runtime.deployment().minimum_bond_value;
         let mut backend = backend(vec![note(minimum + 10, 2)]);
 
         assert!(matches!(
             begin_registration(
                 &host,
-                &reducer,
+                &runtime,
                 &mut pending,
                 account_id(),
                 IronwoodViewingCapability::FullViewing,
@@ -995,7 +1013,7 @@ mod tests {
 
         let prepared = begin_registration_with_policy(
             &host,
-            &reducer,
+            &runtime,
             &mut pending,
             account_id(),
             IronwoodViewingCapability::FullViewing,
@@ -1013,18 +1031,18 @@ mod tests {
 
     #[test]
     fn prepared_reveal_carrier_survives_builder_action_shuffle() {
-        let reducer = reducer();
+        let runtime = runtime();
         let operation = Operation::Reveal {
             name: "builder-shuffle".to_owned(),
             owner_pk: owner(),
             bond_tag: [2; 32],
-            bond_anchor_height: reducer.tip().height,
+            bond_anchor_height: runtime.tip().height,
             bond_anchor: [3; 32],
             bond_proof: vec![4; 4_960],
             address: vec![5; coppice::constants::MAX_ADDRESS_LEN],
             secret: [6; 32],
         };
-        let prepared = prepare_carrier(&reducer, &operation).unwrap();
+        let prepared = prepare_carrier(&runtime, &operation).unwrap();
         assert_eq!(prepared.frames().len(), 12);
 
         // Orchard/Ironwood builders randomize Action positions. Output
@@ -1033,21 +1051,22 @@ mod tests {
         action_order.rotate_left(7);
         action_order.swap(1, 9);
         assert_eq!(
-            carrier_v1::reconstruct_frames_v1(&action_order, reducer.deployment_id()).unwrap(),
-            prepared.payload()
+            transport::reconstruct_frames(&action_order, runtime.core().runtime_id().to_bytes(),)
+                .unwrap(),
+            prepared.application_envelope()
         );
     }
 
     #[test]
     fn default_owner_is_bound_to_selected_tag_and_transient_account_key() {
-        let reducer = reducer();
-        let host = Host(reducer.tip());
+        let runtime = runtime();
+        let host = Host(runtime.tip());
         let mut pending = PendingRegistrationCollection::new();
-        let mut backend = backend(vec![note(reducer.deployment().minimum_bond_value, 1)]);
+        let mut backend = backend(vec![note(runtime.deployment().minimum_bond_value, 1)]);
         let account_key = [42; 32];
         let prepared = begin_registration(
             &host,
-            &reducer,
+            &runtime,
             &mut pending,
             account_id(),
             IronwoodViewingCapability::Spending,
@@ -1061,7 +1080,7 @@ mod tests {
         let expected = owner_key_bytes(
             &derive_v1_owner_verification_key(
                 account_key,
-                reducer.deployment_id(),
+                runtime.deployment_id(),
                 name_id("alice"),
                 prepared.selected_bond.bond_tag,
             )
@@ -1072,15 +1091,15 @@ mod tests {
 
     #[test]
     fn insertion_failure_after_lock_does_not_speculatively_unlock() {
-        let reducer = reducer();
-        let host = Host(reducer.tip());
-        let selected_note = note(reducer.deployment().minimum_bond_value, 1);
+        let runtime = runtime();
+        let host = Host(runtime.tip());
+        let selected_note = note(runtime.deployment().minimum_bond_value, 1);
         let selected_tag = coppice::bond_tag::derive_v1_bond_tag(&selected_note.nullifier).unwrap();
         let mut rng = ChaCha20Rng::from_seed([12; 32]);
         let mut secret = [0; 32];
         rng.fill_bytes(&mut secret);
         let commitment = registration_commitment(
-            reducer.deployment(),
+            runtime.deployment(),
             "alice",
             owner(),
             selected_tag,
@@ -1092,7 +1111,7 @@ mod tests {
         pending
             .insert(
                 PendingRegistration::new(
-                    reducer.deployment(),
+                    runtime.deployment(),
                     account_id(),
                     "alice".to_owned(),
                     ADDRESS.to_vec(),
@@ -1108,7 +1127,7 @@ mod tests {
         assert!(matches!(
             begin_registration(
                 &host,
-                &reducer,
+                &runtime,
                 &mut pending,
                 account_id(),
                 IronwoodViewingCapability::FullViewing,
@@ -1125,7 +1144,7 @@ mod tests {
         assert!(backend.locks.contains_key(&selected_note.output_id));
         pending.remove(&commitment);
         reconcile_locks(
-            &active_canonical_bond_tags(&reducer),
+            &active_canonical_bond_tags(&runtime),
             &pending,
             account_id(),
             IronwoodViewingCapability::FullViewing,
@@ -1137,17 +1156,17 @@ mod tests {
 
     #[test]
     fn exact_tip_and_input_failures_precede_lock_mutation() {
-        let reducer = reducer();
+        let runtime = runtime();
         let mut pending = PendingRegistrationCollection::new();
-        let mut backend = backend(vec![note(reducer.deployment().minimum_bond_value, 1)]);
-        let bad_host = Host(ReplayTip {
-            height: reducer.tip().height,
+        let mut backend = backend(vec![note(runtime.deployment().minimum_bond_value, 1)]);
+        let bad_host = Host(CoreReplayTip {
+            height: runtime.tip().height,
             block_hash: [8; 32],
         });
         assert!(matches!(
             begin_registration(
                 &bad_host,
-                &reducer,
+                &runtime,
                 &mut pending,
                 account_id(),
                 IronwoodViewingCapability::FullViewing,
@@ -1164,11 +1183,11 @@ mod tests {
         assert!(backend.locks.is_empty());
         assert!(pending.is_empty());
 
-        let host = Host(reducer.tip());
+        let host = Host(runtime.tip());
         assert!(matches!(
             begin_registration(
                 &host,
-                &reducer,
+                &runtime,
                 &mut pending,
                 account_id(),
                 IronwoodViewingCapability::FullViewing,
@@ -1185,13 +1204,13 @@ mod tests {
 
     #[test]
     fn stage_separates_broadcast_from_reorg_updatable_canonical_observation() {
-        let reducer = reducer();
-        let host = Host(reducer.tip());
+        let runtime = runtime();
+        let host = Host(runtime.tip());
         let mut collection = PendingRegistrationCollection::new();
-        let mut backend = backend(vec![note(reducer.deployment().minimum_bond_value, 1)]);
+        let mut backend = backend(vec![note(runtime.deployment().minimum_bond_value, 1)]);
         let commitment = begin_registration(
             &host,
-            &reducer,
+            &runtime,
             &mut collection,
             account_id(),
             IronwoodViewingCapability::FullViewing,
@@ -1217,7 +1236,7 @@ mod tests {
             registration_stage(collection.get(&commitment).unwrap()),
             RegistrationStage::CommitCanonical
         );
-        reconcile_canonical_commit_cache(&reducer, &mut collection).unwrap();
+        reconcile_canonical_commit_cache(&runtime, &mut collection).unwrap();
         assert_eq!(
             registration_stage(collection.get(&commitment).unwrap()),
             RegistrationStage::CommitBroadcast
@@ -1310,13 +1329,13 @@ mod tests {
 
     #[test]
     fn stale_local_commit_is_rejected_from_current_reducer_before_private_work() {
-        let mut reducer = reducer();
-        let initial_host = Host(reducer.tip());
+        let mut runtime = runtime();
+        let initial_host = Host(runtime.tip());
         let mut collection = PendingRegistrationCollection::new();
-        let mut backend = backend(vec![note(reducer.deployment().minimum_bond_value, 1)]);
+        let mut backend = backend(vec![note(runtime.deployment().minimum_bond_value, 1)]);
         let commitment = begin_registration(
             &initial_host,
-            &reducer,
+            &runtime,
             &mut collection,
             account_id(),
             IronwoodViewingCapability::FullViewing,
@@ -1328,18 +1347,18 @@ mod tests {
         )
         .unwrap()
         .commitment;
-        let mined_height = next_height(&reducer);
+        let mined_height = next_height(&runtime);
         collection
             .observe_canonical_commit_height(&commitment, mined_height)
             .unwrap();
-        advance_empty(&mut reducer, mined_height);
-        let host = Host(reducer.tip());
+        advance_empty(&mut runtime, mined_height);
+        let host = Host(runtime.tip());
         let mut witness = NeverWitness(Cell::new(0));
         let mut material = NeverMaterial(Cell::new(0));
         assert!(matches!(
             prepare_reveal(
                 &host,
-                &reducer,
+                &runtime,
                 &collection,
                 IronwoodViewingCapability::FullViewing,
                 &mut backend,
@@ -1358,11 +1377,11 @@ mod tests {
 
     #[test]
     fn active_record_matching_checks_every_registration_fact() {
-        let reducer = reducer();
+        let runtime = runtime();
         let bond_tag = [4; 32];
         let secret = [5; 32];
         let commitment = registration_commitment(
-            reducer.deployment(),
+            runtime.deployment(),
             "alice",
             owner(),
             bond_tag,
@@ -1371,7 +1390,7 @@ mod tests {
         )
         .unwrap();
         let pending = PendingRegistration::new(
-            reducer.deployment(),
+            runtime.deployment(),
             account_id(),
             "alice".to_owned(),
             ADDRESS.to_vec(),
@@ -1408,13 +1427,13 @@ mod tests {
 
     #[test]
     fn explicit_abandon_is_staged_and_reconciliation_failure_retains_pending() {
-        let reducer = reducer();
-        let host = Host(reducer.tip());
+        let runtime = runtime();
+        let host = Host(runtime.tip());
         let mut pending = PendingRegistrationCollection::new();
-        let mut backend = backend(vec![note(reducer.deployment().minimum_bond_value, 1)]);
+        let mut backend = backend(vec![note(runtime.deployment().minimum_bond_value, 1)]);
         let commitment = begin_registration(
             &host,
-            &reducer,
+            &runtime,
             &mut pending,
             account_id(),
             IronwoodViewingCapability::FullViewing,
@@ -1430,7 +1449,7 @@ mod tests {
         assert!(matches!(
             abandon_registration(
                 &host,
-                &reducer,
+                &runtime,
                 &mut pending,
                 IronwoodViewingCapability::FullViewing,
                 &mut backend,
@@ -1442,7 +1461,7 @@ mod tests {
         backend.fail = false;
         abandon_registration(
             &host,
-            &reducer,
+            &runtime,
             &mut pending,
             IronwoodViewingCapability::FullViewing,
             &mut backend,

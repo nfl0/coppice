@@ -52,6 +52,25 @@ pub struct RuntimeTransactionContext {
     message: ApplicationMessageStatus,
 }
 
+/// Read-only inspection of one transaction at the configured public
+/// rendezvous. This is also used by transaction builders to prove that the
+/// bytes they constructed are exactly the bytes Core will route.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuntimeTransactionInspection {
+    frames: Box<[[u8; 512]]>,
+    message: ApplicationMessageStatus,
+}
+
+impl RuntimeTransactionInspection {
+    pub fn frames(&self) -> &[[u8; 512]] {
+        &self.frames
+    }
+
+    pub fn message(&self) -> &ApplicationMessageStatus {
+        &self.message
+    }
+}
+
 impl RuntimeTransactionContext {
     pub fn core_index(&self) -> usize {
         self.core_index
@@ -171,6 +190,16 @@ impl CoreRuntime {
         Ok(RuntimeBlockContext { core, transactions })
     }
 
+    /// Inspects application transport without advancing canonical replay.
+    /// Canonical transaction/effect validation remains the responsibility of
+    /// [`CoreReplay::apply_block`].
+    pub fn inspect_transaction(
+        &self,
+        transaction: &zcash_primitives::transaction::Transaction,
+    ) -> RuntimeTransactionInspection {
+        inspect_transaction(transaction, &self.parameters)
+    }
+
     pub fn rewind_to(&mut self, height: u32) -> Result<(), CoreRewindError> {
         self.replay.rewind_to(height)
     }
@@ -214,8 +243,28 @@ fn route_candidate(
     let CandidateTransactionStatus::ValidatedFullTransaction(validated) = candidate else {
         return ApplicationMessageStatus::NotCandidate;
     };
-    let Some(bundle) = validated.transaction().ironwood_bundle() else {
-        return ApplicationMessageStatus::NoMessage;
+    inspect_transaction_for(validated.transaction(), parameters, runtime_id).message
+}
+
+/// Routes one transaction at a validated runtime rendezvous without changing
+/// replay state.
+pub fn inspect_transaction(
+    transaction: &zcash_primitives::transaction::Transaction,
+    parameters: &ValidatedCoreRuntimeParameters,
+) -> RuntimeTransactionInspection {
+    inspect_transaction_for(transaction, parameters, parameters.core_runtime_id())
+}
+
+fn inspect_transaction_for(
+    transaction: &zcash_primitives::transaction::Transaction,
+    parameters: &ValidatedCoreRuntimeParameters,
+    runtime_id: CoreRuntimeId,
+) -> RuntimeTransactionInspection {
+    let Some(bundle) = transaction.ironwood_bundle() else {
+        return RuntimeTransactionInspection {
+            frames: Box::new([]),
+            message: ApplicationMessageStatus::NoMessage,
+        };
     };
     let ivk = Option::<IncomingViewingKey>::from(IncomingViewingKey::from_bytes(
         &parameters.parameters().rendezvous_ivk,
@@ -230,16 +279,26 @@ fn route_candidate(
                 .map(|(_, _, memo)| memo)
         })
         .filter(transport::is_frame)
-        .collect::<Vec<_>>();
+        .collect::<Vec<_>>()
+        .into_boxed_slice();
     let payload = match transport::reconstruct_frames(&frames, runtime_id.to_bytes()) {
         Ok(payload) => payload,
         Err(transport::Error::NoFrames | transport::Error::WrongRuntime) => {
-            return ApplicationMessageStatus::NoMessage;
+            return RuntimeTransactionInspection {
+                frames,
+                message: ApplicationMessageStatus::NoMessage,
+            };
         }
-        Err(error) => return ApplicationMessageStatus::MalformedTransport(error),
+        Err(error) => {
+            return RuntimeTransactionInspection {
+                frames,
+                message: ApplicationMessageStatus::MalformedTransport(error),
+            };
+        }
     };
-    match ApplicationEnvelopeV1::decode(&payload) {
+    let message = match ApplicationEnvelopeV1::decode(&payload) {
         Ok(message) => ApplicationMessageStatus::Message(message),
         Err(error) => ApplicationMessageStatus::MalformedEnvelope(error),
-    }
+    };
+    RuntimeTransactionInspection { frames, message }
 }

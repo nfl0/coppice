@@ -41,7 +41,7 @@ impl WalletAccountId {
 ///
 /// This type intentionally does not implement `Debug`: it contains the
 /// registration secret. It also contains no output reference, witness,
-/// signing key, spending key, proof, anchor, or reducer state.
+/// signing key, spending key, proof, anchor, or runtime state.
 #[derive(Clone, PartialEq, Eq)]
 pub struct PendingRegistration {
     account_id: WalletAccountId,
@@ -54,7 +54,7 @@ pub struct PendingRegistration {
     /// Wallet-local identifier of the transaction this wallet broadcast, if
     /// known. It is transport metadata and has no protocol authority.
     commit_txid: Option<[u8; 32]>,
-    /// Last observed canonical reducer height for the semantic commitment.
+    /// Last observed canonical runtime height for the semantic commitment.
     /// This is a reorg-updatable cache, not the mined height of `commit_txid`.
     commit_height: Option<u32>,
 }
@@ -177,11 +177,11 @@ impl PendingRegistration {
         }
     }
 
-    /// Updates the last canonical reducer observation for this commitment.
+    /// Updates the last canonical runtime observation for this commitment.
     ///
     /// This is crate-private so arbitrary callers cannot assign protocol
     /// heights. The registration controller calls it only after reading the
-    /// current reducer's authenticated pending map.
+    /// current runtime's authenticated pending map.
     pub(crate) fn observe_canonical_commit_height(&mut self, height: u32) {
         self.commit_height = Some(height);
     }
@@ -233,7 +233,7 @@ struct StoredPendingCollection {
 
 /// In-memory wallet-local pending registration intents.
 ///
-/// This is deliberately distinct from the protocol reducer's global
+/// This is deliberately distinct from the protocol runtime's global
 /// `PendingCommitments` map. It is not consensus state and is not a source of
 /// truth for replay.
 #[derive(Clone, Default, PartialEq, Eq)]
