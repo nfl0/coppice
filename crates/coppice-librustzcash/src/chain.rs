@@ -144,6 +144,33 @@ where
     R: CanonicalRuntime,
     S: FullTransactionSource,
 {
+    prepare_canonical_block_with_transaction_selector(
+        params,
+        runtime,
+        compact_block,
+        full_tx_source,
+        |_tx_index, _txid| false,
+    )
+}
+
+/// Like [`prepare_canonical_block`], with a bounded, caller-owned selective
+/// full-transaction policy. Applications that need extended public Ironwood
+/// effects can request a full transaction by canonical `(tx_index, txid)`;
+/// Core still parses and cross-checks every selected response. Compact carrier
+/// detection always remains mandatory independently of this policy.
+pub fn prepare_canonical_block_with_transaction_selector<P, R, S, F>(
+    params: &P,
+    runtime: &R,
+    compact_block: &CompactBlock,
+    full_tx_source: &mut S,
+    mut select_full_transaction: F,
+) -> Result<CoreCanonicalBlockInput, CompactBlockAdapterError<S::Error>>
+where
+    P: Parameters,
+    R: CanonicalRuntime,
+    S: FullTransactionSource,
+    F: FnMut(u32, [u8; 32]) -> bool,
+{
     if !network_matches(params.network_type(), runtime.core_parameters()) {
         return Err(CompactBlockAdapterError::NetworkMismatch);
     }
@@ -172,7 +199,8 @@ where
     let rendezvous = runtime.rendezvous();
     let mut validated = Vec::with_capacity(compact_block.vtx.len());
     for (transaction, compact_tx) in compact_block.vtx.iter().enumerate() {
-        let tx = validate_transaction(transaction, compact_tx, rendezvous)?;
+        let mut tx = validate_transaction(transaction, compact_tx, rendezvous)?;
+        tx.candidate |= select_full_transaction(tx.input.tx_index, tx.input.txid);
         if validated
             .last()
             .is_some_and(|prior: &ValidatedCompactTx| prior.input.tx_index >= tx.input.tx_index)

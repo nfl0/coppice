@@ -13,8 +13,8 @@ An application declares:
 - an unsigned `application_version`, forming the routing key
   `ApplicationId + application_version`;
 - an activation height no earlier than the Core runtime activation height;
-- application-owned state, state root, snapshot representation, and rewind
-  behavior.
+- application-owned state, state root, snapshot representation, rewind
+  behavior, and required rewind retention.
 
 Core carries the application envelope as `CA01` inside CPV1. It validates the
 transport and route, then exposes an application-scoped context. Before the
@@ -24,11 +24,12 @@ without changing `CoreRuntimeId` or another application's state.
 
 ## What an application can see
 
-After activation, the context can contain canonical block metadata, ordered
-transaction positions and IDs, validated Ironwood commitments and nullifiers,
-candidate/full-transaction status, and the message routed to that application.
-The application may interpret its own payload and use native Ironwood effects
-as inputs to its transition. Core remains unaware of the payload semantics.
+After activation, the context contains canonical block metadata and ordered
+transactions with validated Ironwood commitments and nullifiers. Each
+transaction has only the payload routed to that application, or no payload.
+Full transactions selectively acquired by the host also expose typed public
+value commitments, randomized keys, flags, and bundle value balance. Core
+remains unaware of payload semantics.
 
 For example, a small native application could define conceptual messages:
 
@@ -44,8 +45,8 @@ conceptual example only; it does not add a generic key/value feature to Core.
 ## Isolation and rewind
 
 Each application owns its mutable state, state root, snapshot layer, and undo
-journal. Core and application state are staged and published atomically at a
-successful block boundary. A fatal Core input or application invariant error
+journal. `CoppiceRuntime` stages Core and all hosted applications atomically at
+a successful block boundary. A fatal Core input or application invariant error
 leaves the composed runtime unchanged; an ordinary application protocol
 rejection is a deterministic application outcome while canonical Ironwood
 effects still advance.
@@ -68,11 +69,10 @@ Applications must not:
   application-defined consensus;
 - use a remote registry or operator key as state authority.
 
-Unknown `(ApplicationId, version)` routes are structurally valid but ignored by
-an unrelated application. Malformed transport or envelopes are routed
-rejections. Missing or inconsistent canonical Zcash input is a fatal host-input
-boundary and must not be converted into an application no-op.
+Unknown `(ApplicationId, version)` routes and malformed transport/envelopes do
+not become an unrelated application's payload. Missing or inconsistent
+canonical Zcash input is a fatal host-input boundary and must not be converted
+into an application no-op.
 
-See [`PROTOCOL_SPEC.md`](PROTOCOL_SPEC.md) for the frozen Core transport and
-Names v1 application route, and [`RUNTIME_ARCHITECTURE.md`](RUNTIME_ARCHITECTURE.md)
-for the implemented lifecycle trait and crate boundaries.
+See [`RUNTIME_ARCHITECTURE.md`](RUNTIME_ARCHITECTURE.md) for the implemented
+lifecycle, persistence, selective-observation, and composition boundaries.

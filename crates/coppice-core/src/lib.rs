@@ -7,8 +7,10 @@
 
 pub mod application;
 pub mod carrier;
+pub mod compositor;
 mod hash;
 pub mod identity;
+pub mod publish;
 pub mod replay;
 pub mod runtime;
 pub mod transport;

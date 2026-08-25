@@ -1,183 +1,56 @@
 # Coppice runtime architecture
 
-This document records the production-authoritative crate and state boundaries
-for Coppice Core / Core Runtime and its first application, Coppice Names v1.
-Protocol bytes remain governed by
-`PROTOCOL_SPEC.md` and the normative vectors.
-
-“Production-authoritative” describes the code path used for qualification and
-integration. It does not mean that Coppice has a public production deployment.
-
-## Authority and dependencies
+Zcash is the sole canonical-chain and fork-choice authority. Coppice validates
+a host-selected Ironwood history and supplies deterministic native application
+state machines; it neither creates a second consensus layer nor chooses forks.
 
 ```text
-Zcash wallet/host (sole fork choice)
-        |
-        | canonical CompactBlocks + candidate full transactions
-        v
-coppice-librustzcash
-        |
-        | CoreCanonicalBlockInput
-        v
-coppice-core::CoreRuntime
-        |  owns CoreReplay, CPV1 and CA01 routing
-        |  depends on no application crate
-        v
-coppice::NamesRuntime (Coppice Names v1)
-        |  composes CoreRuntime + NamesApplication atomically
-        v
-wallet-facing Names workflows and protection policy
+host CompactBlocks
+  -> coppice-librustzcash (exact-receiver candidate scan)
+  -> coppice-core::CoreRuntime (canonical replay once)
+  -> CoppiceRuntime<(ApplicationA, ApplicationB, ...)>
+  -> isolated application roots, snapshots, and undo journals
 ```
 
-There is no second consensus layer. The host supplies an already selected
-canonical chain. Core validates continuity, ordering, candidate/full
-consistency, and Ironwood effects, but never chooses a competing block.
+`CoreRuntime` is application-blind. It validates height, predecessor, ordered
+transaction positions, compact/full transaction consistency, and Ironwood
+frontier updates. Carrier candidates are detected through the configured
+receiver, not IVK decryption alone. CPV1 is reconstructed only from exact
+rendezvous actions and CA01 is decoded once by Core.
 
-## Identity vocabulary
+`CoppiceRuntime` statically composes one or more `CoppiceApplication`s. It
+does not sort host data or callbacks: tuple order is the declared deterministic
+composition order. It stages a cloned Core and cloned application collection,
+commits only after all applications succeed, and checks that all tips agree. It
+takes the maximum application rewind requirement and rejects a Core
+configuration whose retention is smaller. Rewinds follow the same staged,
+tip-consistent boundary.
 
-These identities are intentionally separate:
+Each active application gets `ApplicationTransactionContext` values carrying a
+canonical Core transaction and, independently, an optional payload addressed
+to its exact `ApplicationKey`. It never receives another application's CA01
+payload. Before its activation it receives block position only; Core effects
+and all application payloads are unavailable.
 
-- `CoreRuntimeId` identifies the generic runtime, its activation, CPV1 context,
-  and exact rendezvous IVK/receiver pair.
-- `ApplicationId + application_version` identifies a routed application
-  envelope.
-- `NamesDeploymentId` identifies Coppice Names v1's application-specific
-  cryptographic and state domains.
+`PersistedCoppiceApplication` provides common snapshot metadata: format,
+descriptor, tip, root, oldest rewind point, and opaque application-owned bytes.
+Applications retain exclusive control of state encoding and validation. Hosts
+must persist a successful apply or rewind as one atomic boundary and rebuild
+from the authenticated activation checkpoint when the common ancestor falls
+outside retained history.
 
-Use `NamesDeploymentId` when discussing Names deployment parameters. A generic
-“deployment ID” is ambiguous and should not be used for Core identity.
+Canonical observations never contain wallet-private data. Compact contexts
+always include nullifiers and commitments. A host can selectively request full
+transactions for specific canonical `(tx_index, txid)` entries; Core parses and
+cross-checks them, then exposes typed value commitments, randomized keys,
+bundle flags, and signed bundle value balance. Proofs, signatures, ciphertexts,
+private note data, viewing keys, memos, recipients, values, ownership, and
+mempool facts are not application state input.
 
-## Stable identities
+The generic publisher prepares `ApplicationKey + payload` as CA01 inside CPV1
+and can verify a constructed transaction using the same exact-receiver Core
+inspection path. Wallet-specific fees, input selection, authorisation, and
+application policy live above it.
 
-- `CoreRuntimeId` binds only generic runtime/network/activation/carrier and
-  rendezvous context.
-- `ApplicationId + u16 version` selects an application from CA01.
-- `NamesDeploymentId` is the frozen historical Names deployment hash used only
-  by Names commitments, owner derivation and authorization, bond statements,
-  and Names state roots.
-
-The Rust APIs use distinct wrapper types wherever two identities could
-otherwise be accidentally interchanged. Wallet carrier preparation accepts a
-`CoreRuntimeId`; Names cryptography continues to accept the historical
-32-byte deployment value.
-
-## State ownership
-
-```text
-Core state
-  canonical tip
-  Ironwood frontier
-  authenticated Ironwood checkpoints
-  bounded canonical rewind journal
-
-Names application state
-  name records and active-bond index
-  pending commitments
-  recent-spent tags
-  Names state root
-  bounded Names undo journal
-```
-
-`CoreRuntime` decrypts public rendezvous frames only when the decrypted
-recipient is the exact configured receiver. Decryptability under the public
-incoming IVK alone is insufficient. The same receiver-bound rule is applied by
-compact candidate discovery and authoritative full-transaction extraction.
-Core then emits immutable transaction contexts containing canonical
-height/hash/index/txid, ordered validated nullifiers and commitments, candidate
-validation status, and an optional routed application message. It does not
-interpret application payload bytes.
-
-`NamesApplication` consumes those contexts. Canonical nullifiers may terminate
-Names bonds before a routed operation in the same transaction. The application
-owns every Names transition, root, and undo entry.
-
-## Apply and rewind composition
-
-For apply, `NamesRuntime` clones/stages Core, applies and routes the complete
-block, then applies Names against the immutable emitted context. It publishes
-both staged layers only after both succeed. Fatal Core or application errors
-therefore leave both layers unchanged; protocol-level Names rejections remain
-committed no-ops after canonical effects and end-of-block processing.
-
-For rewind, `NamesRuntime` first proves the requested Core rewind on a staged
-clone, then rewinds Names, and finally commits the staged Core. Both layers
-must retain the requested height and must resolve it to the same block hash.
-The Core retention value is generic configuration. Names v1 supplies its
-current required horizon when constructing the composed runtime; Core does not
-import or calculate Names policy.
-
-Deep reorgs outside the retained horizon are not guessed or locally selected.
-The adapter reports that a rebuild is required, and the host reconstructs from
-the configured activation checkpoint along its canonical chain.
-
-## Persistence
-
-`CoreReplay`, `CoreRuntime`, and `NamesApplication` serialize independently
-versioned state. `NamesRuntime::save_snapshot` writes one composite manifest
-that contains opaque Core and application snapshots plus:
-
-- `CoreRuntimeId`;
-- Names application ID and version;
-- shared canonical tip;
-- current Ironwood root/tree size; and
-- current Names state root.
-
-Loading validates each layer independently and then validates the manifest and
-every retained Names root against the corresponding retained Core checkpoint.
-The host must replace the manifest atomically. A snapshot from the old
-monolithic development format is unsupported and is rebuilt from activation.
-Incremental durability is one successful block or rewind boundary at a time;
-reconciliation callbacks expose exactly those boundaries.
-
-## Public crate surfaces
-
-### `coppice-core`
-
-- validated `CoreRuntimeParameters -> ValidatedCoreRuntimeParameters ->
-  CoreRuntimeId`;
-- `ApplicationId`, `ApplicationKey`, `ApplicationEnvelopeV1`, and
-  `CoppiceApplication`;
-- CPV1 limits and strict transport encoding/reconstruction;
-- `CoreReplay` canonical input/context/checkpoint/rewind APIs;
-- `CoreRuntime` routing, read-only transaction inspection, and Core snapshots.
-
-Core must remain application-blind. In particular it must not gain Names,
-bonds, owner keys, `.zec`, COMMIT/REVEAL, Unified Address, or application
-retention concepts.
-
-### `coppice`
-
-- frozen Names protocol primitives and vectors;
-- Names identity/core compatibility helpers;
-- `NamesApplication` and the production `NamesRuntime` composition;
-- Names snapshot, state, root, outcome, and rewind APIs.
-
-### `coppice-librustzcash`
-
-- hostile-input-safe CompactBlock adaptation;
-- exact-receiver rendezvous candidate detection and candidate-only full
-  transaction fetching;
-- host-authoritative reconciliation and rebuild signaling;
-- wallet-local bond inventory, witness/proof construction, pending intents,
-  owner workflows, locks, and spend protection;
-- normal librustzcash proposal/construction for Core-bound, Names-routed
-  carriers.
-
-Wallet policy is deliberately outside Core. A wallet may expose Coppice as
-enabled, guard-only, or off. Off bypasses reconciliation/protection and never
-changes how ordinary Zcash consensus or wallet scanning works. Names UI and
-policy remain above the generic runtime API.
-
-## Isolation rules
-
-- Applications do not share mutable state or roots.
-- An unknown `(ApplicationId, version)` is structurally valid and ignored by
-  Names; it is never reinterpreted as Names.
-- A malformed CA01 envelope is a deterministic routed rejection, not a fallback
-  parser signal.
-- Core native effects may drive an application's transition only through the
-  immutable canonical context.
-- No application can affect Core ordering, fork choice, or another
-  application's state.
-- The runtime has no WASM, arbitrary contracts, gas, or application-defined
-  consensus.
+Coppice Names is an external consumer in `../coppice-names/`; it is not a
+runtime subsystem.

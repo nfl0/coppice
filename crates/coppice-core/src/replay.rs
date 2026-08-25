@@ -112,6 +112,34 @@ pub struct CoreIronwoodCheckpoint {
 pub struct CoreIronwoodEffects {
     nullifiers: Box<[[u8; 32]]>,
     commitments: Box<[[u8; 32]]>,
+    extended: Option<CanonicalIronwoodBundleEffects>,
+}
+
+/// Consensus-public fields available only when the host has supplied a full
+/// transaction and Core has authenticated it against compact effects. Compact
+/// scanning remains the default; applications explicitly requiring these
+/// fields can ask their host for selective full-transaction acquisition.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CanonicalIronwoodActionEffects {
+    pub nullifier: [u8; 32],
+    pub commitment: [u8; 32],
+    pub value_commitment: [u8; 32],
+    pub randomized_key: [u8; 32],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CanonicalIronwoodBundleFlags {
+    pub spends_enabled: bool,
+    pub outputs_enabled: bool,
+    pub cross_address_enabled: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CanonicalIronwoodBundleEffects {
+    pub actions: Box<[CanonicalIronwoodActionEffects]>,
+    /// Signed Ironwood value balance in zatoshis.
+    pub value_balance: i64,
+    pub flags: CanonicalIronwoodBundleFlags,
 }
 
 impl CoreIronwoodEffects {
@@ -123,6 +151,12 @@ impl CoreIronwoodEffects {
     /// Commitments in their canonical transaction order.
     pub fn commitments(&self) -> &[[u8; 32]] {
         &self.commitments
+    }
+
+    /// Full consensus-public bundle effects, when Core validated a selectively
+    /// acquired full transaction for this canonical transaction.
+    pub fn extended(&self) -> Option<&CanonicalIronwoodBundleEffects> {
+        self.extended.as_ref()
     }
 }
 
@@ -624,6 +658,9 @@ impl CoreReplay {
                 ironwood_effects: CoreIronwoodEffects {
                     nullifiers: input.ironwood_nullifiers.clone().into_boxed_slice(),
                     commitments: input.ironwood_commitments.clone().into_boxed_slice(),
+                    extended: candidate_status.validated_full_transaction().and_then(
+                        |transaction| canonical_ironwood_bundle_effects(transaction.transaction()),
+                    ),
                 },
                 candidate_status,
             });
@@ -863,6 +900,32 @@ fn extract_ironwood_effects(transaction: &Transaction) -> (Vec<[u8; 32]>, Vec<[u
         commitments.push(action.cmx().to_bytes());
     }
     (nullifiers, commitments)
+}
+
+fn canonical_ironwood_bundle_effects(
+    transaction: &Transaction,
+) -> Option<CanonicalIronwoodBundleEffects> {
+    let bundle = transaction.ironwood_bundle()?;
+    let flags = bundle.flags();
+    Some(CanonicalIronwoodBundleEffects {
+        actions: bundle
+            .actions()
+            .iter()
+            .map(|action| CanonicalIronwoodActionEffects {
+                nullifier: action.nullifier().to_bytes(),
+                commitment: action.cmx().to_bytes(),
+                value_commitment: action.cv_net().to_bytes(),
+                randomized_key: action.rk().into(),
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice(),
+        value_balance: i64::from(*bundle.value_balance()),
+        flags: CanonicalIronwoodBundleFlags {
+            spends_enabled: flags.spends_enabled(),
+            outputs_enabled: flags.outputs_enabled(),
+            cross_address_enabled: flags.cross_address_enabled(),
+        },
+    })
 }
 
 fn prune_checkpoints(

@@ -344,25 +344,10 @@ dependencies = [
 name = "coppice-librustzcash"
 version = "0.1.0"
 dependencies = [
- "coppice",
  "coppice-core",
- "hex",
- "incrementalmerkletree",
  "orchard",
- "rand_chacha",
- "rand_core",
- "sapling-crypto",
- "serde",
- "serde_json",
- "shardtree",
- "zcash_address",
  "zcash_client_backend",
- "zcash_keys",
- "zcash_note_encryption",
- "zcash_primitives",
  "zcash_protocol",
- "zip32",
- "zip321",
 ]
 
 [[package]]

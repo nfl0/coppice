@@ -1,6 +1,6 @@
 use crate::carrier::MAX_CPV1_PAYLOAD_LEN;
 use crate::hash;
-use crate::{replay::CoreBlockContext, runtime::RuntimeTransactionContext};
+use crate::replay::{CoreBlockContext, CoreTransactionContext};
 
 pub const APPLICATION_ID_PERSONALIZATION: [u8; 16] = *b"CoppiceAppIdV1\0\0";
 pub const APPLICATION_ENVELOPE_MAGIC: [u8; 4] = *b"CA01";
@@ -67,14 +67,42 @@ pub struct ApplicationDescriptor {
 /// The portion of one Core block that a specific application is authorized to
 /// observe. Before application activation, only the canonical position is
 /// exposed; Core effects and routed messages are withheld.
+/// One canonical transaction as seen by a single application. The Core effect
+/// view is shared by all active applications, but the payload is already
+/// filtered to this application's exact key. An application never receives a
+/// different application's envelope (including malformed envelopes).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ApplicationBlockContext<'a> {
-    pub(crate) core: &'a CoreBlockContext,
-    pub(crate) transactions: &'a [RuntimeTransactionContext],
+pub struct ApplicationTransactionContext {
+    core: CoreTransactionContext,
+    payload: Option<Box<[u8]>>,
+}
+
+impl ApplicationTransactionContext {
+    pub(crate) fn new(core: CoreTransactionContext, payload: Option<Box<[u8]>>) -> Self {
+        Self { core, payload }
+    }
+
+    pub fn core(&self) -> &CoreTransactionContext {
+        &self.core
+    }
+
+    /// The decoded CA01 payload addressed to this application, if any.
+    pub fn payload(&self) -> Option<&[u8]> {
+        self.payload.as_deref()
+    }
+}
+
+/// Application-scoped canonical block view. Before activation the position
+/// advances but Core effects and messages are deliberately unavailable.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ApplicationBlockContext {
+    pub(crate) tip: ApplicationTip,
+    pub(crate) core: Option<CoreBlockContext>,
+    pub(crate) transactions: Box<[ApplicationTransactionContext]>,
     pub(crate) active: bool,
 }
 
-impl ApplicationBlockContext<'_> {
+impl ApplicationBlockContext {
     pub fn is_active(&self) -> bool {
         self.active
     }
@@ -83,18 +111,15 @@ impl ApplicationBlockContext<'_> {
     /// Pre-activation applications still receive their position through
     /// [`Self::tip`] so they can advance deterministic empty state.
     pub fn core(&self) -> Option<&CoreBlockContext> {
-        self.active.then_some(self.core)
+        self.core.as_ref()
     }
 
-    pub fn transactions(&self) -> &[RuntimeTransactionContext] {
-        self.transactions
+    pub fn transactions(&self) -> &[ApplicationTransactionContext] {
+        &self.transactions
     }
 
     pub fn tip(&self) -> ApplicationTip {
-        ApplicationTip {
-            height: self.core.height(),
-            block_hash: self.core.block_hash(),
-        }
+        self.tip
     }
 }
 
@@ -108,7 +133,7 @@ pub struct ApplicationTip {
 /// Minimal lifecycle implemented by deterministic applications hosted by the
 /// Coppice runtime. Core supplies ordered, validated Zcash context and remains
 /// unaware of the application's payload, state, and transition semantics.
-pub trait CoppiceApplication {
+pub trait CoppiceApplication: Clone {
     type BlockOutput;
     type ApplyError;
     type RewindError;
@@ -118,9 +143,56 @@ pub trait CoppiceApplication {
     fn state_root(&self) -> [u8; 32];
     fn apply_block(
         &mut self,
-        block: &ApplicationBlockContext<'_>,
+        block: &ApplicationBlockContext,
     ) -> Result<Self::BlockOutput, Self::ApplyError>;
     fn rewind_to(&mut self, height: u32) -> Result<(), Self::RewindError>;
+
+    /// The number of completed blocks the application must be able to undo.
+    /// The composed runtime takes the maximum across hosted applications and
+    /// requires Core to retain at least that much canonical history.
+    fn rewind_retention_blocks(&self) -> u32;
+
+    fn oldest_rewind_height(&self) -> u32;
+
+    fn retained_tip_at(&self, height: u32) -> Option<ApplicationTip>;
+}
+
+/// Self-describing application snapshot envelope. The payload belongs wholly
+/// to the application; Core never parses it. The common metadata lets a host
+/// reject mismatched application data before handing it to application code.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ApplicationSnapshot {
+    pub format_version: u32,
+    pub descriptor: ApplicationDescriptor,
+    pub tip: ApplicationTip,
+    pub state_root: [u8; 32],
+    pub oldest_rewind_height: u32,
+    pub payload: Vec<u8>,
+}
+
+/// Persistence contract for a deterministic application. Applications own
+/// their encoding and validation rules while every host gets the same identity,
+/// tip, root, and bounded-undo checks.
+pub trait PersistedCoppiceApplication: CoppiceApplication {
+    type SnapshotError;
+
+    fn snapshot_format_version(&self) -> u32;
+    fn save_application_payload(&self) -> Result<Vec<u8>, Self::SnapshotError>;
+    fn load_application_payload(
+        &mut self,
+        snapshot: ApplicationSnapshot,
+    ) -> Result<(), Self::SnapshotError>;
+
+    fn save_application_snapshot(&self) -> Result<ApplicationSnapshot, Self::SnapshotError> {
+        Ok(ApplicationSnapshot {
+            format_version: self.snapshot_format_version(),
+            descriptor: self.descriptor(),
+            tip: self.tip(),
+            state_root: self.state_root(),
+            oldest_rewind_height: self.oldest_rewind_height(),
+            payload: self.save_application_payload()?,
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

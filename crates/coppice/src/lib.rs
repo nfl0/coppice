@@ -1,22 +1,11 @@
-//! Canonical Coppice protocol state, replay, and wallet-integration primitives.
-pub mod authorization;
-pub mod bond;
-pub mod bond_tag;
-pub mod carrier;
-pub mod config;
-pub mod constants;
-pub mod crypto;
-pub mod envelope;
-pub mod ironwood;
-pub mod name_tree;
-pub mod names_application;
-pub mod names_runtime;
-pub mod owner;
-pub mod owner_kdf;
-pub mod pending;
-pub mod recent_spent;
-pub mod record;
-pub mod registration;
-pub mod reveal;
-pub mod state;
-pub mod state_root;
+//! Public Coppice deterministic application-runtime facade.
+//!
+//! Coppice is application-blind. Names and other protocols live in external
+//! application repositories and consume these Core/runtime APIs.
+
+#![forbid(unsafe_code)]
+
+pub use coppice_core::*;
+
+/// Small deterministic test support for application authors.
+pub mod testkit;

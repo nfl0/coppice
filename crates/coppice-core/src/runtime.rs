@@ -3,7 +3,8 @@
 use crate::{
     application::{
         ApplicationActivationError, ApplicationBlockContext, ApplicationDescriptor,
-        ApplicationEnvelopeError, ApplicationEnvelopeV1,
+        ApplicationEnvelopeError, ApplicationEnvelopeV1, ApplicationTip,
+        ApplicationTransactionContext,
     },
     carrier::{CPV1_PROTOCOL_ID, CoreRendezvous},
     identity::{
@@ -117,12 +118,37 @@ impl RuntimeBlockContext {
     pub fn for_application(
         &self,
         descriptor: ApplicationDescriptor,
-    ) -> Result<ApplicationBlockContext<'_>, ApplicationActivationError> {
+    ) -> Result<ApplicationBlockContext, ApplicationActivationError> {
         descriptor.validate_for_runtime(self.runtime_activation_height)?;
         let active = self.core.height() >= descriptor.activation_height;
+        let transactions = if active {
+            self.core
+                .transactions()
+                .iter()
+                .zip(self.transactions.iter())
+                .map(|(core, routed)| {
+                    let payload = match routed.message() {
+                        ApplicationMessageStatus::Message(message)
+                            if message.key() == descriptor.key =>
+                        {
+                            Some(message.payload().to_vec().into_boxed_slice())
+                        }
+                        _ => None,
+                    };
+                    ApplicationTransactionContext::new(core.clone(), payload)
+                })
+                .collect::<Vec<_>>()
+                .into_boxed_slice()
+        } else {
+            Box::new([])
+        };
         Ok(ApplicationBlockContext {
-            core: &self.core,
-            transactions: if active { &self.transactions } else { &[] },
+            tip: ApplicationTip {
+                height: self.core.height(),
+                block_hash: self.core.block_hash(),
+            },
+            core: active.then(|| self.core.clone()),
+            transactions,
             active,
         })
     }
