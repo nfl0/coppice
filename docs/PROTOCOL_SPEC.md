@@ -136,9 +136,12 @@ CarrierAndExtendedEffects
 
 Carrier detection always requires the full transaction. Extended-effect
 selection fetches only the requested transactions and never turns a
-non-carrier into a carrier. Every supplied transaction is untrusted until
-Core parses it under the canonical branch, verifies its txid, and compares its
-Ironwood nullifiers and commitments with compact data.
+non-carrier into a carrier. A `Carrier` acquisition authenticates bytes for
+routing but does not expose typed extended effects; those effects are exposed
+only for `ExtendedEffects` or `CarrierAndExtendedEffects`. Every supplied
+transaction is untrusted until Core parses it under the canonical branch,
+verifies its txid, and compares its Ironwood nullifiers and commitments with
+compact data.
 
 After that validation, an application may observe typed public extended
 effects:
@@ -160,8 +163,10 @@ CanonicalIronwoodBundleEffects {
 
 Private note plaintexts, wallet ownership, viewing keys, recipients, values,
 memos, proof bytes, signatures, ciphertexts, and local observations are not
-canonical Core inputs. Extended effects are absent unless the full transaction
-was acquired for a carrier or extended-effect reason and authenticated.
+canonical Core inputs. A `Carrier` acquisition authenticates a full
+transaction for carrier routing but does not expose typed extended effects.
+Those effects are present only when acquisition is `ExtendedEffects` or
+`CarrierAndExtendedEffects`, and the selected full transaction is authenticated.
 
 ## 6. Canonical replay and error boundaries
 

@@ -331,6 +331,8 @@ dependencies = [
  "coppice-core",
  "hex",
  "orchard",
+ "rand_chacha",
+ "rand_core",
  "zcash_client_backend",
  "zcash_note_encryption",
  "zcash_primitives",

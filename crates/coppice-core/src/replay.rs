@@ -717,11 +717,18 @@ impl CoreReplay {
                 ironwood_effects: CoreIronwoodEffects {
                     nullifiers: input.ironwood_nullifiers.clone().into_boxed_slice(),
                     commitments: input.ironwood_commitments.clone().into_boxed_slice(),
-                    extended: full_transaction_status
-                        .validated_full_transaction()
-                        .and_then(|transaction| {
-                            canonical_ironwood_bundle_effects(transaction.transaction())
-                        }),
+                    extended: if input
+                        .full_transaction_acquisition
+                        .includes_extended_effects()
+                    {
+                        full_transaction_status
+                            .validated_full_transaction()
+                            .and_then(|transaction| {
+                                canonical_ironwood_bundle_effects(transaction.transaction())
+                            })
+                    } else {
+                        None
+                    },
                 },
                 full_transaction_acquisition: input.full_transaction_acquisition,
                 full_transaction_status,

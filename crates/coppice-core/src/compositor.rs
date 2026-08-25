@@ -401,3 +401,305 @@ impl<A: HostedApplications> CanonicalRuntime for CoppiceRuntime<A> {
         self.rewind_to(height)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        application::{
+            ApplicationBlockContext, ApplicationId, ApplicationKey, ApplicationTip,
+            CoppiceApplication,
+        },
+        identity::{CoreRuntimeParameters, ZcashNetwork},
+        replay::{
+            CoreCanonicalBlockInput, CoreReplay, CoreReplayActivationCheckpoint,
+            CoreReplayConfiguration, IronwoodFrontier,
+        },
+    };
+    use zcash_protocol::consensus::BranchId;
+
+    const ACTIVATION_HEIGHT: u32 = 10;
+    const ACTIVATION_HASH: [u8; 32] = [9; 32];
+
+    fn core(retention_blocks: u32) -> CoreRuntime {
+        let parameters = CoreRuntimeParameters {
+            runtime_protocol_id: b"coppice.runtime".to_vec(),
+            runtime_protocol_version: 1,
+            zcash_network_domain: b"coppice-runtime-regtest-v1".to_vec(),
+            zcash_network: ZcashNetwork::Regtest,
+            runtime_activation_height: ACTIVATION_HEIGHT,
+            carrier_protocol_id: b"CPV1".to_vec(),
+            rendezvous_ivk: hex::decode(
+                "65deb2b3ee7ac69020543f40f21122cb6dc1f4201a329fcdf9d5e3bb2dfbbabe29d542352fe36c3c7b24c2989dc9d0000b9e04f444e05dc4538bde395c0e6008",
+            )
+            .unwrap()
+            .try_into()
+            .unwrap(),
+            rendezvous_receiver: hex::decode(
+                "9ec59e4d447ba285086cc3456cadf62004a19b6a7989c726daaa9944a6cdbf25f7bfa51afa15b66da53881",
+            )
+            .unwrap()
+            .try_into()
+            .unwrap(),
+        }
+        .validate()
+        .unwrap();
+        let replay = CoreReplay::new(
+            CoreReplayConfiguration::new(ACTIVATION_HEIGHT, retention_blocks).unwrap(),
+            CoreReplayActivationCheckpoint {
+                height: ACTIVATION_HEIGHT - 1,
+                block_hash: ACTIVATION_HASH,
+                ironwood_frontier: IronwoodFrontier::empty(),
+                ironwood_tree_size: 0,
+            },
+        )
+        .unwrap();
+        CoreRuntime::new(parameters, replay).unwrap()
+    }
+
+    fn block(core: &CoreRuntime, height: u32, hash: u8) -> CoreCanonicalBlockInput {
+        CoreCanonicalBlockInput {
+            height,
+            block_hash: [hash; 32],
+            prev_block_hash: core.tip().block_hash,
+            branch_id: BranchId::Nu6_3,
+            transactions: vec![],
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct TestApplication {
+        descriptor: ApplicationDescriptor,
+        tip: ApplicationTip,
+        value: u8,
+        retention_blocks: u32,
+        fail_apply: bool,
+        fail_rewind: bool,
+        history: Vec<(ApplicationTip, u8)>,
+    }
+
+    impl TestApplication {
+        fn new(id: u8, activation_height: u32, tip: ApplicationTip, retention_blocks: u32) -> Self {
+            Self {
+                descriptor: ApplicationDescriptor {
+                    key: ApplicationKey::new(ApplicationId::from_bytes([id; 32]), 1),
+                    activation_height,
+                },
+                tip,
+                value: 0,
+                retention_blocks,
+                fail_apply: false,
+                fail_rewind: false,
+                history: vec![],
+            }
+        }
+    }
+
+    impl CoppiceApplication for TestApplication {
+        type BlockOutput = u8;
+        type ApplyError = ();
+        type RewindError = ();
+
+        fn descriptor(&self) -> ApplicationDescriptor {
+            self.descriptor
+        }
+
+        fn tip(&self) -> ApplicationTip {
+            self.tip
+        }
+
+        fn state_root(&self) -> [u8; 32] {
+            [self.value; 32]
+        }
+
+        fn apply_block(&mut self, block: &ApplicationBlockContext) -> Result<u8, ()> {
+            let next_tip = block.tip();
+            if self.tip.height.checked_add(1) != Some(next_tip.height) {
+                return Err(());
+            }
+            if block
+                .core()
+                .is_some_and(|core| core.prev_block_hash() != self.tip.block_hash)
+            {
+                return Err(());
+            }
+            self.history.push((self.tip, self.value));
+            if block.is_active() {
+                self.value = self.value.checked_add(1).ok_or(())?;
+            }
+            self.tip = next_tip;
+            if self.history.len() > self.retention_blocks as usize {
+                self.history.remove(0);
+            }
+            if self.fail_apply {
+                return Err(());
+            }
+            Ok(self.value)
+        }
+
+        fn rewind_to(&mut self, height: u32) -> Result<(), ()> {
+            if height < CoppiceApplication::oldest_rewind_height(self) || height > self.tip.height {
+                return Err(());
+            }
+            let mut tip = self.tip;
+            let mut value = self.value;
+            let mut history = self.history.clone();
+            while tip.height > height {
+                let (prior_tip, prior_value) = history.pop().ok_or(())?;
+                tip = prior_tip;
+                value = prior_value;
+            }
+            if self.fail_rewind {
+                return Err(());
+            }
+            self.tip = tip;
+            self.value = value;
+            self.history = history;
+            Ok(())
+        }
+
+        fn rewind_retention_blocks(&self) -> u32 {
+            self.retention_blocks
+        }
+
+        fn oldest_rewind_height(&self) -> u32 {
+            self.history
+                .first()
+                .map_or(self.tip.height, |(tip, _)| tip.height)
+        }
+
+        fn retained_tip_at(&self, height: u32) -> Option<ApplicationTip> {
+            if height == self.tip.height {
+                Some(self.tip)
+            } else {
+                self.history
+                    .iter()
+                    .find(|(tip, _)| tip.height == height)
+                    .map(|(tip, _)| *tip)
+            }
+        }
+    }
+
+    fn apps(core: &CoreRuntime, b_retention: u32) -> (TestApplication, TestApplication) {
+        let tip = ApplicationTip {
+            height: core.tip().height,
+            block_hash: core.tip().block_hash,
+        };
+        (
+            TestApplication::new(1, ACTIVATION_HEIGHT, tip, 2),
+            TestApplication::new(2, ACTIVATION_HEIGHT, tip, b_retention),
+        )
+    }
+
+    #[test]
+    fn application_failure_publishes_nothing_to_core_or_siblings() {
+        let mut core = core(4);
+        let (mut a, b) = apps(&core, 3);
+        a.fail_apply = true;
+        let mut runtime = CoppiceRuntime::new(core.clone(), (a, b)).unwrap();
+        let input = block(&core, ACTIVATION_HEIGHT, 10);
+        let before_core = runtime.core().clone();
+        let before_a = runtime.applications().0.clone();
+        let before_b = runtime.applications().1.clone();
+
+        assert!(matches!(
+            runtime.apply_block(&input),
+            Err(CoppiceRuntimeError::Applications(
+                ApplicationHostError::ApplicationFailed { .. }
+            ))
+        ));
+        assert_eq!(runtime.core().tip(), before_core.tip());
+        assert_eq!(
+            runtime.core().ironwood_frontier(),
+            before_core.ironwood_frontier()
+        );
+        assert_eq!(runtime.applications().0.value, before_a.value);
+        assert_eq!(runtime.applications().0.tip, before_a.tip);
+        assert_eq!(runtime.applications().1.value, before_b.value);
+        assert_eq!(runtime.applications().1.tip, before_b.tip);
+        core = before_core;
+        assert_eq!(core.tip().height, ACTIVATION_HEIGHT - 1);
+    }
+
+    #[test]
+    fn failed_rewind_publishes_nothing_to_core_or_any_application() {
+        let core = core(4);
+        let (a, mut b) = apps(&core, 3);
+        b.fail_rewind = true;
+        let mut runtime = CoppiceRuntime::new(core.clone(), (a, b)).unwrap();
+        let first = block(&core, ACTIVATION_HEIGHT, 10);
+        runtime.apply_block(&first).unwrap();
+        let second = block(runtime.core(), ACTIVATION_HEIGHT + 1, 11);
+        runtime.apply_block(&second).unwrap();
+        let before_core = runtime.core().clone();
+        let before_apps = runtime.applications().clone();
+
+        assert!(matches!(
+            runtime.rewind_to(ACTIVATION_HEIGHT - 1),
+            Err(CoppiceRuntimeRewindError::Applications(
+                ApplicationHostError::RewindFailed { .. }
+            ))
+        ));
+        assert_eq!(runtime.core().tip(), before_core.tip());
+        assert_eq!(runtime.applications().0.value, before_apps.0.value);
+        assert_eq!(runtime.applications().1.value, before_apps.1.value);
+        assert_eq!(runtime.applications().0.tip, before_apps.0.tip);
+        assert_eq!(runtime.applications().1.tip, before_apps.1.tip);
+    }
+
+    #[test]
+    fn duplicate_keys_and_independent_activation_are_enforced() {
+        let core = core(4);
+        let tip = ApplicationTip {
+            height: core.tip().height,
+            block_hash: core.tip().block_hash,
+        };
+        let duplicate = TestApplication::new(1, ACTIVATION_HEIGHT, tip, 2);
+        assert!(matches!(
+            CoppiceRuntime::new(core.clone(), (duplicate.clone(), duplicate)),
+            Err(ApplicationHostError::DuplicateApplicationKey)
+        ));
+
+        let a = TestApplication::new(1, ACTIVATION_HEIGHT, tip, 2);
+        let b = TestApplication::new(2, ACTIVATION_HEIGHT + 1, tip, 2);
+        let mut runtime = CoppiceRuntime::new(core.clone(), (a, b)).unwrap();
+        let first = block(&core, ACTIVATION_HEIGHT, 10);
+        runtime.apply_block(&first).unwrap();
+        assert_eq!(runtime.applications().0.value, 1);
+        assert_eq!(runtime.applications().1.value, 0);
+        let second = block(runtime.core(), ACTIVATION_HEIGHT + 1, 11);
+        runtime.apply_block(&second).unwrap();
+        assert_eq!(runtime.applications().0.value, 2);
+        assert_eq!(runtime.applications().1.value, 1);
+        assert_eq!(runtime.applications().0.tip, runtime.applications().1.tip);
+        assert_eq!(runtime.applications().0.tip.height, ACTIVATION_HEIGHT + 1);
+    }
+
+    #[test]
+    fn common_horizon_is_the_maximum_application_requirement_and_never_older_than_core() {
+        let core = core(4);
+        let mut runtime = CoppiceRuntime::new(core.clone(), apps(&core, 3)).unwrap();
+        for height in ACTIVATION_HEIGHT..=ACTIVATION_HEIGHT + 2 {
+            let input = block(runtime.core(), height, height as u8);
+            runtime.apply_block(&input).unwrap();
+        }
+
+        assert_eq!(runtime.required_rewind_retention(), 3);
+        assert_eq!(runtime.oldest_rewind_height(), 10);
+        assert!(runtime.oldest_rewind_height() >= runtime.core().oldest_rewind_height());
+        assert_eq!(runtime.retained_tip_at(10).unwrap().height, 10);
+        assert!(runtime.retained_tip_at(9).is_none());
+        runtime.rewind_to(10).unwrap();
+        assert_eq!(runtime.core().tip().height, 10);
+        assert_eq!(runtime.applications().0.tip.height, 10);
+        assert_eq!(runtime.applications().1.tip.height, 10);
+        assert_eq!(
+            runtime.core().tip().block_hash,
+            runtime.applications().0.tip.block_hash
+        );
+        assert_eq!(
+            runtime.core().tip().block_hash,
+            runtime.applications().1.tip.block_hash
+        );
+    }
+}

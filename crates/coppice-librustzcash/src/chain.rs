@@ -354,6 +354,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use coppice_core::{
+        application::{ApplicationEnvelopeV1, ApplicationId, ApplicationKey},
         carrier,
         identity::{CoreRuntimeParameters, ZcashNetwork},
         replay::{
@@ -361,19 +362,28 @@ mod tests {
             FullTransactionAcquisition, IronwoodFrontier,
         },
         runtime::{ApplicationMessageStatus, CoreRuntime},
+        transport,
     };
     use orchard::{
+        Proof,
+        builder::{Builder, BundleType},
+        bundle::{Authorized as OrchardAuthorized, BundleVersion},
         keys::IncomingViewingKey,
         note::{ExtractedNoteCommitment, Note, NoteVersion, Nullifier, RandomSeed, Rho},
         note_encryption::{CompactAction, IronwoodDomain, IronwoodNoteEncryption},
+        primitives::redpallas::{Binding, SigningKey, SpendAuth},
         value::NoteValue,
     };
+    use rand_chacha::ChaCha20Rng;
+    use rand_core::SeedableRng;
     use zcash_client_backend::proto::compact_formats::{
         CompactBlock, CompactOrchardAction, CompactTx,
     };
     use zcash_note_encryption::Domain;
     use zcash_primitives::transaction::{Authorized, TransactionData};
-    use zcash_protocol::{consensus::BlockHeight, local_consensus::LocalNetwork};
+    use zcash_protocol::{
+        consensus::BlockHeight, local_consensus::LocalNetwork, value::ZatBalance,
+    };
 
     use super::*;
 
@@ -477,6 +487,27 @@ mod tests {
         rendezvous_action(key.address_at(1u32))
     }
 
+    fn alternate_receiver() -> orchard::Address {
+        let ivk: [u8; 64] = hex::decode(
+            "65deb2b3ee7ac69020543f40f21122cb6dc1f4201a329fcdf9d5e3bb2dfbbabe29d542352fe36c3c7b24c2989dc9d0000b9e04f444e05dc4538bde395c0e6008",
+        )
+        .unwrap()
+        .try_into()
+        .unwrap();
+        let key = Option::<IncomingViewingKey>::from(IncomingViewingKey::from_bytes(&ivk)).unwrap();
+        key.address_at(1u32)
+    }
+
+    fn configured_receiver() -> orchard::Address {
+        let receiver: [u8; 43] = hex::decode(
+            "9ec59e4d447ba285086cc3456cadf62004a19b6a7989c726daaa9944a6cdbf25f7bfa51afa15b66da53881",
+        )
+        .unwrap()
+        .try_into()
+        .unwrap();
+        orchard::Address::from_raw_address_bytes(&receiver).unwrap()
+    }
+
     fn noncandidate_action() -> CompactOrchardAction {
         let mut action = real_rendezvous_action();
         action.ciphertext[0] ^= 1;
@@ -518,6 +549,88 @@ mod tests {
         let mut bytes = Vec::new();
         transaction.write(&mut bytes).unwrap();
         (bytes, txid)
+    }
+
+    struct FullIronwoodFixture {
+        bytes: Vec<u8>,
+        txid: [u8; 32],
+        compact: CompactOrchardAction,
+        nullifier: [u8; 32],
+        commitment: [u8; 32],
+        value_commitment: [u8; 32],
+        randomized_key: [u8; 32],
+        value_balance: i64,
+    }
+
+    fn full_ironwood_transaction(
+        receiver: orchard::Address,
+        memo: [u8; 512],
+        seed: u8,
+    ) -> FullIronwoodFixture {
+        let version = BundleVersion::ironwood_v3();
+        let mut builder = Builder::new(
+            BundleType::UNPADDED,
+            version,
+            version.default_flags(),
+            orchard::Anchor::empty_tree(),
+        )
+        .unwrap();
+        builder
+            .add_output(None, receiver, NoteValue::from_raw(5), memo)
+            .unwrap();
+        let mut rng = ChaCha20Rng::from_seed([seed; 32]);
+        let (unauthorized, _) = builder.build::<ZatBalance>(&mut rng).unwrap().unwrap();
+        let count = unauthorized.actions().len();
+        let spend_key = SigningKey::<SpendAuth>::try_from([seed.max(1); 32]).unwrap();
+        let binding_key =
+            SigningKey::<Binding>::try_from([seed.wrapping_add(1).max(1); 32]).unwrap();
+        let proof = Proof::new(vec![0; Proof::expected_proof_size(count)]);
+        let bundle = unauthorized.map_authorization(
+            &mut rng,
+            |rng, _, _| spend_key.sign(&mut *rng, b"CoppiceAcquisitionTestSpend"),
+            |rng, _| {
+                OrchardAuthorized::from_parts(
+                    proof,
+                    binding_key.sign(&mut *rng, b"CoppiceAcquisitionTestBinding"),
+                )
+            },
+        );
+        let transaction = TransactionData::<Authorized>::from_parts_v6(
+            BranchId::Nu6_3,
+            0,
+            BlockHeight::from_u32(10),
+            None,
+            None,
+            None,
+            Some(bundle),
+        )
+        .freeze()
+        .unwrap();
+        let action = transaction
+            .ironwood_bundle()
+            .unwrap()
+            .actions()
+            .iter()
+            .next()
+            .unwrap();
+        let compact = CompactOrchardAction {
+            nullifier: action.nullifier().to_bytes().to_vec(),
+            cmx: action.cmx().to_bytes().to_vec(),
+            ephemeral_key: action.encrypted_note().epk_bytes.to_vec(),
+            ciphertext: action.encrypted_note().enc_ciphertext[..52].to_vec(),
+        };
+        let mut bytes = Vec::new();
+        transaction.write(&mut bytes).unwrap();
+        FullIronwoodFixture {
+            bytes,
+            txid: transaction.txid().into(),
+            compact,
+            nullifier: action.nullifier().to_bytes(),
+            commitment: action.cmx().to_bytes(),
+            value_commitment: action.cv_net().to_bytes(),
+            randomized_key: action.rk().into(),
+            value_balance: i64::from(*transaction.ironwood_bundle().unwrap().value_balance()),
+        }
     }
 
     #[derive(Default)]
@@ -855,6 +968,139 @@ mod tests {
     }
 
     #[test]
+    fn extended_effects_authenticate_full_ironwood_effects_without_carrier_routing() {
+        let mut runtime = runtime();
+        let fixture = full_ironwood_transaction(alternate_receiver(), [0; 512], 4);
+        let mut compact = compact_tx(7, 4, vec![fixture.compact.clone()]);
+        compact.txid = fixture.txid.to_vec();
+        let input = block(&runtime, vec![compact]);
+        let mut source = Source::default();
+        source
+            .values
+            .insert(fixture.txid, Ok(Some(fixture.bytes.clone())));
+
+        let applied = apply_compact_block_with_transaction_selector(
+            &params(),
+            &mut runtime,
+            &input,
+            &mut source,
+            |_| true,
+        )
+        .unwrap();
+        assert_eq!(source.calls, vec![fixture.txid]);
+        let transaction = &applied.core().transactions()[0];
+        assert_eq!(
+            transaction.full_transaction_acquisition(),
+            FullTransactionAcquisition::ExtendedEffects
+        );
+        assert!(!transaction.is_carrier_candidate());
+        assert_eq!(
+            transaction.ironwood_effects().nullifiers(),
+            &[fixture.nullifier]
+        );
+        assert_eq!(
+            transaction.ironwood_effects().commitments(),
+            &[fixture.commitment]
+        );
+        let extended = transaction.ironwood_effects().extended().unwrap();
+        assert_eq!(extended.actions.len(), 1);
+        assert_eq!(extended.actions[0].nullifier, fixture.nullifier);
+        assert_eq!(extended.actions[0].commitment, fixture.commitment);
+        assert_eq!(
+            extended.actions[0].value_commitment,
+            fixture.value_commitment
+        );
+        assert_eq!(extended.actions[0].randomized_key, fixture.randomized_key);
+        assert_eq!(extended.value_balance, fixture.value_balance);
+        assert!(extended.flags.spends_enabled);
+        assert!(extended.flags.outputs_enabled);
+        assert!(extended.flags.cross_address_enabled);
+        assert_eq!(
+            applied.transactions()[0].message(),
+            &ApplicationMessageStatus::NotCandidate
+        );
+    }
+
+    #[test]
+    fn carrier_acquisition_routes_once_without_exposing_extended_effects() {
+        let mut runtime = runtime();
+        let key = ApplicationKey::new(ApplicationId::from_bytes([7; 32]), 1);
+        let envelope = ApplicationEnvelopeV1::new(key, vec![1]).unwrap().encode();
+        let frame = transport::encode_frames(runtime.runtime_id().to_bytes(), &envelope)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let fixture = full_ironwood_transaction(configured_receiver(), frame, 5);
+        let mut compact = compact_tx(7, 5, vec![fixture.compact.clone()]);
+        compact.txid = fixture.txid.to_vec();
+        let input = block(&runtime, vec![compact]);
+        let mut source = Source::default();
+        source
+            .values
+            .insert(fixture.txid, Ok(Some(fixture.bytes.clone())));
+
+        let applied = apply_compact_block(&params(), &mut runtime, &input, &mut source).unwrap();
+        assert_eq!(source.calls, vec![fixture.txid]);
+        let transaction = &applied.core().transactions()[0];
+        assert_eq!(
+            transaction.full_transaction_acquisition(),
+            FullTransactionAcquisition::Carrier
+        );
+        assert!(transaction.is_carrier_candidate());
+        assert!(
+            transaction
+                .full_transaction_status()
+                .validated_full_transaction()
+                .is_some()
+        );
+        assert!(transaction.ironwood_effects().extended().is_none());
+        assert!(matches!(
+            applied.transactions()[0].message(),
+            ApplicationMessageStatus::Message(message) if message.key() == key
+        ));
+    }
+
+    #[test]
+    fn carrier_and_extended_effects_fetch_once_route_once_and_expose_effects() {
+        let mut runtime = runtime();
+        let key = ApplicationKey::new(ApplicationId::from_bytes([8; 32]), 1);
+        let envelope = ApplicationEnvelopeV1::new(key, vec![2]).unwrap().encode();
+        let frame = transport::encode_frames(runtime.runtime_id().to_bytes(), &envelope)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let fixture = full_ironwood_transaction(configured_receiver(), frame, 6);
+        let mut compact = compact_tx(7, 6, vec![fixture.compact.clone()]);
+        compact.txid = fixture.txid.to_vec();
+        let input = block(&runtime, vec![compact]);
+        let mut source = Source::default();
+        source.values.insert(fixture.txid, Ok(Some(fixture.bytes)));
+
+        let applied = apply_compact_block_with_transaction_selector(
+            &params(),
+            &mut runtime,
+            &input,
+            &mut source,
+            |_| true,
+        )
+        .unwrap();
+        assert_eq!(source.calls, vec![fixture.txid]);
+        let transaction = &applied.core().transactions()[0];
+        assert_eq!(
+            transaction.full_transaction_acquisition(),
+            FullTransactionAcquisition::CarrierAndExtendedEffects
+        );
+        assert!(transaction.is_carrier_candidate());
+        assert!(transaction.ironwood_effects().extended().is_some());
+        assert!(matches!(
+            applied.transactions()[0].message(),
+            ApplicationMessageStatus::Message(message) if message.key() == key
+        ));
+    }
+
+    #[test]
     fn cumulative_full_transaction_budget_is_bounded() {
         let runtime = runtime();
         let input = block(
@@ -1037,5 +1283,38 @@ mod tests {
                 CoreReplayError::IronwoodEffectsMismatch
             ))
         ));
+    }
+
+    #[test]
+    fn compact_nullifier_and_commitment_mismatches_are_independently_core_fatal() {
+        let runtime = runtime();
+        let fixture = full_ironwood_transaction(alternate_receiver(), [0; 512], 9);
+
+        let mut nullifier_mismatch = fixture.compact.clone();
+        nullifier_mismatch.nullifier = vec![0; 32];
+        let mut commitment_mismatch = fixture.compact.clone();
+        commitment_mismatch.cmx = alternate_rendezvous_action().cmx;
+
+        for action in [nullifier_mismatch, commitment_mismatch] {
+            let mut compact = compact_tx(7, 9, vec![action]);
+            compact.txid = fixture.txid.to_vec();
+            let input = block(&runtime, vec![compact]);
+            let mut source = Source::default();
+            source
+                .values
+                .insert(fixture.txid, Ok(Some(fixture.bytes.clone())));
+            assert!(matches!(
+                apply_compact_block_with_transaction_selector(
+                    &params(),
+                    &mut runtime.clone(),
+                    &input,
+                    &mut source,
+                    |_| true,
+                ),
+                Err(CompactBlockApplyError::Runtime(
+                    CoreReplayError::IronwoodEffectsMismatch
+                ))
+            ));
+        }
     }
 }
