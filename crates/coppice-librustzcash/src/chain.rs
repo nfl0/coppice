@@ -26,28 +26,17 @@ pub const MAX_FULL_TRANSACTION_BYTES: usize = MAX_BLOCK_BYTES;
 /// Compatibility alias retained for callers using the pre-selector name.
 pub const MAX_CANDIDATE_FULL_TX_BYTES: usize = MAX_FULL_TRANSACTION_BYTES;
 
-pub use coppice_core::runtime::CanonicalRuntime;
+pub use coppice_core::{
+    application::CanonicalCompactTransactionSummary, runtime::CanonicalRuntime,
+};
 
-/// Supplies raw serialized transactions when compact carrier detection or a
-/// caller's selective extended-effect policy makes the full transaction
-/// mandatory.
+/// Supplies raw serialized transactions when Core's carrier detection or the
+/// composed runtime's selective extended-effect policy makes the full
+/// transaction mandatory.
 pub trait FullTransactionSource {
     type Error: Debug;
 
     fn full_transaction(&mut self, txid: [u8; 32]) -> Result<Option<Vec<u8>>, Self::Error>;
-}
-
-/// Compact facts validated before any external fetch. The references borrow
-/// the adapter's canonicalized compact vectors and are valid only for the
-/// selector callback invocation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CanonicalCompactTransactionSummary<'a> {
-    pub tx_index: u32,
-    pub txid: [u8; 32],
-    pub ironwood_nullifiers: &'a [[u8; 32]],
-    pub ironwood_commitments: &'a [[u8; 32]],
-    pub action_count: usize,
-    pub rendezvous_candidate: bool,
 }
 
 #[derive(Debug)]
@@ -171,11 +160,11 @@ where
     )
 }
 
-/// Like [`prepare_canonical_block`], with a bounded, caller-owned selective
-/// full-transaction policy. Applications that need extended public Ironwood
-/// effects can request a full transaction from the validated compact summary;
-/// Core still parses and cross-checks every selected response. Compact carrier
-/// detection always remains mandatory independently of this policy.
+/// Like [`prepare_canonical_block`], with an optional bounded supplemental
+/// full-transaction policy. The generic runtime's composed application
+/// requirement is always evaluated first; this callback is retained for
+/// callers with an additional host-local observation policy. Core still
+/// parses and cross-checks every selected response.
 pub fn prepare_canonical_block_with_transaction_selector<P, R, S, F>(
     params: &P,
     runtime: &R,
@@ -224,15 +213,18 @@ where
         {
             return Err(CompactBlockAdapterError::NonCanonicalTxOrder);
         }
-        let request_extended_effects =
-            select_full_transaction(&CanonicalCompactTransactionSummary {
-                tx_index: tx.input.tx_index,
-                txid: tx.input.txid,
-                ironwood_nullifiers: &tx.input.ironwood_nullifiers,
-                ironwood_commitments: &tx.input.ironwood_commitments,
-                action_count: tx.input.ironwood_nullifiers.len(),
-                rendezvous_candidate: tx.rendezvous_candidate,
-            });
+        let summary = CanonicalCompactTransactionSummary {
+            tx_index: tx.input.tx_index,
+            txid: tx.input.txid,
+            ironwood_nullifiers: &tx.input.ironwood_nullifiers,
+            ironwood_commitments: &tx.input.ironwood_commitments,
+            action_count: tx.input.ironwood_nullifiers.len(),
+            rendezvous_candidate: tx.rendezvous_candidate,
+        };
+        let request_extended_effects = runtime
+            .full_transaction_acquisition(&summary)
+            .includes_extended_effects()
+            || select_full_transaction(&summary);
         tx.input.full_transaction_acquisition =
             FullTransactionAcquisition::new(tx.rendezvous_candidate, request_extended_effects);
         validated.push(tx);

@@ -114,8 +114,8 @@ For each canonical transaction Core accepts compact Ironwood nullifiers and
 note commitments (`cmx`) in canonical action order. These public effects are
 available without fetching full transactions.
 
-An adapter may request a full transaction selectively using a
-`CanonicalCompactTransactionSummary` containing:
+The compact-block adapter constructs a `CanonicalCompactTransactionSummary`
+containing:
 
 ```text
 tx_index, txid,
@@ -123,9 +123,11 @@ ironwood_nullifiers, ironwood_commitments,
 action_count, rendezvous_candidate
 ```
 
-This is a host policy decision, not application code embedded in Core. The
-two independent acquisition reasons are represented by
-`FullTransactionAcquisition`:
+The host asks its `CanonicalRuntime` for the acquisition requirement. A
+composed `CoppiceRuntime` passes an application-only view of the compact facts
+to every active hosted application. Each application contributes only
+`None` or `ExtendedEffects`; the runtime unions those requests with Core's
+independent rendezvous candidate and returns one `FullTransactionAcquisition`:
 
 ```text
 None
@@ -134,8 +136,12 @@ ExtendedEffects
 CarrierAndExtendedEffects
 ```
 
-Carrier detection always requires the full transaction. Extended-effect
-selection fetches only the requested transactions and never turns a
+Application selection is deterministic and read-only. Applications do not see
+carrier candidacy, sibling state, routed payloads, or wallet-private data.
+Before an application's activation height it contributes no acquisition
+requirement and receives no native effects or routed messages. Carrier
+detection always requires the full transaction. Extended-effect selection
+fetches only the union of requested transactions and never turns a
 non-carrier into a carrier. A `Carrier` acquisition authenticates bytes for
 routing but does not expose typed extended effects; those effects are exposed
 only for `ExtendedEffects` or `CarrierAndExtendedEffects`. Every supplied

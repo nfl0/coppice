@@ -22,10 +22,13 @@ ordering without a registry or cross-application mutable calls.
 
 The adapter validates every CompactBlock structurally before its first fetch.
 `CanonicalCompactTransactionSummary` exposes compact nullifiers, commitments,
-transaction index, txid, action count, and rendezvous classification to a
-caller-owned selector. `FullTransactionAcquisition` keeps carrier routing and
-extended-effect observation independent. Bytes are parsed and cross-checked by
-Core before any routing or extended effects are exposed.
+transaction index, txid, action count, and Core-owned rendezvous
+classification. The `CanonicalRuntime` acquisition method passes a restricted
+application view to each active application and unions their
+`ExtendedEffects` requests with carrier candidacy. `FullTransactionAcquisition`
+keeps carrier routing and extended-effect observation independent. Bytes are
+parsed and cross-checked by Core before any routing or extended effects are
+exposed.
 
 `CanonicalBlockSource` and `FrozenCanonicalBlockSource` keep fork choice with
 the host. Reconciliation discovers a retained hash-matching ancestor, rewinds

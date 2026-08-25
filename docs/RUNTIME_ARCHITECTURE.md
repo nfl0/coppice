@@ -6,7 +6,7 @@ state machines; it neither creates a second consensus layer nor chooses forks.
 
 ```text
 host CompactBlocks
-  -> coppice-librustzcash (exact-receiver candidate scan)
+  -> coppice-librustzcash (compact validation and one runtime acquisition query)
   -> coppice-core::CoreRuntime (canonical replay once)
   -> CoppiceRuntime<(ApplicationA, ApplicationB, ...)>
   -> isolated application roots, snapshots, and undo journals
@@ -40,13 +40,16 @@ from the authenticated activation checkpoint when the common ancestor falls
 outside retained history.
 
 Canonical observations never contain wallet-private data. Compact contexts
-always include nullifiers and commitments. A host can selectively request full
-transactions from a validated `CanonicalCompactTransactionSummary` (including
-those compact effects) rather than fetching a whole block; Core parses and
-cross-checks them, then exposes typed value commitments, randomized keys,
-bundle flags, and signed bundle value balance. Proofs, signatures, ciphertexts,
-private note data, viewing keys, memos, recipients, values, ownership, and
-mempool facts are not application state input.
+always include nullifiers and commitments. The adapter asks the composed
+runtime for one `FullTransactionAcquisition` value per transaction. Core
+carrier candidacy is unioned with each active application's read-only
+`ExtendedEffects` request, so a host does not branch on application types and
+multiple applications share one fetch. Before activation an application
+contributes no request. Core parses and cross-checks selected transactions,
+then exposes typed value commitments, randomized keys, bundle flags, and
+signed bundle value balance. Proofs, signatures, ciphertexts, private note
+data, viewing keys, memos, recipients, values, ownership, and mempool facts
+are not application state input.
 
 The generic publisher prepares `ApplicationKey + payload` as CA01 inside CPV1
 and can verify a constructed transaction using the same exact-receiver Core

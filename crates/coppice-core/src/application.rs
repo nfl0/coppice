@@ -64,6 +64,57 @@ pub struct ApplicationDescriptor {
     pub activation_height: u32,
 }
 
+/// Compact canonical facts available before any full transaction fetch.
+///
+/// This is the application-facing observation boundary. It deliberately
+/// contains no routed payload, sibling application state, wallet-private
+/// data, or carrier candidacy. Core owns carrier detection; applications can
+/// only request authenticated extended effects.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ApplicationCompactTransactionSummary<'a> {
+    pub tx_index: u32,
+    pub txid: [u8; 32],
+    pub ironwood_nullifiers: &'a [[u8; 32]],
+    pub ironwood_commitments: &'a [[u8; 32]],
+    pub action_count: usize,
+}
+
+/// The additional canonical observation an application may request for one
+/// compact transaction. Carrier acquisition is intentionally not an
+/// application capability.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ApplicationAcquisitionRequirement {
+    None,
+    ExtendedEffects,
+}
+
+/// Canonical compact facts assembled by a host adapter after Core-owned
+/// rendezvous classification. The composed runtime consumes this type to
+/// union carrier acquisition with application observation requirements.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CanonicalCompactTransactionSummary<'a> {
+    pub tx_index: u32,
+    pub txid: [u8; 32],
+    pub ironwood_nullifiers: &'a [[u8; 32]],
+    pub ironwood_commitments: &'a [[u8; 32]],
+    pub action_count: usize,
+    pub rendezvous_candidate: bool,
+}
+
+impl<'a> CanonicalCompactTransactionSummary<'a> {
+    /// Returns the restricted view applications may inspect for selective
+    /// extended-effect acquisition.
+    pub const fn application_view(&self) -> ApplicationCompactTransactionSummary<'a> {
+        ApplicationCompactTransactionSummary {
+            tx_index: self.tx_index,
+            txid: self.txid,
+            ironwood_nullifiers: self.ironwood_nullifiers,
+            ironwood_commitments: self.ironwood_commitments,
+            action_count: self.action_count,
+        }
+    }
+}
+
 /// The portion of one Core block that a specific application is authorized to
 /// observe. Before application activation, only the canonical position is
 /// exposed; Core effects and routed messages are withheld.
@@ -155,6 +206,17 @@ pub trait CoppiceApplication: Clone {
     fn oldest_rewind_height(&self) -> u32;
 
     fn retained_tip_at(&self, height: u32) -> Option<ApplicationTip>;
+
+    /// Read-only selective observation policy for one compact canonical
+    /// transaction. The compositor calls this only after the application is
+    /// active for the block being prepared. The default keeps simple
+    /// applications compact-only without boilerplate.
+    fn full_transaction_acquisition(
+        &self,
+        _summary: &ApplicationCompactTransactionSummary<'_>,
+    ) -> ApplicationAcquisitionRequirement {
+        ApplicationAcquisitionRequirement::None
+    }
 }
 
 /// Self-describing application snapshot envelope. The payload belongs wholly

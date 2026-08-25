@@ -226,8 +226,10 @@ where
     )
 }
 
-/// Reconciles while allowing the host/application layer to request selective
-/// full transactions from compact canonical summaries.
+/// Reconciles while allowing an optional supplemental host policy to request
+/// selective full transactions. The composed runtime's application
+/// acquisition requirement is always evaluated by the shared compact-block
+/// path, so normal reconciliation needs no application-specific selector.
 pub fn reconcile_canonical_chain_with_transaction_selector<P, R, C, F, S>(
     params: &P,
     runtime: &mut R,

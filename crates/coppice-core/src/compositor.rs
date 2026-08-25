@@ -5,13 +5,29 @@
 //! a single Core scan and commits the staged states together.
 
 use crate::{
-    application::{ApplicationDescriptor, ApplicationTip, CoppiceApplication},
+    application::{
+        ApplicationAcquisitionRequirement, ApplicationCompactTransactionSummary,
+        ApplicationDescriptor, ApplicationTip, CanonicalCompactTransactionSummary,
+        CoppiceApplication,
+    },
     carrier::CoreRendezvous,
     identity::ValidatedCoreRuntimeParameters,
-    replay::{CoreCanonicalBlockInput, CoreReplayTip, CoreRewindError},
+    replay::{CoreCanonicalBlockInput, CoreReplayTip, CoreRewindError, FullTransactionAcquisition},
     runtime::{CanonicalRuntime, CoreRuntime, RuntimeBlockContext},
 };
 use std::fmt::Debug;
+
+fn application_requests_extended_effects<A: CoppiceApplication>(
+    application: &A,
+    summary: &ApplicationCompactTransactionSummary<'_>,
+    block_height: u32,
+) -> bool {
+    block_height >= application.descriptor().activation_height
+        && matches!(
+            application.full_transaction_acquisition(summary),
+            ApplicationAcquisitionRequirement::ExtendedEffects
+        )
+}
 
 /// A statically composed collection of isolated applications. Implementations
 /// are supplied for an application and for tuples of two or three applications;
@@ -25,6 +41,13 @@ pub trait HostedApplications: Clone {
     fn oldest_rewind_height(&self) -> u32;
     fn retained_tip_at(&self, height: u32) -> Option<ApplicationTip>;
     fn required_rewind_retention(&self) -> u32;
+    fn requests_extended_effects(
+        &self,
+        _summary: &ApplicationCompactTransactionSummary<'_>,
+        _block_height: u32,
+    ) -> bool {
+        false
+    }
     fn apply_all(
         &mut self,
         block: &RuntimeBlockContext,
@@ -64,6 +87,13 @@ where
     }
     fn required_rewind_retention(&self) -> u32 {
         self.rewind_retention_blocks()
+    }
+    fn requests_extended_effects(
+        &self,
+        summary: &ApplicationCompactTransactionSummary<'_>,
+        block_height: u32,
+    ) -> bool {
+        application_requests_extended_effects(self, summary, block_height)
     }
     fn apply_all(
         &mut self,
@@ -114,6 +144,14 @@ where
         self.0
             .rewind_retention_blocks()
             .max(self.1.rewind_retention_blocks())
+    }
+    fn requests_extended_effects(
+        &self,
+        summary: &ApplicationCompactTransactionSummary<'_>,
+        block_height: u32,
+    ) -> bool {
+        application_requests_extended_effects(&self.0, summary, block_height)
+            || application_requests_extended_effects(&self.1, summary, block_height)
     }
     fn apply_all(
         &mut self,
@@ -192,6 +230,15 @@ where
             .rewind_retention_blocks()
             .max(self.1.rewind_retention_blocks())
             .max(self.2.rewind_retention_blocks())
+    }
+    fn requests_extended_effects(
+        &self,
+        summary: &ApplicationCompactTransactionSummary<'_>,
+        block_height: u32,
+    ) -> bool {
+        application_requests_extended_effects(&self.0, summary, block_height)
+            || application_requests_extended_effects(&self.1, summary, block_height)
+            || application_requests_extended_effects(&self.2, summary, block_height)
     }
 
     fn apply_all(
@@ -316,6 +363,21 @@ impl<A: HostedApplications> CoppiceRuntime<A> {
         self.applications.required_rewind_retention()
     }
 
+    /// Returns the single full-transaction acquisition requirement for one
+    /// compact canonical transaction. Core-owned carrier candidacy is unioned
+    /// with every active application's read-only extended-effect request.
+    pub fn full_transaction_acquisition(
+        &self,
+        summary: &CanonicalCompactTransactionSummary<'_>,
+    ) -> FullTransactionAcquisition {
+        let block_height = self.core.tip().height.saturating_add(1);
+        FullTransactionAcquisition::new(
+            summary.rendezvous_candidate,
+            self.applications
+                .requests_extended_effects(&summary.application_view(), block_height),
+        )
+    }
+
     pub fn apply_block(
         &mut self,
         input: &CoreCanonicalBlockInput,
@@ -391,6 +453,12 @@ impl<A: HostedApplications> CanonicalRuntime for CoppiceRuntime<A> {
         let app = self.applications.retained_tip_at(height)?;
         (core.height == app.height && core.block_hash == app.block_hash).then_some(core)
     }
+    fn full_transaction_acquisition(
+        &self,
+        summary: &CanonicalCompactTransactionSummary<'_>,
+    ) -> FullTransactionAcquisition {
+        CoppiceRuntime::full_transaction_acquisition(self, summary)
+    }
     fn apply_canonical_block(
         &mut self,
         input: &CoreCanonicalBlockInput,
@@ -407,13 +475,14 @@ mod tests {
     use super::*;
     use crate::{
         application::{
-            ApplicationBlockContext, ApplicationId, ApplicationKey, ApplicationTip,
-            CoppiceApplication,
+            ApplicationAcquisitionRequirement, ApplicationBlockContext,
+            ApplicationCompactTransactionSummary, ApplicationId, ApplicationKey, ApplicationTip,
+            CanonicalCompactTransactionSummary, CoppiceApplication,
         },
         identity::{CoreRuntimeParameters, ZcashNetwork},
         replay::{
             CoreCanonicalBlockInput, CoreReplay, CoreReplayActivationCheckpoint,
-            CoreReplayConfiguration, IronwoodFrontier,
+            CoreReplayConfiguration, FullTransactionAcquisition, IronwoodFrontier,
         },
     };
     use zcash_protocol::consensus::BranchId;
@@ -475,6 +544,7 @@ mod tests {
         retention_blocks: u32,
         fail_apply: bool,
         fail_rewind: bool,
+        request_extended_effects: bool,
         history: Vec<(ApplicationTip, u8)>,
     }
 
@@ -490,6 +560,7 @@ mod tests {
                 retention_blocks,
                 fail_apply: false,
                 fail_rewind: false,
+                request_extended_effects: false,
                 history: vec![],
             }
         }
@@ -510,6 +581,17 @@ mod tests {
 
         fn state_root(&self) -> [u8; 32] {
             [self.value; 32]
+        }
+
+        fn full_transaction_acquisition(
+            &self,
+            _summary: &ApplicationCompactTransactionSummary<'_>,
+        ) -> ApplicationAcquisitionRequirement {
+            if self.request_extended_effects {
+                ApplicationAcquisitionRequirement::ExtendedEffects
+            } else {
+                ApplicationAcquisitionRequirement::None
+            }
         }
 
         fn apply_block(&mut self, block: &ApplicationBlockContext) -> Result<u8, ()> {
@@ -589,6 +671,104 @@ mod tests {
             TestApplication::new(1, ACTIVATION_HEIGHT, tip, 2),
             TestApplication::new(2, ACTIVATION_HEIGHT, tip, b_retention),
         )
+    }
+
+    fn compact_summary(carrier: bool) -> CanonicalCompactTransactionSummary<'static> {
+        CanonicalCompactTransactionSummary {
+            tx_index: 0,
+            txid: [1; 32],
+            ironwood_nullifiers: &[],
+            ironwood_commitments: &[],
+            action_count: 0,
+            rendezvous_candidate: carrier,
+        }
+    }
+
+    #[test]
+    fn acquisition_union_is_independent_and_activation_aware() {
+        let core = core(4);
+        let tip = ApplicationTip {
+            height: core.tip().height,
+            block_hash: core.tip().block_hash,
+        };
+        let mut none = TestApplication::new(1, ACTIVATION_HEIGHT, tip, 2);
+        assert_eq!(
+            CoppiceRuntime::new(core.clone(), none.clone())
+                .unwrap()
+                .full_transaction_acquisition(&compact_summary(false)),
+            FullTransactionAcquisition::None
+        );
+        assert_eq!(
+            CoppiceRuntime::new(core.clone(), none.clone())
+                .unwrap()
+                .full_transaction_acquisition(&compact_summary(true)),
+            FullTransactionAcquisition::Carrier
+        );
+
+        none.request_extended_effects = true;
+        assert_eq!(
+            CoppiceRuntime::new(core.clone(), none.clone())
+                .unwrap()
+                .full_transaction_acquisition(&compact_summary(false)),
+            FullTransactionAcquisition::ExtendedEffects
+        );
+        assert_eq!(
+            CoppiceRuntime::new(core.clone(), none.clone())
+                .unwrap()
+                .full_transaction_acquisition(&compact_summary(true)),
+            FullTransactionAcquisition::CarrierAndExtendedEffects
+        );
+
+        let mut other = TestApplication::new(2, ACTIVATION_HEIGHT, tip, 2);
+        other.request_extended_effects = true;
+        assert_eq!(
+            CoppiceRuntime::new(core.clone(), (none.clone(), other.clone()))
+                .unwrap()
+                .full_transaction_acquisition(&compact_summary(false)),
+            FullTransactionAcquisition::ExtendedEffects
+        );
+        none.request_extended_effects = false;
+        other.request_extended_effects = false;
+        assert_eq!(
+            CoppiceRuntime::new(core.clone(), (none.clone(), other.clone()))
+                .unwrap()
+                .full_transaction_acquisition(&compact_summary(true)),
+            FullTransactionAcquisition::Carrier
+        );
+
+        let mut third = TestApplication::new(3, ACTIVATION_HEIGHT, tip, 2);
+        third.request_extended_effects = true;
+        assert_eq!(
+            CoppiceRuntime::new(core.clone(), (none, other, third))
+                .unwrap()
+                .full_transaction_acquisition(&compact_summary(true)),
+            FullTransactionAcquisition::CarrierAndExtendedEffects
+        );
+
+        let mut pre_activation = TestApplication::new(4, ACTIVATION_HEIGHT + 1, tip, 2);
+        pre_activation.request_extended_effects = true;
+        let mut runtime = CoppiceRuntime::new(core.clone(), pre_activation).unwrap();
+        let before = (runtime.core().tip(), runtime.applications().state_root());
+        assert_eq!(
+            runtime.full_transaction_acquisition(&compact_summary(false)),
+            FullTransactionAcquisition::None
+        );
+        assert_eq!(
+            (runtime.core().tip(), runtime.applications().state_root()),
+            before
+        );
+        runtime
+            .apply_block(&block(&core, ACTIVATION_HEIGHT, 10))
+            .unwrap();
+        let active_before = (runtime.core().tip(), runtime.applications().state_root());
+        assert_eq!(
+            runtime.full_transaction_acquisition(&compact_summary(false)),
+            FullTransactionAcquisition::ExtendedEffects
+        );
+        assert_eq!(
+            (runtime.core().tip(), runtime.applications().state_root()),
+            active_before
+        );
     }
 
     #[test]

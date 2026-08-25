@@ -4,7 +4,7 @@ use crate::{
     application::{
         ApplicationActivationError, ApplicationBlockContext, ApplicationDescriptor,
         ApplicationEnvelopeError, ApplicationEnvelopeV1, ApplicationTip,
-        ApplicationTransactionContext,
+        ApplicationTransactionContext, CanonicalCompactTransactionSummary,
     },
     carrier::{CPV1_PROTOCOL_ID, CoreRendezvous},
     identity::{
@@ -14,7 +14,7 @@ use crate::{
     replay::{
         CoreBlockContext, CoreCanonicalBlockInput, CoreIronwoodCheckpoint, CoreReplay,
         CoreReplayConfiguration, CoreReplayError, CoreReplaySnapshotError, CoreReplayTip,
-        CoreRewindError, FullTransactionStatus, IronwoodFrontier,
+        CoreRewindError, FullTransactionAcquisition, FullTransactionStatus, IronwoodFrontier,
     },
     transport,
 };
@@ -167,6 +167,18 @@ pub trait CanonicalRuntime {
     fn tip(&self) -> CoreReplayTip;
     fn oldest_rewind_height(&self) -> u32;
     fn retained_tip_at(&self, height: u32) -> Option<CoreReplayTip>;
+
+    /// Returns the complete deterministic acquisition requirement for one
+    /// compact canonical transaction. Core carrier candidacy is always taken
+    /// from the summary; composed runtimes additionally union active
+    /// applications' read-only extended-effect requests.
+    fn full_transaction_acquisition(
+        &self,
+        summary: &CanonicalCompactTransactionSummary<'_>,
+    ) -> FullTransactionAcquisition {
+        FullTransactionAcquisition::new(summary.rendezvous_candidate, false)
+    }
+
     fn apply_canonical_block(
         &mut self,
         block: &CoreCanonicalBlockInput,
