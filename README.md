@@ -4,6 +4,12 @@ Coppice is a deterministic application runtime over canonical Zcash Ironwood
 history. It is application-blind: Zcash remains chain and fork-choice
 authority, while native applications consume one validated canonical scan.
 
+Applications are deterministic native state machines. Their payloads may carry
+application-specific proofs, signatures, commitments, Merkle data, or ordinary
+fields; the application interprets and verifies those bytes as part of its own
+transition rules. Core remains proof-system agnostic and does not become a
+ZKVM, proof verifier, or second consensus layer.
+
 Core provides authenticated Ironwood replay, exact-receiver compact candidate
 detection, CPV1 transport, CA01 application routing, isolated application
 lifecycles, bounded rewind, snapshots, and a static multi-application

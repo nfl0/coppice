@@ -32,6 +32,15 @@ to its exact `ApplicationKey`. It never receives another application's CA01
 payload. Before its activation it receives block position only; Core effects
 and all application payloads are unavailable.
 
+The payload is the application protocol boundary. It may contain an
+application-specific zero-knowledge proof or any other deterministic
+authorization data, but Core does not parse or verify it. An application that
+needs full public Ironwood action data requests `ExtendedEffects` through its
+read-only acquisition hook; the compositor unions that request with Core's
+carrier candidacy and performs one authenticated fetch. Proof verification,
+proof replay rules, and the meaning of `cv`, `rk`, `cmx`, `nf`, flags, or value
+balance remain application decisions.
+
 `PersistedCoppiceApplication` provides common snapshot metadata: format,
 descriptor, tip, root, oldest rewind point, and opaque application-owned bytes.
 Applications retain exclusive control of state encoding and validation. Hosts
@@ -55,6 +64,14 @@ The generic publisher prepares `ApplicationKey + payload` as CA01 inside CPV1
 and can verify a constructed transaction using the same exact-receiver Core
 inspection path. Wallet-specific fees, input selection, authorisation, and
 application policy live above it.
+
+For proof binding, an application can use its own descriptor's
+`ApplicationId`/version, the already-public `CoreRuntimeId` captured from the
+validated Core parameters, the canonical transaction position and identity,
+the relevant ordered Ironwood effects, an operation discriminator, and its
+own public fields. The application must freeze the exact subset and encoding
+required by its protocol; Core intentionally does not impose a universal proof
+domain or verification-key registry.
 
 Coppice Names is an external consumer in `../coppice-names/`; it is not a
 runtime subsystem.

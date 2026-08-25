@@ -31,6 +31,54 @@ Full transactions selectively acquired by the host also expose typed public
 value commitments, randomized keys, flags, and bundle value balance. Core
 remains unaware of payload semantics.
 
+## Application-specific proofs and authorization
+
+An application may put any deterministic protocol data in its routed payload,
+including a proof verified by Halo2 or another proof system. The proof bytes
+are opaque to Core. In `apply_block`, an application can decode its payload,
+construct the public inputs it defines from `transaction.core()` and its own
+state, invoke its own verifier, and apply the transition only when that
+verification succeeds. Ordinary invalid operations or invalid proofs should
+normally become an application-owned rejected outcome while `apply_block`
+returns `Ok`; returning an application error is appropriate for a state or
+context invariant failure and causes the compositor's staged block to remain
+unpublished.
+
+The generic context supplies the values needed to bind a proof to canonical
+history:
+
+- `ApplicationId` and application version are available from the application's
+  own `ApplicationDescriptor`;
+- `CoreRuntimeId` is available from the validated Core parameters and can be
+  retained as application configuration when deployment or network separation
+  matters;
+- `txid`, `tx_index`, block position, and ordered compact `nf`/`cmx` values are
+  available from the transaction context;
+- `cv`, `rk`, bundle flags, and value balance are available from
+  `ironwood_effects().extended()` after the application requests
+  `ExtendedEffects`; and
+- the routed payload supplies the proof bytes, operation discriminator, and
+  application-specific public fields.
+
+A protocol should freeze a domain-separated, canonical encoding of the subset
+it needs. A typical binding may include a protocol-specific domain,
+`CoreRuntimeId`, application ID/version, the exact `txid` and `tx_index`, an
+action index plus the corresponding canonical effects, an operation
+discriminator, and application public inputs. These are guidance, not a
+universal required tuple: an application must choose fields that prevent the
+replays relevant to its own protocol. Its state must also record whatever
+application nonce, nullifier, operation identifier, or other anti-replay
+condition the protocol requires. Core does not enforce any of those meanings.
+No generic `ApplicationProofBinding` helper is required here: the existing
+typed IDs and context values make the inputs available, while fixing a single
+Core-owned tuple would either omit valid application designs or silently
+dictate their proof semantics.
+
+This boundary is independent of the proof system. Switching a verifier,
+verification key, circuit version, signature scheme, or proof encoding is an
+application protocol change; it does not require a Coppice Core change unless
+the application also changes which canonical Core facts it requests.
+
 For example, a small native application could define conceptual messages:
 
 ```text
