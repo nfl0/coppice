@@ -6,9 +6,16 @@
 #![forbid(unsafe_code)]
 
 pub mod chain;
+mod reconcile;
 
 pub use chain::{
-    CanonicalRuntime, CompactBlockAdapterError, CompactBlockApplyError, FullTransactionSource,
-    MAX_CANDIDATE_FULL_TX_BYTES, apply_compact_block, prepare_canonical_block,
-    prepare_canonical_block_with_transaction_selector,
+    CanonicalCompactTransactionSummary, CanonicalRuntime, CompactBlockAdapterError,
+    CompactBlockApplyError, FullTransactionSource, MAX_CANDIDATE_FULL_TX_BYTES,
+    MAX_FULL_TRANSACTION_BYTES, apply_compact_block, apply_compact_block_with_transaction_selector,
+    prepare_canonical_block, prepare_canonical_block_with_transaction_selector,
+};
+pub use reconcile::{
+    CanonicalBlockSource, CanonicalTip, FrozenCanonicalBlockSource, ReconcileError, ReconcileKind,
+    ReconcileOutcome, ReconcileResult, reconcile_canonical_chain,
+    reconcile_canonical_chain_with_progress, reconcile_canonical_chain_with_transaction_selector,
 };

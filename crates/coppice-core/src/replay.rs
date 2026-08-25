@@ -81,15 +81,53 @@ pub struct CoreCanonicalBlockInput {
     pub transactions: Vec<CoreCanonicalTransactionInput>,
 }
 
-/// Canonical transaction metadata plus candidate-only full transaction bytes.
+/// Why a host acquired a full transaction. Carrier detection and application
+/// extended-effect observation are independent requests; a transaction may
+/// satisfy both without changing its routing semantics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FullTransactionAcquisition {
+    None,
+    Carrier,
+    ExtendedEffects,
+    CarrierAndExtendedEffects,
+}
+
+impl FullTransactionAcquisition {
+    pub const fn new(carrier: bool, extended_effects: bool) -> Self {
+        match (carrier, extended_effects) {
+            (false, false) => Self::None,
+            (true, false) => Self::Carrier,
+            (false, true) => Self::ExtendedEffects,
+            (true, true) => Self::CarrierAndExtendedEffects,
+        }
+    }
+
+    pub const fn requires_full_transaction(self) -> bool {
+        !matches!(self, Self::None)
+    }
+
+    pub const fn is_carrier_candidate(self) -> bool {
+        matches!(self, Self::Carrier | Self::CarrierAndExtendedEffects)
+    }
+
+    pub const fn includes_extended_effects(self) -> bool {
+        matches!(
+            self,
+            Self::ExtendedEffects | Self::CarrierAndExtendedEffects
+        )
+    }
+}
+
+/// Canonical transaction metadata plus selectively acquired full transaction
+/// bytes. The bytes are untrusted until Core validates them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CoreCanonicalTransactionInput {
     pub tx_index: u32,
     pub txid: [u8; 32],
     pub ironwood_nullifiers: Vec<[u8; 32]>,
     pub ironwood_commitments: Vec<[u8; 32]>,
-    pub full_tx_required: bool,
-    pub candidate_full_tx: Option<Vec<u8>>,
+    pub full_transaction_acquisition: FullTransactionAcquisition,
+    pub full_transaction: Option<Vec<u8>>,
 }
 
 /// Current canonical replay position.
@@ -188,22 +226,26 @@ impl PartialEq for ValidatedFullTransaction {
 
 impl Eq for ValidatedFullTransaction {}
 
-/// Whether this transaction required candidate-only full transaction fetching.
+/// Whether a full transaction was fetched and authenticated by Core.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum CandidateTransactionStatus {
-    NotCandidate,
+pub enum FullTransactionStatus {
+    NotFetched,
     ValidatedFullTransaction(Box<ValidatedFullTransaction>),
 }
 
-impl CandidateTransactionStatus {
-    /// Returns validated full transaction bytes only for a fetched candidate.
+impl FullTransactionStatus {
+    /// Returns validated bytes for a transaction selected for full acquisition.
     pub fn validated_full_transaction(&self) -> Option<&ValidatedFullTransaction> {
         match self {
-            Self::NotCandidate => None,
+            Self::NotFetched => None,
             Self::ValidatedFullTransaction(transaction) => Some(transaction),
         }
     }
 }
+
+/// Compatibility alias for callers that used the pre-separation name. New
+/// code should use [`FullTransactionStatus`].
+pub type CandidateTransactionStatus = FullTransactionStatus;
 
 /// Immutable canonical context emitted for one transaction.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -213,7 +255,9 @@ pub struct CoreTransactionContext {
     tx_index: u32,
     txid: [u8; 32],
     ironwood_effects: CoreIronwoodEffects,
-    candidate_status: CandidateTransactionStatus,
+    full_transaction_acquisition: FullTransactionAcquisition,
+    full_transaction_status: FullTransactionStatus,
+    carrier_candidate: bool,
 }
 
 impl CoreTransactionContext {
@@ -237,8 +281,23 @@ impl CoreTransactionContext {
         &self.ironwood_effects
     }
 
-    pub fn candidate_status(&self) -> &CandidateTransactionStatus {
-        &self.candidate_status
+    /// The independent host reason that caused Core to authenticate a full
+    /// transaction, if one was supplied.
+    pub fn full_transaction_acquisition(&self) -> FullTransactionAcquisition {
+        self.full_transaction_acquisition
+    }
+
+    pub fn full_transaction_status(&self) -> &FullTransactionStatus {
+        &self.full_transaction_status
+    }
+
+    pub fn is_carrier_candidate(&self) -> bool {
+        self.carrier_candidate
+    }
+
+    /// Compatibility accessor for callers that used the pre-separation name.
+    pub fn candidate_status(&self) -> &FullTransactionStatus {
+        self.full_transaction_status()
     }
 }
 
@@ -304,7 +363,7 @@ pub enum CoreReplayError {
     NonSequentialHeight,
     PredecessorMismatch,
     NonCanonicalTxOrder,
-    CandidateFlagMismatch,
+    UnexpectedFullTransaction,
     RequiredFullTransactionMissing,
     OversizedTransaction,
     InvalidFullTransaction,
@@ -637,7 +696,7 @@ impl CoreReplay {
         let mut transactions = Vec::with_capacity(block.transactions.len());
 
         for input in &block.transactions {
-            let candidate_status = validate_candidate(block.branch_id, input)?;
+            let full_transaction_status = validate_full_transaction(block.branch_id, input)?;
             for nullifier in &input.ironwood_nullifiers {
                 Option::<Nullifier>::from(Nullifier::from_bytes(nullifier))
                     .ok_or(CoreReplayError::NonCanonicalNullifier)?;
@@ -658,11 +717,15 @@ impl CoreReplay {
                 ironwood_effects: CoreIronwoodEffects {
                     nullifiers: input.ironwood_nullifiers.clone().into_boxed_slice(),
                     commitments: input.ironwood_commitments.clone().into_boxed_slice(),
-                    extended: candidate_status.validated_full_transaction().and_then(
-                        |transaction| canonical_ironwood_bundle_effects(transaction.transaction()),
-                    ),
+                    extended: full_transaction_status
+                        .validated_full_transaction()
+                        .and_then(|transaction| {
+                            canonical_ironwood_bundle_effects(transaction.transaction())
+                        }),
                 },
-                candidate_status,
+                full_transaction_acquisition: input.full_transaction_acquisition,
+                full_transaction_status,
+                carrier_candidate: input.full_transaction_acquisition.is_carrier_candidate(),
             });
         }
 
@@ -852,13 +915,18 @@ fn validate_frontier_tip(
     Ok(())
 }
 
-fn validate_candidate(
+fn validate_full_transaction(
     branch_id: BranchId,
     input: &CoreCanonicalTransactionInput,
-) -> Result<CandidateTransactionStatus, CoreReplayError> {
-    match (input.full_tx_required, input.candidate_full_tx.as_deref()) {
-        (false, None) => Ok(CandidateTransactionStatus::NotCandidate),
-        (false, Some(_)) => Err(CoreReplayError::CandidateFlagMismatch),
+) -> Result<FullTransactionStatus, CoreReplayError> {
+    match (
+        input
+            .full_transaction_acquisition
+            .requires_full_transaction(),
+        input.full_transaction.as_deref(),
+    ) {
+        (false, None) => Ok(FullTransactionStatus::NotFetched),
+        (false, Some(_)) => Err(CoreReplayError::UnexpectedFullTransaction),
         (true, None) => Err(CoreReplayError::RequiredFullTransactionMissing),
         (true, Some(bytes)) => {
             if bytes.len() > MAX_FULL_TRANSACTION_LEN {
@@ -879,12 +947,12 @@ fn validate_candidate(
             {
                 return Err(CoreReplayError::IronwoodEffectsMismatch);
             }
-            Ok(CandidateTransactionStatus::ValidatedFullTransaction(
-                Box::new(ValidatedFullTransaction {
+            Ok(FullTransactionStatus::ValidatedFullTransaction(Box::new(
+                ValidatedFullTransaction {
                     bytes: bytes.into(),
                     transaction,
-                }),
-            ))
+                },
+            )))
         }
     }
 }

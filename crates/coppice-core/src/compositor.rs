@@ -35,6 +35,7 @@ pub trait HostedApplications: Clone {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ApplicationHostError {
     DuplicateApplicationKey,
+    ApplicationActivationMismatch { key: ApplicationDescriptor },
     TipMismatch,
     RetainedHistoryMismatch,
     ApplicationFailed { key: ApplicationDescriptor },
@@ -147,6 +148,97 @@ where
     }
 }
 
+impl<A, B, C> HostedApplications for (A, B, C)
+where
+    A: CoppiceApplication,
+    B: CoppiceApplication,
+    C: CoppiceApplication,
+    A::ApplyError: Debug,
+    A::RewindError: Debug,
+    B::ApplyError: Debug,
+    B::RewindError: Debug,
+    C::ApplyError: Debug,
+    C::RewindError: Debug,
+{
+    type BlockOutput = (A::BlockOutput, B::BlockOutput, C::BlockOutput);
+
+    fn descriptors(&self) -> Vec<ApplicationDescriptor> {
+        vec![
+            self.0.descriptor(),
+            self.1.descriptor(),
+            self.2.descriptor(),
+        ]
+    }
+
+    fn application_tips(&self) -> Vec<ApplicationTip> {
+        vec![self.0.tip(), self.1.tip(), self.2.tip()]
+    }
+
+    fn oldest_rewind_height(&self) -> u32 {
+        self.0
+            .oldest_rewind_height()
+            .max(self.1.oldest_rewind_height())
+            .max(self.2.oldest_rewind_height())
+    }
+
+    fn retained_tip_at(&self, height: u32) -> Option<ApplicationTip> {
+        let tip = self.0.retained_tip_at(height)?;
+        (self.1.retained_tip_at(height) == Some(tip) && self.2.retained_tip_at(height) == Some(tip))
+            .then_some(tip)
+    }
+
+    fn required_rewind_retention(&self) -> u32 {
+        self.0
+            .rewind_retention_blocks()
+            .max(self.1.rewind_retention_blocks())
+            .max(self.2.rewind_retention_blocks())
+    }
+
+    fn apply_all(
+        &mut self,
+        block: &RuntimeBlockContext,
+    ) -> Result<Self::BlockOutput, ApplicationHostError> {
+        let a = self.0.descriptor();
+        let b = self.1.descriptor();
+        let c = self.2.descriptor();
+        let a_context = block
+            .for_application(a)
+            .map_err(|_| ApplicationHostError::ApplicationFailed { key: a })?;
+        let b_context = block
+            .for_application(b)
+            .map_err(|_| ApplicationHostError::ApplicationFailed { key: b })?;
+        let c_context = block
+            .for_application(c)
+            .map_err(|_| ApplicationHostError::ApplicationFailed { key: c })?;
+        Ok((
+            self.0
+                .apply_block(&a_context)
+                .map_err(|_| ApplicationHostError::ApplicationFailed { key: a })?,
+            self.1
+                .apply_block(&b_context)
+                .map_err(|_| ApplicationHostError::ApplicationFailed { key: b })?,
+            self.2
+                .apply_block(&c_context)
+                .map_err(|_| ApplicationHostError::ApplicationFailed { key: c })?,
+        ))
+    }
+
+    fn rewind_all_to(&mut self, height: u32) -> Result<(), ApplicationHostError> {
+        let a = self.0.descriptor();
+        let b = self.1.descriptor();
+        let c = self.2.descriptor();
+        self.0
+            .rewind_to(height)
+            .map_err(|_| ApplicationHostError::RewindFailed { key: a })?;
+        self.1
+            .rewind_to(height)
+            .map_err(|_| ApplicationHostError::RewindFailed { key: b })?;
+        self.2
+            .rewind_to(height)
+            .map_err(|_| ApplicationHostError::RewindFailed { key: c })
+    }
+}
+
 /// Generic Core plus isolated application composition. `A` can be one
 /// application or a statically typed tuple of applications.
 #[derive(Clone)]
@@ -183,7 +275,21 @@ impl<A: HostedApplications> CoppiceRuntime<A> {
         }) {
             return Err(ApplicationHostError::DuplicateApplicationKey);
         }
+        let runtime_activation = core.parameters().parameters().runtime_activation_height;
+        if let Some(descriptor) = descriptors
+            .iter()
+            .find(|descriptor| descriptor.validate_for_runtime(runtime_activation).is_err())
+        {
+            return Err(ApplicationHostError::ApplicationActivationMismatch { key: *descriptor });
+        }
         if applications.required_rewind_retention() > core.configuration().retention_blocks() {
+            return Err(ApplicationHostError::RetainedHistoryMismatch);
+        }
+        // The application may retain less history than Core, in which case
+        // the composed host uses the application's newer common horizon. It
+        // must not advertise a rewind point older than the Core journal can
+        // actually restore.
+        if applications.oldest_rewind_height() < core.oldest_rewind_height() {
             return Err(ApplicationHostError::RetainedHistoryMismatch);
         }
         let tip = core.tip();
@@ -205,9 +311,6 @@ impl<A: HostedApplications> CoppiceRuntime<A> {
     }
     pub fn applications(&self) -> &A {
         &self.applications
-    }
-    pub fn applications_mut(&mut self) -> &mut A {
-        &mut self.applications
     }
     pub fn required_rewind_retention(&self) -> u32 {
         self.applications.required_rewind_retention()

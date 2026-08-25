@@ -1,0 +1,14 @@
+{
+  "status": "generic_core_property",
+  "requirement_ids": ["CORE-REWIND-001", "CORE-REPLAY-001"],
+  "common_ancestor_height": 9,
+  "old_branch": [
+    {"height": 10, "block_hash_hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+    {"height": 11, "block_hash_hex": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
+  ],
+  "replacement_branch": [
+    {"height": 10, "block_hash_hex": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},
+    {"height": 11, "block_hash_hex": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}
+  ],
+  "property": "rewind-to-common-ancestor-plus-replacement-replay equals fresh replay through replacement tip"
+}

@@ -1,0 +1,20 @@
+{
+  "status": "generic_core_vector",
+  "requirement_ids": ["CORE-CPV1-001", "CORE-CA01-001"],
+  "cpv1": {
+    "protocol_id": "CPV1",
+    "frame_size": 512,
+    "max_frames": 32,
+    "start_header": 74,
+    "start_chunk_capacity": 438,
+    "continuation_header": 7,
+    "continuation_chunk_capacity": 505,
+    "max_payload_length": 16093
+  },
+  "ca01": {
+    "application_id_hex": "0101010101010101010101010101010101010101010101010101010101010101",
+    "application_version": 2,
+    "payload_hex": "00010200",
+    "expected_envelope_hex": "434130310101010101010101010101010101010101010101010101010101010101010101000200010200"
+  }
+}

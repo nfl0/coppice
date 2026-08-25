@@ -12,9 +12,9 @@ use crate::{
         ValidatedCoreRuntimeParameters,
     },
     replay::{
-        CandidateTransactionStatus, CoreBlockContext, CoreCanonicalBlockInput,
-        CoreIronwoodCheckpoint, CoreReplay, CoreReplayConfiguration, CoreReplayError,
-        CoreReplaySnapshotError, CoreReplayTip, CoreRewindError, IronwoodFrontier,
+        CoreBlockContext, CoreCanonicalBlockInput, CoreIronwoodCheckpoint, CoreReplay,
+        CoreReplayConfiguration, CoreReplayError, CoreReplaySnapshotError, CoreReplayTip,
+        CoreRewindError, FullTransactionStatus, IronwoodFrontier,
     },
     transport,
 };
@@ -268,7 +268,8 @@ impl CoreRuntime {
             .map(|(core_index, transaction)| RuntimeTransactionContext {
                 core_index,
                 message: route_candidate(
-                    transaction.candidate_status(),
+                    transaction.full_transaction_status(),
+                    transaction.is_carrier_candidate(),
                     &self.rendezvous,
                     self.runtime_id,
                 ),
@@ -366,11 +367,15 @@ impl CanonicalRuntime for CoreRuntime {
 }
 
 fn route_candidate(
-    candidate: &CandidateTransactionStatus,
+    full_transaction: &FullTransactionStatus,
+    carrier_candidate: bool,
     rendezvous: &CoreRendezvous,
     runtime_id: CoreRuntimeId,
 ) -> ApplicationMessageStatus {
-    let CandidateTransactionStatus::ValidatedFullTransaction(validated) = candidate else {
+    if !carrier_candidate {
+        return ApplicationMessageStatus::NotCandidate;
+    }
+    let FullTransactionStatus::ValidatedFullTransaction(validated) = full_transaction else {
         return ApplicationMessageStatus::NotCandidate;
     };
     inspect_transaction_for(validated.transaction(), rendezvous, runtime_id).message

@@ -9,7 +9,7 @@ use std::fmt::Debug;
 use coppice_core::{
     carrier::{self, CoreRendezvous},
     identity::{ValidatedCoreRuntimeParameters, ZcashNetwork},
-    replay::{CoreCanonicalBlockInput, CoreCanonicalTransactionInput},
+    replay::{CoreCanonicalBlockInput, CoreCanonicalTransactionInput, FullTransactionAcquisition},
 };
 use orchard::note_encryption::CompactAction;
 use zcash_client_backend::proto::compact_formats::{CompactBlock, CompactTx};
@@ -18,18 +18,36 @@ use zcash_protocol::{
     constants::MAX_BLOCK_BYTES,
 };
 
-/// The cumulative candidate-byte budget is the consensus maximum serialized
-/// Zcash block size. It bounds bytes retained before Core parses any candidate.
-pub const MAX_CANDIDATE_FULL_TX_BYTES: usize = MAX_BLOCK_BYTES;
+/// The cumulative full-transaction acquisition budget is the consensus
+/// maximum serialized Zcash block size. It bounds bytes retained before Core
+/// parses any selected transaction.
+pub const MAX_FULL_TRANSACTION_BYTES: usize = MAX_BLOCK_BYTES;
+
+/// Compatibility alias retained for callers using the pre-selector name.
+pub const MAX_CANDIDATE_FULL_TX_BYTES: usize = MAX_FULL_TRANSACTION_BYTES;
 
 pub use coppice_core::runtime::CanonicalRuntime;
 
-/// Supplies raw serialized transactions only when compact public rendezvous
-/// detection makes the full transaction mandatory.
+/// Supplies raw serialized transactions when compact carrier detection or a
+/// caller's selective extended-effect policy makes the full transaction
+/// mandatory.
 pub trait FullTransactionSource {
     type Error: Debug;
 
     fn full_transaction(&mut self, txid: [u8; 32]) -> Result<Option<Vec<u8>>, Self::Error>;
+}
+
+/// Compact facts validated before any external fetch. The references borrow
+/// the adapter's canonicalized compact vectors and are valid only for the
+/// selector callback invocation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CanonicalCompactTransactionSummary<'a> {
+    pub tx_index: u32,
+    pub txid: [u8; 32],
+    pub ironwood_nullifiers: &'a [[u8; 32]],
+    pub ironwood_commitments: &'a [[u8; 32]],
+    pub action_count: usize,
+    pub rendezvous_candidate: bool,
 }
 
 #[derive(Debug)]
@@ -63,13 +81,13 @@ pub enum CompactBlockAdapterError<SourceError: Debug> {
         txid: [u8; 32],
         tx_index: u32,
     },
-    CandidateFullTransactionTooLarge {
+    FullTransactionTooLarge {
         txid: [u8; 32],
         tx_index: u32,
         len: usize,
         limit: usize,
     },
-    CandidateFullTransactionBudgetExceeded {
+    FullTransactionBudgetExceeded {
         txid: [u8; 32],
         tx_index: u32,
         attempted: usize,
@@ -85,7 +103,7 @@ pub enum CompactBlockApplyError<SourceError: Debug, RuntimeError: Debug> {
 
 struct ValidatedCompactTx {
     input: CoreCanonicalTransactionInput,
-    candidate: bool,
+    rendezvous_candidate: bool,
 }
 
 fn exact_32(bytes: &[u8]) -> Option<[u8; 32]> {
@@ -124,15 +142,15 @@ fn validate_transaction<SourceError: Debug>(
             txid,
             ironwood_nullifiers,
             ironwood_commitments,
-            full_tx_required: candidate,
-            candidate_full_tx: None,
+            full_transaction_acquisition: FullTransactionAcquisition::new(candidate, false),
+            full_transaction: None,
         },
-        candidate,
+        rendezvous_candidate: candidate,
     })
 }
 
 /// Validates an entire compact block before making the first external fetch,
-/// then fetches each candidate transaction exactly once in canonical order.
+/// then fetches each requested transaction exactly once in canonical order.
 pub fn prepare_canonical_block<P, R, S>(
     params: &P,
     runtime: &R,
@@ -149,13 +167,13 @@ where
         runtime,
         compact_block,
         full_tx_source,
-        |_tx_index, _txid| false,
+        |_summary| false,
     )
 }
 
 /// Like [`prepare_canonical_block`], with a bounded, caller-owned selective
 /// full-transaction policy. Applications that need extended public Ironwood
-/// effects can request a full transaction by canonical `(tx_index, txid)`;
+/// effects can request a full transaction from the validated compact summary;
 /// Core still parses and cross-checks every selected response. Compact carrier
 /// detection always remains mandatory independently of this policy.
 pub fn prepare_canonical_block_with_transaction_selector<P, R, S, F>(
@@ -169,7 +187,7 @@ where
     P: Parameters,
     R: CanonicalRuntime,
     S: FullTransactionSource,
-    F: FnMut(u32, [u8; 32]) -> bool,
+    F: FnMut(&CanonicalCompactTransactionSummary<'_>) -> bool,
 {
     if !network_matches(params.network_type(), runtime.core_parameters()) {
         return Err(CompactBlockAdapterError::NetworkMismatch);
@@ -200,20 +218,35 @@ where
     let mut validated = Vec::with_capacity(compact_block.vtx.len());
     for (transaction, compact_tx) in compact_block.vtx.iter().enumerate() {
         let mut tx = validate_transaction(transaction, compact_tx, rendezvous)?;
-        tx.candidate |= select_full_transaction(tx.input.tx_index, tx.input.txid);
         if validated
             .last()
             .is_some_and(|prior: &ValidatedCompactTx| prior.input.tx_index >= tx.input.tx_index)
         {
             return Err(CompactBlockAdapterError::NonCanonicalTxOrder);
         }
+        let request_extended_effects =
+            select_full_transaction(&CanonicalCompactTransactionSummary {
+                tx_index: tx.input.tx_index,
+                txid: tx.input.txid,
+                ironwood_nullifiers: &tx.input.ironwood_nullifiers,
+                ironwood_commitments: &tx.input.ironwood_commitments,
+                action_count: tx.input.ironwood_nullifiers.len(),
+                rendezvous_candidate: tx.rendezvous_candidate,
+            });
+        tx.input.full_transaction_acquisition =
+            FullTransactionAcquisition::new(tx.rendezvous_candidate, request_extended_effects);
         validated.push(tx);
     }
 
-    // Phase B: fetch raw bytes only for compact rendezvous hits.
-    let mut candidate_bytes = 0usize;
+    // Phase B: fetch raw bytes only for compact candidates or selected
+    // extended-effect transactions.
+    let mut full_transaction_bytes = 0usize;
     for tx in &mut validated {
-        if tx.candidate {
+        if tx
+            .input
+            .full_transaction_acquisition
+            .requires_full_transaction()
+        {
             let bytes = full_tx_source
                 .full_transaction(tx.input.txid)
                 .map_err(CompactBlockAdapterError::FullTransactionSource)?
@@ -221,34 +254,32 @@ where
                     txid: tx.input.txid,
                     tx_index: tx.input.tx_index,
                 })?;
-            if bytes.len() > MAX_CANDIDATE_FULL_TX_BYTES {
-                return Err(CompactBlockAdapterError::CandidateFullTransactionTooLarge {
+            if bytes.len() > MAX_FULL_TRANSACTION_BYTES {
+                return Err(CompactBlockAdapterError::FullTransactionTooLarge {
                     txid: tx.input.txid,
                     tx_index: tx.input.tx_index,
                     len: bytes.len(),
-                    limit: MAX_CANDIDATE_FULL_TX_BYTES,
+                    limit: MAX_FULL_TRANSACTION_BYTES,
                 });
             }
-            let attempted = candidate_bytes.checked_add(bytes.len()).ok_or(
-                CompactBlockAdapterError::CandidateFullTransactionBudgetExceeded {
+            let attempted = full_transaction_bytes.checked_add(bytes.len()).ok_or(
+                CompactBlockAdapterError::FullTransactionBudgetExceeded {
                     txid: tx.input.txid,
                     tx_index: tx.input.tx_index,
                     attempted: usize::MAX,
-                    limit: MAX_CANDIDATE_FULL_TX_BYTES,
+                    limit: MAX_FULL_TRANSACTION_BYTES,
                 },
             )?;
-            if attempted > MAX_CANDIDATE_FULL_TX_BYTES {
-                return Err(
-                    CompactBlockAdapterError::CandidateFullTransactionBudgetExceeded {
-                        txid: tx.input.txid,
-                        tx_index: tx.input.tx_index,
-                        attempted,
-                        limit: MAX_CANDIDATE_FULL_TX_BYTES,
-                    },
-                );
+            if attempted > MAX_FULL_TRANSACTION_BYTES {
+                return Err(CompactBlockAdapterError::FullTransactionBudgetExceeded {
+                    txid: tx.input.txid,
+                    tx_index: tx.input.tx_index,
+                    attempted,
+                    limit: MAX_FULL_TRANSACTION_BYTES,
+                });
             }
-            candidate_bytes = attempted;
-            tx.input.candidate_full_tx = Some(bytes);
+            full_transaction_bytes = attempted;
+            tx.input.full_transaction = Some(bytes);
         }
     }
 
@@ -281,6 +312,34 @@ where
         .map_err(CompactBlockApplyError::Runtime)
 }
 
+/// Applies a CompactBlock with the same selective extended-effect policy as
+/// [`prepare_canonical_block_with_transaction_selector`].
+pub fn apply_compact_block_with_transaction_selector<P, R, S, F>(
+    params: &P,
+    runtime: &mut R,
+    compact_block: &CompactBlock,
+    full_tx_source: &mut S,
+    select_full_transaction: F,
+) -> Result<R::BlockOutput, CompactBlockApplyError<S::Error, R::ApplyError>>
+where
+    P: Parameters,
+    R: CanonicalRuntime,
+    S: FullTransactionSource,
+    F: FnMut(&CanonicalCompactTransactionSummary<'_>) -> bool,
+{
+    let input = prepare_canonical_block_with_transaction_selector(
+        params,
+        runtime,
+        compact_block,
+        full_tx_source,
+        select_full_transaction,
+    )
+    .map_err(CompactBlockApplyError::Prepare)?;
+    runtime
+        .apply_canonical_block(&input)
+        .map_err(CompactBlockApplyError::Runtime)
+}
+
 fn network_matches(network: NetworkType, parameters: &ValidatedCoreRuntimeParameters) -> bool {
     matches!(
         (network, parameters.parameters().zcash_network),
@@ -294,27 +353,27 @@ fn network_matches(network: NetworkType, parameters: &ValidatedCoreRuntimeParame
 mod tests {
     use std::collections::BTreeMap;
 
-    use coppice::{
-        carrier as names_carrier,
-        config::{DeploymentParameters, REGTEST, Rendezvous},
-        constants::REGTEST_ACTIVATION_HEIGHT,
-        names_runtime::{
-            CoreReplayActivationCheckpoint, CoreReplayError, IronwoodFrontier, NamesRuntime,
-            NamesRuntimeError, NamesTransactionOutcome,
+    use coppice_core::{
+        carrier,
+        identity::{CoreRuntimeParameters, ZcashNetwork},
+        replay::{
+            CoreReplay, CoreReplayActivationCheckpoint, CoreReplayConfiguration, CoreReplayError,
+            FullTransactionAcquisition, IronwoodFrontier,
         },
+        runtime::{ApplicationMessageStatus, CoreRuntime},
     };
     use orchard::{
         keys::IncomingViewingKey,
         note::{ExtractedNoteCommitment, Note, NoteVersion, Nullifier, RandomSeed, Rho},
-        note_encryption::{IronwoodDomain, IronwoodNoteEncryption},
+        note_encryption::{CompactAction, IronwoodDomain, IronwoodNoteEncryption},
         value::NoteValue,
     };
-    use zcash_client_backend::proto::compact_formats::{CompactOrchardAction, CompactTx};
-    use zcash_note_encryption::Domain;
-    use zcash_protocol::{
-        consensus::{BlockHeight, BranchId, NetworkType},
-        local_consensus::LocalNetwork,
+    use zcash_client_backend::proto::compact_formats::{
+        CompactBlock, CompactOrchardAction, CompactTx,
     };
+    use zcash_note_encryption::Domain;
+    use zcash_primitives::transaction::{Authorized, TransactionData};
+    use zcash_protocol::{consensus::BlockHeight, local_consensus::LocalNetwork};
 
     use super::*;
 
@@ -334,34 +393,41 @@ mod tests {
         }
     }
 
-    fn deployment() -> DeploymentParameters {
-        DeploymentParameters {
-            network_id: REGTEST.network_id.to_vec(),
-            address_network: NetworkType::Regtest,
-            activation_height: REGTEST_ACTIVATION_HEIGHT,
-            minimum_bond_value: REGTEST.minimum_bond_value,
-            commit_ttl_blocks: 20,
-            reuse_delay_blocks: 10,
-            bond_note_max_age_blocks: 100,
-            rendezvous: Rendezvous {
-                orchard_ivk: REGTEST.rendezvous.orchard_ivk,
-                orchard_receiver: REGTEST.rendezvous.orchard_receiver,
-            },
+    fn runtime() -> CoreRuntime {
+        let parameters = CoreRuntimeParameters {
+            runtime_protocol_id: b"coppice.runtime".to_vec(),
+            runtime_protocol_version: 1,
+            zcash_network_domain: b"coppice-runtime-regtest-v1".to_vec(),
+            zcash_network: ZcashNetwork::Regtest,
+            runtime_activation_height: 10,
+            carrier_protocol_id: b"CPV1".to_vec(),
+            rendezvous_ivk: hex::decode(
+                "65deb2b3ee7ac69020543f40f21122cb6dc1f4201a329fcdf9d5e3bb2dfbbabe29d542352fe36c3c7b24c2989dc9d0000b9e04f444e05dc4538bde395c0e6008",
+            )
+            .unwrap()
+            .try_into()
+            .unwrap(),
+            rendezvous_receiver: hex::decode(
+                "9ec59e4d447ba285086cc3456cadf62004a19b6a7989c726daaa9944a6cdbf25f7bfa51afa15b66da53881",
+            )
+            .unwrap()
+            .try_into()
+            .unwrap(),
         }
-    }
-
-    fn runtime() -> NamesRuntime {
-        let deployment = deployment();
-        NamesRuntime::new(
-            deployment.clone(),
+        .validate()
+        .unwrap();
+        let configuration = CoreReplayConfiguration::new(10, 16).unwrap();
+        let replay = CoreReplay::new(
+            configuration,
             CoreReplayActivationCheckpoint {
-                height: deployment.activation_height - 1,
+                height: 9,
                 block_hash: [9; 32],
                 ironwood_frontier: IronwoodFrontier::empty(),
                 ironwood_tree_size: 0,
             },
         )
-        .unwrap()
+        .unwrap();
+        CoreRuntime::new(parameters, replay).unwrap()
     }
 
     fn rendezvous_action(recipient: orchard::Address) -> CompactOrchardAction {
@@ -391,17 +457,24 @@ mod tests {
     }
 
     fn real_rendezvous_action() -> CompactOrchardAction {
-        let recipient =
-            orchard::Address::from_raw_address_bytes(&REGTEST.rendezvous.orchard_receiver).unwrap();
-        rendezvous_action(recipient)
+        let receiver: [u8; 43] = hex::decode(
+            "9ec59e4d447ba285086cc3456cadf62004a19b6a7989c726daaa9944a6cdbf25f7bfa51afa15b66da53881",
+        )
+        .unwrap()
+        .try_into()
+        .unwrap();
+        rendezvous_action(orchard::Address::from_raw_address_bytes(&receiver).unwrap())
     }
 
     fn alternate_rendezvous_action() -> CompactOrchardAction {
-        let ivk = Option::<IncomingViewingKey>::from(IncomingViewingKey::from_bytes(
-            &REGTEST.rendezvous.orchard_ivk,
-        ))
+        let ivk: [u8; 64] = hex::decode(
+            "65deb2b3ee7ac69020543f40f21122cb6dc1f4201a329fcdf9d5e3bb2dfbbabe29d542352fe36c3c7b24c2989dc9d0000b9e04f444e05dc4538bde395c0e6008",
+        )
+        .unwrap()
+        .try_into()
         .unwrap();
-        rendezvous_action(ivk.address_at(1u32))
+        let key = Option::<IncomingViewingKey>::from(IncomingViewingKey::from_bytes(&ivk)).unwrap();
+        rendezvous_action(key.address_at(1u32))
     }
 
     fn noncandidate_action() -> CompactOrchardAction {
@@ -419,7 +492,7 @@ mod tests {
         }
     }
 
-    fn block(runtime: &NamesRuntime, transactions: Vec<CompactTx>) -> CompactBlock {
+    fn block(runtime: &CoreRuntime, transactions: Vec<CompactTx>) -> CompactBlock {
         CompactBlock {
             height: u64::from(runtime.tip().height + 1),
             hash: vec![7; 32],
@@ -427,6 +500,24 @@ mod tests {
             vtx: transactions,
             ..Default::default()
         }
+    }
+
+    fn empty_transaction() -> (Vec<u8>, [u8; 32]) {
+        let transaction = TransactionData::<Authorized>::from_parts_v6(
+            BranchId::Nu6_3,
+            0,
+            BlockHeight::from_u32(10),
+            None,
+            None,
+            None,
+            None,
+        )
+        .freeze()
+        .unwrap();
+        let txid = transaction.txid().into();
+        let mut bytes = Vec::new();
+        transaction.write(&mut bytes).unwrap();
+        (bytes, txid)
     }
 
     #[derive(Default)]
@@ -445,24 +536,33 @@ mod tests {
     }
 
     #[test]
-    fn real_public_rendezvous_detector_distinguishes_a_foreign_compact_action() {
+    fn exact_receiver_detection_is_application_independent() {
+        let runtime = runtime();
         let hit = CompactAction::try_from(&real_rendezvous_action()).unwrap();
-        assert!(names_carrier::compact_action_is_bulletin(&hit, REGTEST.rendezvous).unwrap());
-        let miss = CompactAction::try_from(&noncandidate_action()).unwrap();
-        assert!(!names_carrier::compact_action_is_bulletin(&miss, REGTEST.rendezvous).unwrap());
+        assert!(carrier::compact_action_is_rendezvous(
+            &hit,
+            runtime.rendezvous()
+        ));
+        let miss = CompactAction::try_from(&alternate_rendezvous_action()).unwrap();
+        assert!(!carrier::compact_action_is_rendezvous(
+            &miss,
+            runtime.rendezvous()
+        ));
     }
 
     #[test]
-    fn same_ivk_alternate_receiver_is_not_a_compact_candidate() {
-        let action = alternate_rendezvous_action();
-        let compact = CompactAction::try_from(&action).unwrap();
-        assert!(!names_carrier::compact_action_is_bulletin(&compact, REGTEST.rendezvous).unwrap());
-
+    fn alternate_receiver_does_not_fetch_or_become_a_carrier() {
         let runtime = runtime();
-        let input = block(&runtime, vec![compact_tx(0, 1, vec![action])]);
+        let input = block(
+            &runtime,
+            vec![compact_tx(0, 1, vec![alternate_rendezvous_action()])],
+        );
         let mut source = Source::default();
         let prepared = prepare_canonical_block(&params(), &runtime, &input, &mut source).unwrap();
-        assert!(!prepared.transactions[0].full_tx_required);
+        assert_eq!(
+            prepared.transactions[0].full_transaction_acquisition,
+            FullTransactionAcquisition::None
+        );
         assert!(source.calls.is_empty());
     }
 
@@ -540,24 +640,29 @@ mod tests {
     }
 
     #[test]
-    fn static_validation_precedes_fetch_and_sparse_order_is_accepted() {
+    fn full_compact_validation_precedes_fetch() {
         let runtime = runtime();
         let candidate = real_rendezvous_action();
         let malformed = CompactOrchardAction {
             nullifier: vec![0; 31],
             ..candidate.clone()
         };
-        let invalid_late = block(
+        let input = block(
             &runtime,
             vec![
-                compact_tx(2, 1, vec![candidate.clone()]),
+                compact_tx(2, 1, vec![candidate]),
                 compact_tx(7, 2, vec![malformed]),
             ],
         );
         let mut source = Source::default();
-        assert!(prepare_canonical_block(&params(), &runtime, &invalid_late, &mut source).is_err());
+        assert!(prepare_canonical_block(&params(), &runtime, &input, &mut source).is_err());
         assert!(source.calls.is_empty());
+    }
 
+    #[test]
+    fn sparse_transaction_order_is_accepted_and_noncanonical_order_is_rejected() {
+        let runtime = runtime();
+        let mut source = Source::default();
         for indices in [[2, 11, 7], [2, 2, 11]] {
             let input = block(
                 &runtime,
@@ -593,7 +698,25 @@ mod tests {
     }
 
     #[test]
-    fn candidates_fetch_once_per_transaction_in_canonical_order() {
+    fn carrier_candidates_fetch_full_transactions_independently_of_selector() {
+        let runtime = runtime();
+        let input = block(
+            &runtime,
+            vec![compact_tx(7, 4, vec![real_rendezvous_action()])],
+        );
+        let mut source = Source::default();
+        source.values.insert([4; 32], Ok(Some(vec![4])));
+        let prepared = prepare_canonical_block(&params(), &runtime, &input, &mut source).unwrap();
+        assert_eq!(source.calls, vec![[4; 32]]);
+        assert_eq!(
+            prepared.transactions[0].full_transaction_acquisition,
+            FullTransactionAcquisition::Carrier
+        );
+        assert_eq!(prepared.transactions[0].full_transaction, Some(vec![4]));
+    }
+
+    #[test]
+    fn carrier_fetches_are_once_each_in_canonical_order() {
         let runtime = runtime();
         let candidate = real_rendezvous_action();
         let input = block(
@@ -609,9 +732,15 @@ mod tests {
         source.values.insert([3; 32], Ok(Some(vec![3])));
         let prepared = prepare_canonical_block(&params(), &runtime, &input, &mut source).unwrap();
         assert_eq!(source.calls, vec![[1; 32], [3; 32]]);
-        assert!(prepared.transactions[0].full_tx_required);
-        assert!(!prepared.transactions[1].full_tx_required);
-        assert_eq!(prepared.transactions[1].candidate_full_tx, None);
+        assert_eq!(
+            prepared.transactions[0].full_transaction_acquisition,
+            FullTransactionAcquisition::Carrier
+        );
+        assert_eq!(
+            prepared.transactions[1].full_transaction_acquisition,
+            FullTransactionAcquisition::None
+        );
+        assert_eq!(prepared.transactions[1].full_transaction, None);
     }
 
     #[test]
@@ -642,29 +771,91 @@ mod tests {
     }
 
     #[test]
-    fn candidate_bytes_are_bounded_before_core_parsing() {
+    fn selected_full_transaction_bytes_have_per_transaction_limit() {
         let runtime = runtime();
         let input = block(
             &runtime,
-            vec![compact_tx(2, 1, vec![real_rendezvous_action()])],
+            vec![compact_tx(7, 4, vec![real_rendezvous_action()])],
         );
         let mut source = Source::default();
         source
             .values
-            .insert([1; 32], Ok(Some(vec![0; MAX_CANDIDATE_FULL_TX_BYTES + 1])));
+            .insert([4; 32], Ok(Some(vec![0; MAX_FULL_TRANSACTION_BYTES + 1])));
         assert!(matches!(
             prepare_canonical_block(&params(), &runtime, &input, &mut source),
-            Err(CompactBlockAdapterError::CandidateFullTransactionTooLarge {
+            Err(CompactBlockAdapterError::FullTransactionTooLarge {
                 txid,
                 len,
-                limit: MAX_CANDIDATE_FULL_TX_BYTES,
+                limit: MAX_FULL_TRANSACTION_BYTES,
                 ..
-            }) if txid == [1; 32] && len == MAX_CANDIDATE_FULL_TX_BYTES + 1
+            }) if txid == [4; 32] && len == MAX_FULL_TRANSACTION_BYTES + 1
         ));
     }
 
     #[test]
-    fn cumulative_candidate_bytes_are_bounded_in_canonical_fetch_order() {
+    fn selector_receives_compact_summary_and_requests_extended_effects() {
+        let runtime = runtime();
+        let input = block(
+            &runtime,
+            vec![compact_tx(7, 4, vec![noncandidate_action()])],
+        );
+        let mut source = Source::default();
+        source.values.insert([4; 32], Ok(Some(vec![4])));
+        let prepared = prepare_canonical_block_with_transaction_selector(
+            &params(),
+            &runtime,
+            &input,
+            &mut source,
+            |summary| {
+                assert_eq!(summary.tx_index, 7);
+                assert_eq!(summary.txid, [4; 32]);
+                assert_eq!(summary.action_count, 1);
+                assert_eq!(summary.ironwood_nullifiers.len(), 1);
+                assert_eq!(summary.ironwood_commitments.len(), 1);
+                assert!(!summary.rendezvous_candidate);
+                true
+            },
+        )
+        .unwrap();
+        assert_eq!(source.calls, vec![[4; 32]]);
+        assert_eq!(
+            prepared.transactions[0].full_transaction_acquisition,
+            FullTransactionAcquisition::ExtendedEffects
+        );
+        assert_eq!(prepared.transactions[0].full_transaction, Some(vec![4]));
+    }
+
+    #[test]
+    fn extended_effect_fetch_does_not_become_a_carrier_candidate() {
+        let mut runtime = runtime();
+        let (bytes, txid) = empty_transaction();
+        let mut compact = compact_tx(7, 4, vec![]);
+        compact.txid = txid.to_vec();
+        let input = block(&runtime, vec![compact]);
+        let mut source = Source::default();
+        source.values.insert(txid, Ok(Some(bytes)));
+        let applied = apply_compact_block_with_transaction_selector(
+            &params(),
+            &mut runtime,
+            &input,
+            &mut source,
+            |_| true,
+        )
+        .unwrap();
+        let transaction = &applied.core().transactions()[0];
+        assert_eq!(
+            transaction.full_transaction_acquisition(),
+            FullTransactionAcquisition::ExtendedEffects
+        );
+        assert!(!transaction.is_carrier_candidate());
+        assert_eq!(
+            applied.transactions()[0].message(),
+            &ApplicationMessageStatus::NotCandidate
+        );
+    }
+
+    #[test]
+    fn cumulative_full_transaction_budget_is_bounded() {
         let runtime = runtime();
         let input = block(
             &runtime,
@@ -673,16 +864,16 @@ mod tests {
                 compact_tx(7, 2, vec![real_rendezvous_action()]),
             ],
         );
-        let each = MAX_CANDIDATE_FULL_TX_BYTES / 2 + 1;
+        let each = MAX_FULL_TRANSACTION_BYTES / 2 + 1;
         let mut source = Source::default();
         source.values.insert([1; 32], Ok(Some(vec![0; each])));
         source.values.insert([2; 32], Ok(Some(vec![0; each])));
         assert!(matches!(
             prepare_canonical_block(&params(), &runtime, &input, &mut source),
-            Err(CompactBlockAdapterError::CandidateFullTransactionBudgetExceeded {
+            Err(CompactBlockAdapterError::FullTransactionBudgetExceeded {
                 txid,
                 attempted,
-                limit: MAX_CANDIDATE_FULL_TX_BYTES,
+                limit: MAX_FULL_TRANSACTION_BYTES,
                 ..
             }) if txid == [2; 32] && attempted == each * 2
         ));
@@ -734,7 +925,6 @@ mod tests {
         for value in [Ok(None), Err("transport")] {
             let mut runtime = runtime();
             let before_tip = runtime.tip();
-            let before_state = runtime.state().clone();
             let before_root = runtime.ironwood_frontier().root();
             let before_checkpoints = runtime.ironwood_checkpoints().clone();
             let input = block(
@@ -745,43 +935,30 @@ mod tests {
             source.values.insert([1; 32], value);
             assert!(apply_compact_block(&params(), &mut runtime, &input, &mut source).is_err());
             assert_eq!(runtime.tip(), before_tip);
-            assert_eq!(runtime.state(), &before_state);
             assert_eq!(runtime.ironwood_frontier().root(), before_root);
             assert_eq!(runtime.ironwood_checkpoints(), &before_checkpoints);
         }
     }
 
     #[test]
-    fn noncandidate_effects_apply_without_fetch_and_branch_is_parameter_derived() {
+    fn noncarrier_compact_effects_apply_without_fetch() {
         let mut runtime = runtime();
         let action = noncandidate_action();
-        let expected_nf: CompactAction = (&action).try_into().unwrap();
+        let expected: CompactAction = (&action).try_into().unwrap();
         let input = block(&runtime, vec![compact_tx(7, 1, vec![action])]);
         let mut source = Source::default();
         let prepared = prepare_canonical_block(&params(), &runtime, &input, &mut source).unwrap();
         assert_eq!(
-            prepared.branch_id,
-            BranchId::for_height(&params(), BlockHeight::from_u32(prepared.height))
-        );
-        assert_eq!(
             prepared.transactions[0].ironwood_nullifiers,
-            vec![expected_nf.nullifier().to_bytes()]
-        );
-        assert_eq!(
-            prepared.transactions[0].ironwood_commitments,
-            vec![expected_nf.cmx().to_bytes()]
+            vec![expected.nullifier().to_bytes()]
         );
         let applied = apply_compact_block(&params(), &mut runtime, &input, &mut source).unwrap();
         assert!(source.calls.is_empty());
-        assert_eq!(
-            applied.names.transaction_outcomes,
-            vec![NamesTransactionOutcome::NoOperation]
-        );
-        assert_eq!(applied.core.ironwood_checkpoint().tree_size, 1);
+        assert_eq!(applied.ironwood_checkpoint().tree_size, 1);
     }
 
     #[test]
-    fn branch_id_changes_with_consensus_parameters() {
+    fn branch_id_is_parameter_derived() {
         let runtime = runtime();
         let input = block(&runtime, vec![]);
         let mut before_nu6_3 = params();
@@ -794,27 +971,71 @@ mod tests {
     }
 
     #[test]
-    fn malformed_fetched_transaction_is_runtime_fatal_and_atomic() {
+    fn malformed_fetched_transaction_is_core_fatal_and_atomic() {
         let mut runtime = runtime();
-        let before_tip = runtime.tip();
-        let before_state = runtime.state().clone();
-        let before_root = runtime.ironwood_frontier().root();
-        let before_checkpoints = runtime.ironwood_checkpoints().clone();
         let input = block(
             &runtime,
             vec![compact_tx(2, 1, vec![real_rendezvous_action()])],
         );
+        let before_tip = runtime.tip();
+        let before_root = runtime.ironwood_frontier().root();
         let mut source = Source::default();
         source.values.insert([1; 32], Ok(Some(vec![0; 4])));
         assert!(matches!(
             apply_compact_block(&params(), &mut runtime, &input, &mut source),
-            Err(CompactBlockApplyError::Runtime(NamesRuntimeError::Core(
+            Err(CompactBlockApplyError::Runtime(
                 CoreReplayError::InvalidFullTransaction
-            )))
+            ))
         ));
         assert_eq!(runtime.tip(), before_tip);
-        assert_eq!(runtime.state(), &before_state);
         assert_eq!(runtime.ironwood_frontier().root(), before_root);
-        assert_eq!(runtime.ironwood_checkpoints(), &before_checkpoints);
+    }
+
+    #[test]
+    fn txid_mismatch_from_selected_full_transaction_is_core_fatal() {
+        let runtime = runtime();
+        let (bytes, actual_txid) = empty_transaction();
+        let mut wrong_txid = actual_txid;
+        wrong_txid[0] ^= 1;
+        let mut compact = compact_tx(7, 4, vec![]);
+        compact.txid = wrong_txid.to_vec();
+        let input = block(&runtime, vec![compact]);
+        let mut source = Source::default();
+        source.values.insert(wrong_txid, Ok(Some(bytes)));
+        assert!(matches!(
+            apply_compact_block_with_transaction_selector(
+                &params(),
+                &mut runtime.clone(),
+                &input,
+                &mut source,
+                |_| true,
+            ),
+            Err(CompactBlockApplyError::Runtime(
+                CoreReplayError::TxidMismatch
+            ))
+        ));
+    }
+
+    #[test]
+    fn compact_full_effect_mismatch_is_core_fatal() {
+        let runtime = runtime();
+        let (bytes, actual_txid) = empty_transaction();
+        let mut compact = compact_tx(7, 4, vec![noncandidate_action()]);
+        compact.txid = actual_txid.to_vec();
+        let input = block(&runtime, vec![compact]);
+        let mut source = Source::default();
+        source.values.insert(actual_txid, Ok(Some(bytes)));
+        assert!(matches!(
+            apply_compact_block_with_transaction_selector(
+                &params(),
+                &mut runtime.clone(),
+                &input,
+                &mut source,
+                |_| true,
+            ),
+            Err(CompactBlockApplyError::Runtime(
+                CoreReplayError::IronwoodEffectsMismatch
+            ))
+        ));
     }
 }

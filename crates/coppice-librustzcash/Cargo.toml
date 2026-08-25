@@ -15,3 +15,8 @@ coppice-core.workspace = true
 orchard.workspace = true
 zcash_client_backend = { workspace = true, features = ["orchard"] }
 zcash_protocol.workspace = true
+
+[dev-dependencies]
+hex.workspace = true
+zcash_primitives.workspace = true
+zcash_note_encryption.workspace = true

@@ -43,7 +43,8 @@ helpers, and normative vectors. Removing it does not remove the machinery
 needed to build another Coppice application.
 
 See [application authoring](docs/APPLICATION_AUTHORING.md) and
-[runtime architecture](docs/RUNTIME_ARCHITECTURE.md).
+[runtime architecture](docs/RUNTIME_ARCHITECTURE.md), plus the normative
+[Core protocol](docs/PROTOCOL_SPEC.md) and [implementation guide](docs/IMPLEMENTATION.md).
 
 ## Status
 

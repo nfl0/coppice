@@ -41,7 +41,8 @@ outside retained history.
 
 Canonical observations never contain wallet-private data. Compact contexts
 always include nullifiers and commitments. A host can selectively request full
-transactions for specific canonical `(tx_index, txid)` entries; Core parses and
+transactions from a validated `CanonicalCompactTransactionSummary` (including
+those compact effects) rather than fetching a whole block; Core parses and
 cross-checks them, then exposes typed value commitments, randomized keys,
 bundle flags, and signed bundle value balance. Proofs, signatures, ciphertexts,
 private note data, viewing keys, memos, recipients, values, ownership, and

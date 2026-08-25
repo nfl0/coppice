@@ -11,21 +11,5 @@ publish = false
 workspace = true
 
 [dependencies]
-blake2b_simd.workspace = true
 coppice-core.workspace = true
-halo2_gadgets.workspace = true
-halo2_proofs.workspace = true
-hex.workspace = true
-incrementalmerkletree.workspace = true
-orchard.workspace = true
-pasta_curves.workspace = true
-rand_chacha.workspace = true
-rand_core.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-sha2.workspace = true
-shardtree.workspace = true
-zcash_note_encryption.workspace = true
-zcash_address.workspace = true
-zcash_primitives.workspace = true
 zcash_protocol.workspace = true

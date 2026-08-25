@@ -305,23 +305,7 @@ checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 name = "coppice"
 version = "0.1.0"
 dependencies = [
- "blake2b_simd",
  "coppice-core",
- "halo2_gadgets",
- "halo2_proofs",
- "hex",
- "incrementalmerkletree",
- "orchard",
- "pasta_curves",
- "rand_chacha",
- "rand_core",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "shardtree",
- "zcash_address",
- "zcash_note_encryption",
- "zcash_primitives",
  "zcash_protocol",
 ]
 
@@ -345,8 +329,11 @@ name = "coppice-librustzcash"
 version = "0.1.0"
 dependencies = [
  "coppice-core",
+ "hex",
  "orchard",
  "zcash_client_backend",
+ "zcash_note_encryption",
+ "zcash_primitives",
  "zcash_protocol",
 ]
 

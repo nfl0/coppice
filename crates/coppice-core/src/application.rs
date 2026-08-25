@@ -170,6 +170,60 @@ pub struct ApplicationSnapshot {
     pub payload: Vec<u8>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ApplicationSnapshotValidationError {
+    UnsupportedFormat { expected: u32, actual: u32 },
+    DescriptorMismatch,
+    Activation(ApplicationActivationError),
+    TipMismatch,
+    StateRootMismatch,
+    InvalidRewindBoundary,
+}
+
+impl ApplicationSnapshot {
+    /// Validates the host-visible snapshot envelope before an application
+    /// parses its private payload. Core does not interpret `payload`, but it
+    /// can reject identity, activation, tip, root, and bounded-history
+    /// mismatches uniformly for every application.
+    pub fn validate_for(
+        &self,
+        expected_format_version: u32,
+        expected_descriptor: ApplicationDescriptor,
+        runtime_activation_height: u32,
+        expected_tip: ApplicationTip,
+        expected_state_root: [u8; 32],
+    ) -> Result<(), ApplicationSnapshotValidationError> {
+        if self.format_version != expected_format_version {
+            return Err(ApplicationSnapshotValidationError::UnsupportedFormat {
+                expected: expected_format_version,
+                actual: self.format_version,
+            });
+        }
+        expected_descriptor
+            .validate_for_runtime(runtime_activation_height)
+            .map_err(ApplicationSnapshotValidationError::Activation)?;
+        if self.descriptor != expected_descriptor {
+            return Err(ApplicationSnapshotValidationError::DescriptorMismatch);
+        }
+        if self.tip != expected_tip {
+            return Err(ApplicationSnapshotValidationError::TipMismatch);
+        }
+        if self.state_root != expected_state_root {
+            return Err(ApplicationSnapshotValidationError::StateRootMismatch);
+        }
+        let activation_base = expected_descriptor
+            .activation_height
+            .checked_sub(1)
+            .ok_or(ApplicationSnapshotValidationError::InvalidRewindBoundary)?;
+        if self.oldest_rewind_height < activation_base
+            || self.oldest_rewind_height > self.tip.height
+        {
+            return Err(ApplicationSnapshotValidationError::InvalidRewindBoundary);
+        }
+        Ok(())
+    }
+}
+
 /// Persistence contract for a deterministic application. Applications own
 /// their encoding and validation rules while every host gets the same identity,
 /// tip, root, and bounded-undo checks.
@@ -292,6 +346,14 @@ mod tests {
         let lower = derive_application_id(b"example.app").unwrap();
         assert_eq!(lower, derive_application_id(b"example.app").unwrap());
         assert_ne!(lower, derive_application_id(b"Example.App").unwrap());
+        let vector: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../test-vectors/core_application_id.json"
+        ))
+        .unwrap();
+        assert_eq!(
+            hex::encode(lower.to_bytes()),
+            vector["expected_application_id_hex"].as_str().unwrap()
+        );
         assert_eq!(
             derive_application_id(b""),
             Err(ApplicationIdentityError::Empty)
@@ -326,6 +388,55 @@ mod tests {
         assert_eq!(
             earlier.validate_for_runtime(10),
             Err(ApplicationActivationError::BeforeRuntimeActivation)
+        );
+    }
+
+    #[test]
+    fn application_snapshot_envelope_rejects_common_metadata_mismatches() {
+        let key = ApplicationKey::new(derive_application_id(b"example.snapshot").unwrap(), 1);
+        let descriptor = ApplicationDescriptor {
+            key,
+            activation_height: 10,
+        };
+        let tip = ApplicationTip {
+            height: 20,
+            block_hash: [2; 32],
+        };
+        let snapshot = ApplicationSnapshot {
+            format_version: 1,
+            descriptor,
+            tip,
+            state_root: [7; 32],
+            oldest_rewind_height: 9,
+            payload: vec![1, 2, 3],
+        };
+        assert_eq!(
+            snapshot.validate_for(1, descriptor, 10, tip, [7; 32]),
+            Ok(())
+        );
+
+        let mut wrong_format = snapshot.clone();
+        wrong_format.format_version = 2;
+        assert_eq!(
+            wrong_format.validate_for(1, descriptor, 10, tip, [7; 32]),
+            Err(ApplicationSnapshotValidationError::UnsupportedFormat {
+                expected: 1,
+                actual: 2,
+            })
+        );
+
+        let mut wrong_root = snapshot.clone();
+        wrong_root.state_root = [8; 32];
+        assert_eq!(
+            wrong_root.validate_for(1, descriptor, 10, tip, [7; 32]),
+            Err(ApplicationSnapshotValidationError::StateRootMismatch)
+        );
+
+        let mut invalid_boundary = snapshot;
+        invalid_boundary.oldest_rewind_height = 8;
+        assert_eq!(
+            invalid_boundary.validate_for(1, descriptor, 10, tip, [7; 32]),
+            Err(ApplicationSnapshotValidationError::InvalidRewindBoundary)
         );
     }
 

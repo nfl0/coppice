@@ -1,0 +1,8 @@
+{
+  "status": "generic_core_vector",
+  "requirement_ids": ["CORE-APPLICATION-ID-001"],
+  "personalization_hex": "436f7070696365417070496456310000",
+  "canonical_application_identity_hex": "6578616d706c652e617070",
+  "canonical_application_identity_utf8": "example.app",
+  "expected_application_id_hex": "59bfa95f244676f48c75c8e065f1dcf066be08c5745be5a848ee989c0870ed78"
+}
