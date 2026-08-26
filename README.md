@@ -87,4 +87,4 @@ audit is claimed by this repository.
 
 ## License
 
-MIT OR Apache-2.0.
+MPL-2.0.
