@@ -10,6 +10,9 @@ crates/coppice-core
 crates/coppice-librustzcash
     hostile CompactBlock adaptation, selective full acquisition, and
     host-authoritative canonical reconciliation
+crates/coppice-zcash-rpc
+    generic zcashd-compatible HTTP JSON-RPC reconstruction into the same
+    CompactBlock adapter; Zakura is the reference qualification node
 crates/coppice
     small public facade and application-authoring testkit
 ```

@@ -1,0 +1,23 @@
+[package]
+name = "coppice-zcash-rpc"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Generic zcashd-compatible JSON-RPC host adapter for Coppice"
+
+[lints]
+workspace = true
+
+[dependencies]
+base64.workspace = true
+coppice-core.workspace = true
+coppice-librustzcash = { path = "../coppice-librustzcash" }
+hex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+zcash_client_backend = { workspace = true, features = ["orchard"] }
+zcash_primitives.workspace = true
+zcash_protocol.workspace = true

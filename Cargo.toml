@@ -4,6 +4,7 @@ members = [
     "crates/coppice",
     "crates/coppice-core",
     "crates/coppice-librustzcash",
+    "crates/coppice-zcash-rpc",
 ]
 
 [workspace.package]
@@ -17,6 +18,7 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(zcash_unstable, values("nu
 
 [workspace.dependencies]
 blake2b_simd = "1"
+base64 = "0.22"
 coppice = { path = "crates/coppice" }
 coppice-core = { path = "crates/coppice-core" }
 hex = "0.4"

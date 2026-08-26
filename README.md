@@ -23,7 +23,35 @@ coppice-core          canonical replay, CPV1/CA01, application contracts,
                       compositor, persistence metadata, typed Ironwood effects
 coppice               public runtime facade and small deterministic testkit
 coppice-librustzcash  compact-block adapter and selective full-transaction host boundary
+coppice-zcash-rpc     native zcashd-compatible JSON-RPC server adapter
 ```
+
+## Server integrations
+
+The recommended server deployment is a normal Zakura (or sufficiently
+compatible Zcash full node) connected through standard JSON-RPC:
+
+```text
+Zcash full node (Zakura reference implementation)
+  -> standard JSON-RPC
+  -> coppice-zcash-rpc
+  -> CoppiceRuntime<Apps>
+```
+
+No modified consensus node and no Coppice-aware node behavior are required.
+Zakura remains canonical fork-choice authority; JSON-RPC is an untrusted
+transport boundary and the adapter validates its replies before passing
+canonical facts to the existing runtime path.
+
+`coppice-librustzcash` remains supported for compact/light-client or
+bandwidth-efficient synchronization:
+
+```text
+Zcash full node -> Zaino/lightwalletd -> coppice-librustzcash -> CoppiceRuntime<Apps>
+```
+
+Zaino/lightwalletd is therefore optional for a server running beside a full
+node, not a prerequisite. See [the RPC compatibility contract](docs/ZCASH_RPC.md).
 
 Applications declare their own `ApplicationKey`, activation, state root,
 snapshot encoding, and retention needs. The compositor stages Core and every
