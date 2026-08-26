@@ -12,7 +12,8 @@ use std::{
     collections::BTreeMap,
     fmt::Debug,
     io::{Cursor, Read, Write},
-    net::TcpStream,
+    net::{TcpStream, ToSocketAddrs},
+    time::Duration,
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -44,6 +45,10 @@ pub struct ZcashRpcConfig {
     pub basic_auth: Option<(String, String)>,
     /// Hard bound for one HTTP response, including JSON framing.
     pub max_response_bytes: usize,
+    /// Bound connection establishment and each socket read/write. A stalled
+    /// local or proxied node must fail as transport, not hold reconciliation
+    /// forever.
+    pub timeout: Duration,
 }
 
 impl ZcashRpcConfig {
@@ -54,6 +59,7 @@ impl ZcashRpcConfig {
             endpoint: endpoint.into(),
             basic_auth: None,
             max_response_bytes: Self::DEFAULT_MAX_RESPONSE_BYTES,
+            timeout: Duration::from_secs(15),
         }
     }
 }
@@ -111,7 +117,17 @@ impl RpcTransport for HttpTransport {
 
     fn send(&mut self, request: &[u8]) -> Result<Vec<u8>, Self::Error> {
         let (authority, path) = self.authority_and_path()?;
-        let mut stream = TcpStream::connect(authority).map_err(HttpTransportError::Io)?;
+        let address = authority
+            .to_socket_addrs()
+            .map_err(HttpTransportError::Io)?
+            .next()
+            .ok_or(HttpTransportError::InvalidEndpoint)?;
+        let mut stream = TcpStream::connect_timeout(&address, self.config.timeout)
+            .map_err(HttpTransportError::Io)?;
+        stream
+            .set_read_timeout(Some(self.config.timeout))
+            .and_then(|_| stream.set_write_timeout(Some(self.config.timeout)))
+            .map_err(HttpTransportError::Io)?;
         let mut headers = format!(
             "POST {path} HTTP/1.0\r\nHost: {authority}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n",
             request.len()
@@ -529,6 +545,8 @@ impl<P: Parameters, T: RpcTransport> RpcCanonicalBlockSource<P, T> {
         if cursor.position() != cursor.get_ref().len() as u64 {
             return Err(RpcError::InvalidIronwoodTreeState { height });
         }
+        // Commitment-tree roots are RPC hex bytes, unlike block and
+        // transaction identifiers which use display-order reversal.
         let expected_root = raw_hex_32(root, "ironwood finalRoot")?;
         if frontier.root().to_bytes() != expected_root {
             return Err(RpcError::IronwoodRootMismatch { height });
@@ -693,7 +711,10 @@ fn network_name(network: NetworkType) -> &'static str {
     match network {
         NetworkType::Main => "main",
         NetworkType::Test => "test",
-        NetworkType::Regtest => "regtest",
+        // zcashd-compatible `getblockchaininfo` uses the historical BIP70
+        // `test` label for both testnet and Regtest. The configured consensus
+        // parameters, not this display label, select the local network.
+        NetworkType::Regtest => "test",
     }
 }
 
@@ -914,7 +935,7 @@ mod tests {
         let transport = FakeTransport(VecDeque::from([response(
             1,
             json!({
-                "chain":"regtest", "blocks":10, "bestblockhash":hash,
+                "chain":"test", "blocks":10, "bestblockhash":hash,
                 "pruned":true, "pruneheight":9,
             }),
         )]));

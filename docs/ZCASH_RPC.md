@@ -36,8 +36,12 @@ authority.
 
 The node must use conventional display-order hexadecimal transaction and block
 identifiers. The adapter converts identifiers exactly once at the JSON-RPC
-boundary into librustzcash/CompactBlock internal order. It only needs HTTP;
-operators may place TLS termination in front of the local adapter endpoint.
+boundary into librustzcash/CompactBlock internal order. Commitment-tree roots
+are not identifiers and retain their RPC byte order. zcashd-compatible
+Regtest reports the historical BIP70 `chain: "test"` label; the adapter accepts
+that label when configured with Regtest consensus parameters. It only needs
+HTTP; operators may place TLS termination in front of the local adapter
+endpoint.
 
 Zakura at qualification revision `f892b9074002a04a678ef2365ec7658795796572`
 supports `getblock` verbosity 0/1/2, block-scoped `getrawtransaction`, and
@@ -83,15 +87,46 @@ unchanged `CoreReplayActivationCheckpoint`. If tree state is unavailable (for
 example due to pruning), bootstrap fails explicitly; Core's authenticated
 checkpoint requirement is not weakened.
 
+## Native Zcash RPC qualification
+
+The focused native qualification is separate from the frozen runtime/Names
+Phases 1-7 evidence. Run it from this repository with pinned binaries built
+from the adjacent checkouts:
+
+```sh
+./scripts/rpc-qualification.sh
+```
+
+The script launches an isolated archive-mode Zakura Regtest, generates a short
+Ironwood chain, obtains the activation checkpoint through JSON-RPC, reconciles
+the public Core runtime, snapshots/restarts it, performs a one-block real
+Zakura `invalidateblock`/`generate` reorg, compares the replacement state to a
+fresh replay, and then starts Zaino solely for a per-height `CompactBlock`
+differential. The primary sequence uses only Zakura RPC; Zaino is not started
+until the differential phase.
+
+The first successful run used Zakura
+`f892b9074002a04a678ef2365ec7658795796572`, Zaino
+`b819583a1a6663a01cb7681ac5b5fc2a174596a0`, and native adapter base
+`a86823f3e39ee06dd19e502772e02aa45deb93dc`. It recorded checkpoint height 9,
+internal block hash `f4ddaea0bb155a7a08676e6a8369af77eb037fe2b8e159b0bb291d1912c414c9`,
+Ironwood root `635e83b2277f91db040925459362c7d371b9e5a2efe0f251f049cca6d13e741f`,
+and tree size 8. The live reorg had common ancestor 11, rewound/applied one
+block, and ended at Ironwood root
+`9fc5d1c1cf5d05d20377a5207422d3ee8758b2443a6fb8f86b6cbc586f03300d`.
+RPC-derived and Zaino-derived CompactBlocks were exactly equal for every block
+from activation through height 12.
+
 ## Security and operational notes
 
 Malformed JSON success values, incorrect JSON-RPC ids, RPC errors, invalid or
 wrong-length hashes, invalid hex, missing transactions, oversized responses,
 wrong block hash/height, changed height mappings, and unavailable tree state
 are hard errors. The adapter limits the built-in HTTP response and each raw
-transaction to the consensus block bound. It intentionally does not add a
-retry policy: a host can retry a complete reconciliation after a transient
-failure or reorg.
+transaction to the consensus block bound. `ZcashRpcConfig::timeout` bounds
+connect, read, and write activity (15 seconds by default). It intentionally
+does not add a retry policy: a host can retry a complete reconciliation after a
+transient failure or reorg.
 
 `submit_raw_transaction` only hex-encodes and submits pre-authorized bytes.
 It has no wallet, key, coin-selection, or node-wallet integration.
