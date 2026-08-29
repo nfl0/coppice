@@ -59,7 +59,7 @@ This proposal does **not** authorize:
 - a migration or re-registration requirement for existing Names state;
 - extracting an abstraction merely because two functions have similar names.
 
-The current Names v1 implementation remains the immediate release baseline. Any future generalization must be evaluated after, and independently of, final VK/wire regeneration and live qualification.
+The current Names v1 implementation is the frozen and locally qualified release baseline. Any future generalization must be evaluated independently of that baseline and must not alter its VK identities, protocol bytes, or wire vectors.
 
 ## 5. Authority and trust boundaries
 
@@ -214,6 +214,6 @@ The proposal is successful only if a future implementation can demonstrate all o
 
 ## 12. Decision requested
 
-Approve this as a design direction, not as an immediate refactor. Continue with the current Names v1 release-finalization work independently. Revisit implementation only when a second application supplies a concrete, independently validated use case and the migration gates above can be met.
+Approve this as a design direction, not as an immediate refactor. The current Names v1 release finalization is complete; revisit implementation only when a second application supplies a concrete, independently validated use case and the migration gates above can be met.
 
 Any resulting pull request should be additive, preserve the authority table in Section 5, include focused parity/adversarial evidence, and explicitly state which mechanics were generalized and which Names rules were intentionally left in the application.
