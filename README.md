@@ -78,7 +78,8 @@ needed to build another Coppice application.
 
 See [application authoring](docs/APPLICATION_AUTHORING.md) and
 [runtime architecture](docs/RUNTIME_ARCHITECTURE.md), plus the normative
-[Core protocol](docs/PROTOCOL_SPEC.md) and [implementation guide](docs/IMPLEMENTATION.md).
+[Core protocol](docs/PROTOCOL_SPEC.md), [implementation guide](docs/IMPLEMENTATION.md),
+and [the generalization proposal](docs/GENERALIZATION_PROPOSAL.md).
 
 ## Status
 
