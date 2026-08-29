@@ -9,7 +9,7 @@ members = [
 
 [workspace.package]
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.91"
 license = "MPL-2.0"
 repository = "https://github.com/nfl0/coppice"
 
@@ -23,20 +23,15 @@ coppice = { path = "crates/coppice" }
 coppice-core = { path = "crates/coppice-core" }
 hex = "0.4"
 incrementalmerkletree = { version = "0.8.2", features = ["legacy-api"] }
-orchard = { version = "=0.15.3", features = ["std"] }
-rand_chacha = "0.3"
-rand_core = "0.6"
+orchard = { package = "zakura-orchard", version = "=1.0.0", features = ["std"] }
+rand_chacha = "0.10"
+rand_core = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-zcash_note_encryption = "0.4.1"
-zcash_client_backend = { git = "https://github.com/zcash/librustzcash.git", rev = "6c07e5f3297febf469e5cc8d0b91321e0767cdd7" }
-zcash_primitives = { version = "=0.30.0", features = ["std"] }
-zcash_protocol = { version = "=0.10.3", features = ["std", "local-consensus"] }
-
-[patch.crates-io]
-zcash_primitives = { git = "https://github.com/zcash/librustzcash.git", rev = "6c07e5f3297febf469e5cc8d0b91321e0767cdd7" }
-zcash_protocol = { git = "https://github.com/zcash/librustzcash.git", rev = "6c07e5f3297febf469e5cc8d0b91321e0767cdd7" }
-zcash_transparent = { git = "https://github.com/zcash/librustzcash.git", rev = "6c07e5f3297febf469e5cc8d0b91321e0767cdd7" }
+zcash_note_encryption = "0.4.2"
+zcash_client_backend = { package = "zakura-client-backend", version = "=0.1.0-rc4", features = ["orchard"] }
+zcash_primitives = { package = "zakura-primitives", version = "=1.0.0", features = ["std"] }
+zcash_protocol = { version = "=0.10.5", features = ["std", "local-consensus"] }
 
 # Halo2 and Ironwood proving are impractically slow without optimization, including in tests.
 [profile.test]

@@ -16,6 +16,14 @@ lifecycles, bounded rewind, snapshots, and a static multi-application
 compositor. It is not a blockchain, smart-contract VM, gas environment, or
 application registry.
 
+The Rust workspace uses the released Zakura cryptography packages
+(`zakura-orchard`, `zakura-primitives`, and `zakura-client-backend`) as one
+coherent Orchard type family. Coppice does not add a second consensus or
+transaction implementation; the package aliases preserve the usual
+`orchard`, `zcash_primitives`, and `zcash_client_backend` library names for
+callers. A Names-specific Orchard extension is maintained separately and is
+only patched into applications that opt into that feature.
+
 ## Crates
 
 ```text
