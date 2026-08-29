@@ -3,11 +3,11 @@
 - **Status:** Design proposal; no implementation is authorized by this document
 - **Date:** 2026-08-29
 - **Scope:** Coppice Core and optional application-support utilities
-- **Primary constraint:** The corrected Names v2 architecture and its release artifacts remain unchanged
+- **Primary constraint:** The current Names v1 architecture and its release artifacts remain unchanged
 
 ## 1. Executive summary
 
-Coppice already has a useful application boundary: Zcash consensus determines the canonical Ironwood history, while Coppice Core exposes ordered, validated context to an application without interpreting that application's state machine. Names v2 demonstrates several implementation patterns that may eventually be useful to another application, but it does not justify moving Names semantics into Core or creating a second consensus layer.
+Coppice already has a useful application boundary: Zcash consensus determines the canonical Ironwood history, while Coppice Core exposes ordered, validated context to an application without interpreting that application's state machine. Names v1 demonstrates several implementation patterns that may eventually be useful to another application, but it does not justify moving Names semantics into Core or creating a second consensus layer.
 
 This proposal recommends a deliberately narrow generalization strategy:
 
@@ -20,7 +20,7 @@ The intended result is reusable infrastructure without moving application author
 
 ## 2. Motivation and problem statement
 
-Names v2 contains reusable mechanics around authenticated producer positions, hidden state-note lineages, canonical-spend observation, bounded replay, and the distinction between an untrusted claim and a corrupted canonical source. Those mechanics are valuable, but their surrounding rules are not generic:
+Names v1 contains reusable mechanics around authenticated producer positions, hidden state-note lineages, canonical-spend observation, bounded replay, and the distinction between an untrusted claim and a corrupted canonical source. Those mechanics are valuable, but their surrounding rules are not generic:
 
 - a Names `COMMIT` and `REVEAL` have a protocol-specific relationship;
 - lease, schedule, claimability, abandonment, reset, and terminal status are Names policy;
@@ -53,13 +53,13 @@ This proposal does **not** authorize:
 - moving historical applicability into Names ZK or removing it from the runtime;
 - a global Names index, global state root, sequencer, trusted snapshot, provider, gateway, or custom-node assumption;
 - recursive history proofs, transparent state outputs, or a second consensus mechanism;
-- TRANSFER or another new v2 operation;
+- TRANSFER or another new Names operation;
 - a universal proof verifier, proof registry, WASM/contract runtime, gas model, or parallel-execution model;
-- changing frozen v1 behavior, corrected Names v2 circuit semantics, protocol bytes, verification-key identities, or wire vectors as part of this design exercise;
+- changing the current Names v1 circuit semantics, protocol bytes, verification-key identities, or wire vectors as part of this design exercise;
 - a migration or re-registration requirement for existing Names state;
 - extracting an abstraction merely because two functions have similar names.
 
-The corrected Names v2 implementation remains the immediate release baseline. Any future generalization must be evaluated after, and independently of, final VK/wire regeneration and live qualification.
+The current Names v1 implementation remains the immediate release baseline. Any future generalization must be evaluated after, and independently of, final VK/wire regeneration and live qualification.
 
 ## 5. Authority and trust boundaries
 
@@ -214,6 +214,6 @@ The proposal is successful only if a future implementation can demonstrate all o
 
 ## 12. Decision requested
 
-Approve this as a design direction, not as an immediate refactor. Continue with the corrected Names v2 release-finalization work independently. Revisit implementation only when a second application supplies a concrete, independently validated use case and the migration gates above can be met.
+Approve this as a design direction, not as an immediate refactor. Continue with the current Names v1 release-finalization work independently. Revisit implementation only when a second application supplies a concrete, independently validated use case and the migration gates above can be met.
 
 Any resulting pull request should be additive, preserve the authority table in Section 5, include focused parity/adversarial evidence, and explicitly state which mechanics were generalized and which Names rules were intentionally left in the application.
