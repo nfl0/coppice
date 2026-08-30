@@ -39,6 +39,17 @@ the generic runtime, replays the replacement suffix, and invokes a progress
 callback only after durable state boundaries. A host that needs application
 policy can layer it above this adapter without importing Names.
 
+For installing an application into an already-synced wallet, use
+`bootstrap_canonical_chain` (or its progress variant). It accepts only a
+runtime positioned at the authenticated Core activation checkpoint, then
+reuses the same host-selected canonical reconciliation path to replay forward
+to the current tip. A partially advanced runtime is rejected explicitly; a
+missing, malformed, or chain-inconsistent canonical block remains a fatal
+source error. The application can be persisted at each progress boundary and
+joined to ordinary forward replay only after its tip matches Core. This is a
+bootstrap lifecycle guard, not a trusted checkpoint or a second canonical
+source.
+
 Applications persist an `ApplicationSnapshot` with an opaque application-owned
 payload. The common envelope validates format, descriptor, activation, tip,
 state root, and rewind-boundary metadata before the application decodes its

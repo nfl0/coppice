@@ -273,8 +273,11 @@ impl ApplicationSnapshot {
         if self.state_root != expected_state_root {
             return Err(ApplicationSnapshotValidationError::StateRootMismatch);
         }
-        let activation_base = expected_descriptor
-            .activation_height
+        // An application may activate later than Core and still receive
+        // canonical position-only contexts before its own activation. Its
+        // rewind horizon is therefore bounded by the Core runtime activation
+        // base, not by the application's later activation height.
+        let activation_base = runtime_activation_height
             .checked_sub(1)
             .ok_or(ApplicationSnapshotValidationError::InvalidRewindBoundary)?;
         if self.oldest_rewind_height < activation_base
@@ -499,6 +502,30 @@ mod tests {
         assert_eq!(
             invalid_boundary.validate_for(1, descriptor, 10, tip, [7; 32]),
             Err(ApplicationSnapshotValidationError::InvalidRewindBoundary)
+        );
+
+        // A later-activating application may have position-only history from
+        // the Core activation base. The common envelope must not reject that
+        // valid pre-activation rewind point as being before the app's own
+        // activation height.
+        let later_descriptor = ApplicationDescriptor {
+            key,
+            activation_height: 20,
+        };
+        let later_snapshot = ApplicationSnapshot {
+            format_version: 1,
+            descriptor: later_descriptor,
+            tip: ApplicationTip {
+                height: 15,
+                block_hash: [3; 32],
+            },
+            state_root: [4; 32],
+            oldest_rewind_height: 9,
+            payload: vec![],
+        };
+        assert_eq!(
+            later_snapshot.validate_for(1, later_descriptor, 10, later_snapshot.tip, [4; 32]),
+            Ok(())
         );
     }
 

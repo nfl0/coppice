@@ -109,6 +109,26 @@ pub enum ReconcileError<C: Debug, F: Debug, A: Debug, W: Debug> {
 
 pub type ReconcileResult<C, F, A, W> = Result<ReconcileOutcome, ReconcileError<C, F, A, W>>;
 
+/// Bootstrap-specific failure before ordinary canonical reconciliation starts.
+///
+/// A bootstrap is intentionally only a forward replay from the authenticated
+/// Core activation checkpoint. Refusing a partially advanced runtime prevents
+/// a host from accidentally treating an arbitrary local tip as a trusted
+/// application-install boundary.
+#[derive(Debug)]
+pub enum BootstrapError<C: Debug, F: Debug, A: Debug, W: Debug> {
+    /// The supplied runtime is not positioned at the Core activation base.
+    NotAtActivationBoundary {
+        expected_height: u32,
+        actual: CoreReplayTip,
+    },
+    /// Canonical source acquisition, replay, or persistence failed during the
+    /// forward bootstrap. The wrapped taxonomy is unchanged.
+    Reconcile(ReconcileError<C, F, A, W>),
+}
+
+pub type BootstrapResult<C, F, A, W> = Result<ReconcileOutcome, BootstrapError<C, F, A, W>>;
+
 fn block_identity(block: &CompactBlock, requested_height: u32) -> Option<CanonicalTip> {
     let height = u32::try_from(block.height).ok()?;
     let block_hash: [u8; 32] = block.hash.as_slice().try_into().ok()?;
@@ -199,6 +219,34 @@ where
     )
 }
 
+/// Replays a newly installed runtime from the authenticated Core activation
+/// checkpoint to the host-selected canonical tip.
+///
+/// This is a narrow lifecycle guard over the normal reconciliation path; it
+/// does not introduce a second source of canonical truth or a trusted
+/// application snapshot. Hosts may use the progress variant below to persist
+/// an application checkpoint after each successful canonical block.
+pub fn bootstrap_canonical_chain<P, R, C, F>(
+    params: &P,
+    runtime: &mut R,
+    canonical_source: &mut C,
+    full_tx_source: &mut F,
+) -> BootstrapResult<C::Error, F::Error, R::ApplyError, R::RewindError>
+where
+    P: Parameters,
+    R: CanonicalRuntime,
+    C: CanonicalBlockSource,
+    F: FullTransactionSource,
+{
+    bootstrap_canonical_chain_with_progress(
+        params,
+        runtime,
+        canonical_source,
+        full_tx_source,
+        |_| true,
+    )
+}
+
 /// Reconciles while invoking `persist_progress` after a successful rewind and
 /// after each successfully applied canonical block. Returning `false` stops
 /// immediately at that durable boundary; the runtime remains at exactly the
@@ -224,6 +272,45 @@ where
         |_| false,
         persist_progress,
     )
+}
+
+/// Progress-reporting form of [`bootstrap_canonical_chain`]. Returning
+/// `false` from the callback stops at the last durable block boundary and
+/// returns `ProgressPersistenceFailed`, exactly like normal reconciliation.
+pub fn bootstrap_canonical_chain_with_progress<P, R, C, F>(
+    params: &P,
+    runtime: &mut R,
+    canonical_source: &mut C,
+    full_tx_source: &mut F,
+    persist_progress: impl FnMut(&R) -> bool,
+) -> BootstrapResult<C::Error, F::Error, R::ApplyError, R::RewindError>
+where
+    P: Parameters,
+    R: CanonicalRuntime,
+    C: CanonicalBlockSource,
+    F: FullTransactionSource,
+{
+    let activation_base = runtime
+        .core_parameters()
+        .parameters()
+        .runtime_activation_height
+        .checked_sub(1)
+        .expect("validated Core activation height is nonzero");
+    let actual = runtime.tip();
+    if actual.height != activation_base {
+        return Err(BootstrapError::NotAtActivationBoundary {
+            expected_height: activation_base,
+            actual,
+        });
+    }
+    reconcile_canonical_chain_with_progress(
+        params,
+        runtime,
+        canonical_source,
+        full_tx_source,
+        persist_progress,
+    )
+    .map_err(BootstrapError::Reconcile)
 }
 
 /// Reconciles while allowing an optional supplemental host policy to request
@@ -394,4 +481,144 @@ where
         blocks_applied,
         final_tip: runtime.tip(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use coppice_core::{
+        identity::{CoreRuntimeParameters, ZcashNetwork},
+        replay::{
+            CoreCanonicalBlockInput, CoreReplay, CoreReplayActivationCheckpoint,
+            CoreReplayConfiguration, IronwoodFrontier,
+        },
+        runtime::CoreRuntime,
+    };
+    use zcash_protocol::{consensus::BlockHeight, local_consensus::LocalNetwork};
+
+    #[derive(Clone, Debug)]
+    struct EmptySource {
+        tip: CanonicalTip,
+    }
+
+    impl CanonicalBlockSource for EmptySource {
+        type Error = ();
+
+        fn canonical_tip(&mut self) -> Result<CanonicalTip, Self::Error> {
+            Ok(self.tip)
+        }
+
+        fn compact_block(&mut self, _height: u32) -> Result<Option<CompactBlock>, Self::Error> {
+            Ok(None)
+        }
+    }
+
+    impl FullTransactionSource for EmptySource {
+        type Error = ();
+
+        fn full_transaction(&mut self, _txid: [u8; 32]) -> Result<Option<Vec<u8>>, Self::Error> {
+            Ok(None)
+        }
+    }
+
+    fn parameters() -> LocalNetwork {
+        let one = Some(BlockHeight::from_u32(1));
+        let two = Some(BlockHeight::from_u32(2));
+        LocalNetwork {
+            overwinter: one,
+            sapling: one,
+            blossom: one,
+            heartwood: one,
+            canopy: one,
+            nu5: two,
+            nu6: two,
+            nu6_1: two,
+            nu6_2: two,
+            nu6_3: two,
+        }
+    }
+
+    fn runtime() -> CoreRuntime {
+        let parameters = CoreRuntimeParameters {
+            runtime_protocol_id: b"coppice.runtime".to_vec(),
+            runtime_protocol_version: 1,
+            zcash_network_domain: b"coppice-runtime-regtest-v1".to_vec(),
+            zcash_network: ZcashNetwork::Regtest,
+            runtime_activation_height: 10,
+            carrier_protocol_id: b"CPV1".to_vec(),
+            rendezvous_ivk: hex::decode(
+                "65deb2b3ee7ac69020543f40f21122cb6dc1f4201a329fcdf9d5e3bb2dfbbabe29d542352fe36c3c7b24c2989dc9d0000b9e04f444e05dc4538bde395c0e6008",
+            )
+            .unwrap()
+            .try_into()
+            .unwrap(),
+            rendezvous_receiver: hex::decode(
+                "9ec59e4d447ba285086cc3456cadf62004a19b6a7989c726daaa9944a6cdbf25f7bfa51afa15b66da53881",
+            )
+            .unwrap()
+            .try_into()
+            .unwrap(),
+        }
+        .validate()
+        .unwrap();
+        let replay = CoreReplay::new(
+            CoreReplayConfiguration::new(10, 4).unwrap(),
+            CoreReplayActivationCheckpoint {
+                height: 9,
+                block_hash: [9; 32],
+                ironwood_frontier: IronwoodFrontier::empty(),
+                ironwood_tree_size: 0,
+            },
+        )
+        .unwrap();
+        CoreRuntime::new(parameters, replay).unwrap()
+    }
+
+    #[test]
+    fn bootstrap_rejects_partially_advanced_runtime() {
+        let mut runtime = runtime();
+        runtime
+            .apply_block(&CoreCanonicalBlockInput {
+                height: 10,
+                block_hash: [10; 32],
+                prev_block_hash: [9; 32],
+                branch_id: zcash_protocol::consensus::BranchId::Nu6_3,
+                transactions: vec![],
+            })
+            .unwrap();
+        let mut source = EmptySource {
+            tip: CanonicalTip {
+                height: 9,
+                block_hash: [9; 32],
+            },
+        };
+        let mut full = EmptySource { tip: source.tip };
+        let error = bootstrap_canonical_chain(&parameters(), &mut runtime, &mut source, &mut full)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            BootstrapError::NotAtActivationBoundary {
+                expected_height: 9,
+                actual: CoreReplayTip { height: 10, .. }
+            }
+        ));
+    }
+
+    #[test]
+    fn bootstrap_keeps_missing_canonical_blocks_fatal() {
+        let mut runtime = runtime();
+        let mut source = EmptySource {
+            tip: CanonicalTip {
+                height: 10,
+                block_hash: [10; 32],
+            },
+        };
+        let mut full = EmptySource { tip: source.tip };
+        let error = bootstrap_canonical_chain(&parameters(), &mut runtime, &mut source, &mut full)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            BootstrapError::Reconcile(ReconcileError::MissingCanonicalBlock { height: 10 })
+        ));
+    }
 }
