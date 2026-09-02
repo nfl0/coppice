@@ -362,6 +362,34 @@ where
         .map_err(CompactBlockApplyError::Runtime)
 }
 
+/// Applies a CompactBlock while acquiring transactions addressed to any
+/// caller-supplied exact public rendezvous. The routes affect acquisition only;
+/// generic Core carrier classification remains tied to the validated runtime.
+pub fn apply_compact_block_with_additional_rendezvous<P, R, S>(
+    params: &P,
+    runtime: &mut R,
+    compact_block: &CompactBlock,
+    full_tx_source: &mut S,
+    additional_rendezvous: &[CoreRendezvous],
+) -> Result<R::BlockOutput, CompactBlockApplyError<S::Error, R::ApplyError>>
+where
+    P: Parameters,
+    R: CanonicalRuntime,
+    S: FullTransactionSource,
+{
+    let input = prepare_canonical_block_with_additional_rendezvous(
+        params,
+        runtime,
+        compact_block,
+        full_tx_source,
+        additional_rendezvous,
+    )
+    .map_err(CompactBlockApplyError::Prepare)?;
+    runtime
+        .apply_canonical_block(&input)
+        .map_err(CompactBlockApplyError::Runtime)
+}
+
 /// Applies a CompactBlock with the same selective extended-effect policy as
 /// [`prepare_canonical_block_with_transaction_selector`].
 pub fn apply_compact_block_with_transaction_selector<P, R, S, F>(
