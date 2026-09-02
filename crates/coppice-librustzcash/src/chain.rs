@@ -93,6 +93,7 @@ pub enum CompactBlockApplyError<SourceError: Debug, RuntimeError: Debug> {
 struct ValidatedCompactTx {
     input: CoreCanonicalTransactionInput,
     rendezvous_candidate: bool,
+    additional_rendezvous_candidate: bool,
 }
 
 fn exact_32(bytes: &[u8]) -> Option<[u8; 32]> {
@@ -103,6 +104,7 @@ fn validate_transaction<SourceError: Debug>(
     transaction: usize,
     compact_tx: &CompactTx,
     rendezvous: &CoreRendezvous,
+    additional_rendezvous: &[CoreRendezvous],
 ) -> Result<ValidatedCompactTx, CompactBlockAdapterError<SourceError>> {
     let tx_index = u32::try_from(compact_tx.index)
         .map_err(|_| CompactBlockAdapterError::InvalidTxIndex { transaction })?;
@@ -111,6 +113,7 @@ fn validate_transaction<SourceError: Debug>(
     let mut ironwood_nullifiers = Vec::with_capacity(compact_tx.ironwood_actions.len());
     let mut ironwood_commitments = Vec::with_capacity(compact_tx.ironwood_actions.len());
     let mut candidate = false;
+    let mut additional_candidate = false;
 
     for (action_index, encoded) in compact_tx.ironwood_actions.iter().enumerate() {
         let action = CompactAction::try_from(encoded).map_err(|_| {
@@ -123,6 +126,9 @@ fn validate_transaction<SourceError: Debug>(
         ironwood_commitments.push(action.cmx().to_bytes());
         let hit = carrier::compact_action_is_rendezvous(&action, rendezvous);
         candidate |= hit;
+        additional_candidate |= additional_rendezvous
+            .iter()
+            .any(|route| carrier::compact_action_is_rendezvous(&action, route));
     }
 
     Ok(ValidatedCompactTx {
@@ -135,6 +141,7 @@ fn validate_transaction<SourceError: Debug>(
             full_transaction: None,
         },
         rendezvous_candidate: candidate,
+        additional_rendezvous_candidate: additional_candidate,
     })
 }
 
@@ -170,6 +177,55 @@ pub fn prepare_canonical_block_with_transaction_selector<P, R, S, F>(
     runtime: &R,
     compact_block: &CompactBlock,
     full_tx_source: &mut S,
+    select_full_transaction: F,
+) -> Result<CoreCanonicalBlockInput, CompactBlockAdapterError<S::Error>>
+where
+    P: Parameters,
+    R: CanonicalRuntime,
+    S: FullTransactionSource,
+    F: FnMut(&CanonicalCompactTransactionSummary<'_>) -> bool,
+{
+    prepare_canonical_block_with_routes_and_selector(
+        params,
+        runtime,
+        compact_block,
+        full_tx_source,
+        &[],
+        select_full_transaction,
+    )
+}
+
+/// Selects full transactions that compact-trial-decrypt at any additional
+/// exact public rendezvous while keeping the runtime's configured carrier
+/// classification independent.
+pub fn prepare_canonical_block_with_additional_rendezvous<P, R, S>(
+    params: &P,
+    runtime: &R,
+    compact_block: &CompactBlock,
+    full_tx_source: &mut S,
+    additional_rendezvous: &[CoreRendezvous],
+) -> Result<CoreCanonicalBlockInput, CompactBlockAdapterError<S::Error>>
+where
+    P: Parameters,
+    R: CanonicalRuntime,
+    S: FullTransactionSource,
+{
+    prepare_canonical_block_with_routes_and_selector(
+        params,
+        runtime,
+        compact_block,
+        full_tx_source,
+        additional_rendezvous,
+        |_| false,
+    )
+}
+
+fn prepare_canonical_block_with_routes_and_selector<P, R, S, F>(
+    params: &P,
+    runtime: &R,
+    compact_block: &CompactBlock,
+    full_tx_source: &mut S,
+    additional_rendezvous: &[CoreRendezvous],
     mut select_full_transaction: F,
 ) -> Result<CoreCanonicalBlockInput, CompactBlockAdapterError<S::Error>>
 where
@@ -206,7 +262,8 @@ where
     let rendezvous = runtime.rendezvous();
     let mut validated = Vec::with_capacity(compact_block.vtx.len());
     for (transaction, compact_tx) in compact_block.vtx.iter().enumerate() {
-        let mut tx = validate_transaction(transaction, compact_tx, rendezvous)?;
+        let mut tx =
+            validate_transaction(transaction, compact_tx, rendezvous, additional_rendezvous)?;
         if validated
             .last()
             .is_some_and(|prior: &ValidatedCompactTx| prior.input.tx_index >= tx.input.tx_index)
@@ -224,7 +281,8 @@ where
         let request_extended_effects = runtime
             .full_transaction_acquisition(&summary)
             .includes_extended_effects()
-            || select_full_transaction(&summary);
+            || select_full_transaction(&summary)
+            || tx.additional_rendezvous_candidate;
         tx.input.full_transaction_acquisition =
             FullTransactionAcquisition::new(tx.rendezvous_candidate, request_extended_effects);
         validated.push(tx);
@@ -353,7 +411,7 @@ mod tests {
             CoreReplay, CoreReplayActivationCheckpoint, CoreReplayConfiguration, CoreReplayError,
             FullTransactionAcquisition, IronwoodFrontier,
         },
-        runtime::{ApplicationMessageStatus, CoreRuntime},
+        runtime::{ApplicationMessageStatus, CoreRuntime, inspect_transaction_at_rendezvous},
         transport,
     };
     use orchard::{
@@ -372,7 +430,7 @@ mod tests {
         CompactBlock, CompactOrchardAction, CompactTx,
     };
     use zcash_note_encryption::Domain;
-    use zcash_primitives::transaction::{Authorized, TransactionData};
+    use zcash_primitives::transaction::{Authorized, Transaction, TransactionData};
     use zcash_protocol::{
         consensus::BlockHeight, local_consensus::LocalNetwork, value::ZatBalance,
     };
@@ -488,6 +546,16 @@ mod tests {
         .unwrap();
         let key = Option::<IncomingViewingKey>::from(IncomingViewingKey::from_bytes(&ivk)).unwrap();
         key.address_at(1u32)
+    }
+
+    fn alternate_rendezvous() -> CoreRendezvous {
+        let ivk: [u8; 64] = hex::decode(
+            "65deb2b3ee7ac69020543f40f21122cb6dc1f4201a329fcdf9d5e3bb2dfbbabe29d542352fe36c3c7b24c2989dc9d0000b9e04f444e05dc4538bde395c0e6008",
+        )
+        .unwrap()
+        .try_into()
+        .unwrap();
+        CoreRendezvous::try_new(&ivk, &alternate_receiver().to_raw_address_bytes()).unwrap()
     }
 
     fn configured_receiver() -> orchard::Address {
@@ -1051,6 +1119,83 @@ mod tests {
             applied.transactions()[0].message(),
             ApplicationMessageStatus::Message(message) if message.key() == key
         ));
+    }
+
+    #[test]
+    fn supplied_rendezvous_inspection_preserves_action_index_and_note_value() {
+        let runtime = runtime();
+        let key = ApplicationKey::new(ApplicationId::from_bytes([9; 32]), 1);
+        let envelope = ApplicationEnvelopeV1::new(key, vec![3]).unwrap().encode();
+        let frame = transport::encode_frames(runtime.runtime_id().to_bytes(), &envelope)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let fixture = full_ironwood_transaction(configured_receiver(), frame, 7);
+        let transaction = Transaction::read(fixture.bytes.as_slice(), BranchId::Nu6_3).unwrap();
+
+        let inspection = inspect_transaction_at_rendezvous(
+            &transaction,
+            runtime.rendezvous(),
+            runtime.runtime_id(),
+        );
+        assert_eq!(inspection.frames(), &[frame]);
+        assert_eq!(inspection.routed_frames().len(), 1);
+        assert_eq!(inspection.routed_frames()[0].action_index, 0);
+        assert_eq!(inspection.routed_frames()[0].value, 5);
+        assert_eq!(inspection.routed_frames()[0].memo, frame);
+        assert!(matches!(
+            inspection.message(),
+            ApplicationMessageStatus::Message(message) if message.key() == key
+        ));
+    }
+
+    #[test]
+    fn additional_rendezvous_fetches_and_authenticates_without_reclassifying_carrier() {
+        let mut runtime = runtime();
+        let key = ApplicationKey::new(ApplicationId::from_bytes([10; 32]), 1);
+        let envelope = ApplicationEnvelopeV1::new(key, vec![4]).unwrap().encode();
+        let frame = transport::encode_frames(runtime.runtime_id().to_bytes(), &envelope)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let route = alternate_rendezvous();
+        let fixture = full_ironwood_transaction(alternate_receiver(), frame, 8);
+        let mut compact = compact_tx(0, 8, vec![fixture.compact.clone()]);
+        compact.txid = fixture.txid.to_vec();
+        let input = block(&runtime, vec![compact]);
+        let mut source = Source::default();
+        source.values.insert(fixture.txid, Ok(Some(fixture.bytes)));
+
+        let prepared = prepare_canonical_block_with_additional_rendezvous(
+            &params(),
+            &runtime,
+            &input,
+            &mut source,
+            std::slice::from_ref(&route),
+        )
+        .unwrap();
+        assert_eq!(source.calls, [fixture.txid]);
+        assert_eq!(
+            prepared.transactions[0].full_transaction_acquisition,
+            FullTransactionAcquisition::ExtendedEffects
+        );
+        let applied = runtime.apply_block(&prepared).unwrap();
+        let core_tx = &applied.core().transactions()[0];
+        assert!(!core_tx.is_carrier_candidate());
+        assert_eq!(
+            applied.transactions()[0].message(),
+            &ApplicationMessageStatus::NotCandidate
+        );
+        let transaction = core_tx
+            .full_transaction_status()
+            .validated_full_transaction()
+            .unwrap()
+            .transaction();
+        let routed = inspect_transaction_at_rendezvous(transaction, &route, runtime.runtime_id());
+        assert_eq!(routed.frames(), &[frame]);
+        assert_eq!(routed.routed_frames()[0].value, 5);
     }
 
     #[test]

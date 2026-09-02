@@ -26,6 +26,13 @@ pub enum RendezvousError {
     ReceiverMismatch,
 }
 
+/// Decrypted note data exposed only after an exact rendezvous-receiver match.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RendezvousNote {
+    pub value: u64,
+    pub memo: [u8; 512],
+}
+
 /// The validated generic Core rendezvous context.
 ///
 /// Decryption under one Orchard IVK can succeed for many diversified
@@ -84,19 +91,27 @@ impl CoreRendezvous {
     /// Returns the memo only when a full Ironwood action decrypts to the exact
     /// configured receiver. This is the authoritative full-transaction
     /// boundary used before CPV1 routing.
-    pub fn action_memo<A>(&self, action: &orchard::Action<A>) -> Option<[u8; 512]> {
+    pub fn action_note<A>(&self, action: &orchard::Action<A>) -> Option<RendezvousNote> {
         try_note_decryption(
             &IronwoodDomain::for_action(action),
             &self.prepared_ivk,
             action,
         )
-        .and_then(|(_, recipient, memo)| {
-            (recipient.to_raw_address_bytes() == self.receiver).then_some(memo)
+        .and_then(|(note, recipient, memo)| {
+            (recipient.to_raw_address_bytes() == self.receiver).then_some(RendezvousNote {
+                value: note.value().inner(),
+                memo,
+            })
         })
     }
 
+    /// Returns the memo only for the exact configured receiver.
+    pub fn action_memo<A>(&self, action: &orchard::Action<A>) -> Option<[u8; 512]> {
+        self.action_note(action).map(|note| note.memo)
+    }
+
     pub fn action_is_rendezvous<A>(&self, action: &orchard::Action<A>) -> bool {
-        self.action_memo(action).is_some()
+        self.action_note(action).is_some()
     }
 }
 

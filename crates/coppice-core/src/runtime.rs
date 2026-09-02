@@ -68,12 +68,25 @@ pub struct RuntimeTransactionContext {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeTransactionInspection {
     frames: Box<[[u8; 512]]>,
+    routed_frames: Box<[RoutedFrame]>,
     message: ApplicationMessageStatus,
+}
+
+/// One CPV1 frame decrypted at an exact caller-supplied rendezvous.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RoutedFrame {
+    pub action_index: u32,
+    pub value: u64,
+    pub memo: [u8; 512],
 }
 
 impl RuntimeTransactionInspection {
     pub fn frames(&self) -> &[[u8; 512]] {
         &self.frames
+    }
+
+    pub fn routed_frames(&self) -> &[RoutedFrame] {
+        &self.routed_frames
     }
 
     pub fn message(&self) -> &ApplicationMessageStatus {
@@ -403,6 +416,19 @@ pub fn inspect_transaction(
     inspect_transaction_for(transaction, &rendezvous, parameters.core_runtime_id())
 }
 
+/// Inspects a transaction at an application-supplied public rendezvous.
+///
+/// Callers consuming chain data must first authenticate the full transaction
+/// and its compact/full Ironwood equality through Core replay. This function
+/// performs routing only and does not make transaction bytes authoritative.
+pub fn inspect_transaction_at_rendezvous(
+    transaction: &zcash_primitives::transaction::Transaction,
+    rendezvous: &CoreRendezvous,
+    runtime_id: CoreRuntimeId,
+) -> RuntimeTransactionInspection {
+    inspect_transaction_for(transaction, rendezvous, runtime_id)
+}
+
 fn inspect_transaction_for(
     transaction: &zcash_primitives::transaction::Transaction,
     rendezvous: &CoreRendezvous,
@@ -411,14 +437,28 @@ fn inspect_transaction_for(
     let Some(bundle) = transaction.ironwood_bundle() else {
         return RuntimeTransactionInspection {
             frames: Box::new([]),
+            routed_frames: Box::new([]),
             message: ApplicationMessageStatus::NoMessage,
         };
     };
-    let frames = bundle
+    let routed_frames = bundle
         .actions()
         .iter()
-        .filter_map(|action| rendezvous.action_memo(action))
-        .filter(transport::is_frame)
+        .enumerate()
+        .filter_map(|(action_index, action)| {
+            rendezvous.action_note(action).and_then(|note| {
+                transport::is_frame(&note.memo).then_some(RoutedFrame {
+                    action_index: u32::try_from(action_index).expect("action count fits u32"),
+                    value: note.value,
+                    memo: note.memo,
+                })
+            })
+        })
+        .collect::<Vec<_>>()
+        .into_boxed_slice();
+    let frames = routed_frames
+        .iter()
+        .map(|frame| frame.memo)
         .collect::<Vec<_>>()
         .into_boxed_slice();
     let payload = match transport::reconstruct_frames(&frames, runtime_id.to_bytes()) {
@@ -426,12 +466,14 @@ fn inspect_transaction_for(
         Err(transport::Error::NoFrames | transport::Error::WrongRuntime) => {
             return RuntimeTransactionInspection {
                 frames,
+                routed_frames,
                 message: ApplicationMessageStatus::NoMessage,
             };
         }
         Err(error) => {
             return RuntimeTransactionInspection {
                 frames,
+                routed_frames,
                 message: ApplicationMessageStatus::MalformedTransport(error),
             };
         }
@@ -440,5 +482,9 @@ fn inspect_transaction_for(
         Ok(message) => ApplicationMessageStatus::Message(message),
         Err(error) => ApplicationMessageStatus::MalformedEnvelope(error),
     };
-    RuntimeTransactionInspection { frames, message }
+    RuntimeTransactionInspection {
+        frames,
+        routed_frames,
+        message,
+    }
 }
