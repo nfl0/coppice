@@ -284,8 +284,11 @@ impl CoreRuntime {
         &mut self,
         block: &CoreCanonicalBlockInput,
     ) -> Result<RuntimeBlockContext, CoreReplayError> {
-        let mut replay = self.replay.clone();
-        let core = replay.apply_block(block)?;
+        // CoreReplay::apply_block stages its frontier, checkpoints, and output
+        // before committing any state. Application routing below is infallible,
+        // so cloning the complete replay (including retained undo frontiers) here
+        // adds no atomicity and makes light-wallet catch-up scale with retention.
+        let core = self.replay.apply_block(block)?;
         let transactions = core
             .transactions()
             .iter()
@@ -301,7 +304,6 @@ impl CoreRuntime {
             })
             .collect::<Vec<_>>()
             .into_boxed_slice();
-        self.replay = replay;
         Ok(RuntimeBlockContext {
             core,
             transactions,

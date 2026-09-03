@@ -9,7 +9,10 @@ use std::fmt::Debug;
 use coppice_core::{
     carrier::{self, CoreRendezvous},
     identity::{ValidatedCoreRuntimeParameters, ZcashNetwork},
-    replay::{CoreCanonicalBlockInput, CoreCanonicalTransactionInput, FullTransactionAcquisition},
+    replay::{
+        CoreCanonicalBlockInput, CoreCanonicalTransactionInput, FullTransactionAcquisition,
+        ValidatedFullTransaction, authenticate_full_transaction,
+    },
 };
 use orchard::note_encryption::CompactAction;
 use zcash_client_backend::proto::compact_formats::{CompactBlock, CompactTx};
@@ -90,6 +93,40 @@ pub enum CompactBlockApplyError<SourceError: Debug, RuntimeError: Debug> {
     Runtime(RuntimeError),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HistoricalTransactionAuthenticationError {
+    InvalidTxid,
+    InvalidIronwoodCompactAction { action_index: usize },
+    Core(coppice_core::replay::CoreReplayError),
+}
+
+/// Authenticates a bounded historical transaction against one canonical
+/// compact transaction retained by the wallet.
+///
+/// This is the stateless counterpart of Core replay's selective acquisition
+/// path and is used when an application follows an older canonical reference.
+pub fn authenticate_compact_transaction<P: Parameters>(
+    params: &P,
+    height: u32,
+    compact_tx: &CompactTx,
+    bytes: &[u8],
+) -> Result<ValidatedFullTransaction, HistoricalTransactionAuthenticationError> {
+    let txid =
+        exact_32(&compact_tx.txid).ok_or(HistoricalTransactionAuthenticationError::InvalidTxid)?;
+    let mut nullifiers = Vec::with_capacity(compact_tx.ironwood_actions.len());
+    let mut commitments = Vec::with_capacity(compact_tx.ironwood_actions.len());
+    for (action_index, encoded) in compact_tx.ironwood_actions.iter().enumerate() {
+        let action = CompactAction::try_from(encoded).map_err(|_| {
+            HistoricalTransactionAuthenticationError::InvalidIronwoodCompactAction { action_index }
+        })?;
+        nullifiers.push(action.nullifier().to_bytes());
+        commitments.push(action.cmx().to_bytes());
+    }
+    let branch_id = BranchId::for_height(params, BlockHeight::from_u32(height));
+    authenticate_full_transaction(branch_id, txid, &nullifiers, &commitments, bytes)
+        .map_err(HistoricalTransactionAuthenticationError::Core)
+}
+
 struct ValidatedCompactTx {
     input: CoreCanonicalTransactionInput,
     rendezvous_candidate: bool,
@@ -104,6 +141,7 @@ fn validate_transaction<SourceError: Debug>(
     transaction: usize,
     compact_tx: &CompactTx,
     rendezvous: &CoreRendezvous,
+    observe_runtime_rendezvous: bool,
     additional_rendezvous: &[CoreRendezvous],
 ) -> Result<ValidatedCompactTx, CompactBlockAdapterError<SourceError>> {
     let tx_index = u32::try_from(compact_tx.index)
@@ -124,7 +162,8 @@ fn validate_transaction<SourceError: Debug>(
         })?;
         ironwood_nullifiers.push(action.nullifier().to_bytes());
         ironwood_commitments.push(action.cmx().to_bytes());
-        let hit = carrier::compact_action_is_rendezvous(&action, rendezvous);
+        let hit = observe_runtime_rendezvous
+            && carrier::compact_action_is_rendezvous(&action, rendezvous);
         candidate |= hit;
         additional_candidate |= additional_rendezvous
             .iter()
@@ -190,6 +229,7 @@ where
         runtime,
         compact_block,
         full_tx_source,
+        true,
         &[],
         select_full_transaction,
     )
@@ -215,6 +255,38 @@ where
         runtime,
         compact_block,
         full_tx_source,
+        true,
+        additional_rendezvous,
+        |_| false,
+    )
+}
+
+/// Prepares a block while allowing the host to suspend acquisition at Core's
+/// generic rendezvous and retain only caller-selected exact routes.
+///
+/// Compact effects are still validated and replayed in full. This is intended
+/// for application protocols whose generic publications can be authenticated
+/// later through bounded references; disabling the generic route without such
+/// a protocol rule would omit application messages.
+pub fn prepare_canonical_block_with_rendezvous_policy<P, R, S>(
+    params: &P,
+    runtime: &R,
+    compact_block: &CompactBlock,
+    full_tx_source: &mut S,
+    observe_runtime_rendezvous: bool,
+    additional_rendezvous: &[CoreRendezvous],
+) -> Result<CoreCanonicalBlockInput, CompactBlockAdapterError<S::Error>>
+where
+    P: Parameters,
+    R: CanonicalRuntime,
+    S: FullTransactionSource,
+{
+    prepare_canonical_block_with_routes_and_selector(
+        params,
+        runtime,
+        compact_block,
+        full_tx_source,
+        observe_runtime_rendezvous,
         additional_rendezvous,
         |_| false,
     )
@@ -225,6 +297,7 @@ fn prepare_canonical_block_with_routes_and_selector<P, R, S, F>(
     runtime: &R,
     compact_block: &CompactBlock,
     full_tx_source: &mut S,
+    observe_runtime_rendezvous: bool,
     additional_rendezvous: &[CoreRendezvous],
     mut select_full_transaction: F,
 ) -> Result<CoreCanonicalBlockInput, CompactBlockAdapterError<S::Error>>
@@ -262,8 +335,13 @@ where
     let rendezvous = runtime.rendezvous();
     let mut validated = Vec::with_capacity(compact_block.vtx.len());
     for (transaction, compact_tx) in compact_block.vtx.iter().enumerate() {
-        let mut tx =
-            validate_transaction(transaction, compact_tx, rendezvous, additional_rendezvous)?;
+        let mut tx = validate_transaction(
+            transaction,
+            compact_tx,
+            rendezvous,
+            observe_runtime_rendezvous,
+            additional_rendezvous,
+        )?;
         if validated
             .last()
             .is_some_and(|prior: &ValidatedCompactTx| prior.input.tx_index >= tx.input.tx_index)
@@ -382,6 +460,35 @@ where
         runtime,
         compact_block,
         full_tx_source,
+        additional_rendezvous,
+    )
+    .map_err(CompactBlockApplyError::Prepare)?;
+    runtime
+        .apply_canonical_block(&input)
+        .map_err(CompactBlockApplyError::Runtime)
+}
+
+/// Applies a compact block with an explicit generic-rendezvous observation
+/// policy. See [`prepare_canonical_block_with_rendezvous_policy`].
+pub fn apply_compact_block_with_rendezvous_policy<P, R, S>(
+    params: &P,
+    runtime: &mut R,
+    compact_block: &CompactBlock,
+    full_tx_source: &mut S,
+    observe_runtime_rendezvous: bool,
+    additional_rendezvous: &[CoreRendezvous],
+) -> Result<R::BlockOutput, CompactBlockApplyError<S::Error, R::ApplyError>>
+where
+    P: Parameters,
+    R: CanonicalRuntime,
+    S: FullTransactionSource,
+{
+    let input = prepare_canonical_block_with_rendezvous_policy(
+        params,
+        runtime,
+        compact_block,
+        full_tx_source,
+        observe_runtime_rendezvous,
         additional_rendezvous,
     )
     .map_err(CompactBlockApplyError::Prepare)?;
@@ -914,6 +1021,62 @@ mod tests {
             FullTransactionAcquisition::Carrier
         );
         assert_eq!(prepared.transactions[0].full_transaction, Some(vec![4]));
+    }
+
+    #[test]
+    fn generic_rendezvous_acquisition_can_be_suspended_without_dropping_effects() {
+        let mut runtime = runtime();
+        let fixture = full_ironwood_transaction(configured_receiver(), [0; 512], 41);
+        let mut compact = compact_tx(7, 41, vec![fixture.compact]);
+        compact.txid = fixture.txid.to_vec();
+        let input = block(&runtime, vec![compact]);
+        let mut source = Source::default();
+
+        let prepared = prepare_canonical_block_with_rendezvous_policy(
+            &params(),
+            &runtime,
+            &input,
+            &mut source,
+            false,
+            &[],
+        )
+        .unwrap();
+        assert!(source.calls.is_empty());
+        assert_eq!(
+            prepared.transactions[0].full_transaction_acquisition,
+            FullTransactionAcquisition::None
+        );
+        let applied = runtime.apply_block(&prepared).unwrap();
+        let transaction = &applied.core().transactions()[0];
+        assert!(!transaction.is_carrier_candidate());
+        assert_eq!(transaction.ironwood_effects().nullifiers().len(), 1);
+        assert!(
+            transaction
+                .full_transaction_status()
+                .validated_full_transaction()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn historical_transaction_authentication_matches_forward_core_checks() {
+        let fixture = full_ironwood_transaction(alternate_receiver(), [0; 512], 42);
+        let mut compact = compact_tx(3, 42, vec![fixture.compact]);
+        compact.txid = fixture.txid.to_vec();
+        let authenticated =
+            authenticate_compact_transaction(&params(), 10, &compact, &fixture.bytes).unwrap();
+        let authenticated_txid: [u8; 32] = authenticated.transaction().txid().into();
+        assert_eq!(authenticated_txid, fixture.txid);
+
+        let mut wrong_txid = compact.clone();
+        wrong_txid.txid = [99; 32].to_vec();
+        assert_eq!(
+            authenticate_compact_transaction(&params(), 10, &wrong_txid, &fixture.bytes)
+                .map(|_| ()),
+            Err(HistoricalTransactionAuthenticationError::Core(
+                CoreReplayError::TxidMismatch
+            ))
+        );
     }
 
     #[test]

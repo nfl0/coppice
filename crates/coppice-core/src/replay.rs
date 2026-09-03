@@ -935,33 +935,52 @@ fn validate_full_transaction(
         (false, None) => Ok(FullTransactionStatus::NotFetched),
         (false, Some(_)) => Err(CoreReplayError::UnexpectedFullTransaction),
         (true, None) => Err(CoreReplayError::RequiredFullTransactionMissing),
-        (true, Some(bytes)) => {
-            if bytes.len() > MAX_FULL_TRANSACTION_LEN {
-                return Err(CoreReplayError::OversizedTransaction);
-            }
-            let mut cursor = Cursor::new(bytes);
-            let transaction = Transaction::read(&mut cursor, branch_id)
-                .map_err(|_| CoreReplayError::InvalidFullTransaction)?;
-            if cursor.position() != bytes.len() as u64 {
-                return Err(CoreReplayError::InvalidFullTransaction);
-            }
-            let txid: [u8; 32] = transaction.txid().into();
-            if txid != input.txid {
-                return Err(CoreReplayError::TxidMismatch);
-            }
-            let (nullifiers, commitments) = extract_ironwood_effects(&transaction);
-            if nullifiers != input.ironwood_nullifiers || commitments != input.ironwood_commitments
-            {
-                return Err(CoreReplayError::IronwoodEffectsMismatch);
-            }
-            Ok(FullTransactionStatus::ValidatedFullTransaction(Box::new(
-                ValidatedFullTransaction {
-                    bytes: bytes.into(),
-                    transaction,
-                },
-            )))
-        }
+        (true, Some(bytes)) => authenticate_full_transaction(
+            branch_id,
+            input.txid,
+            &input.ironwood_nullifiers,
+            &input.ironwood_commitments,
+            bytes,
+        )
+        .map(|transaction| FullTransactionStatus::ValidatedFullTransaction(Box::new(transaction))),
     }
+}
+
+/// Authenticates one selectively acquired historical transaction against the
+/// canonical compact effects supplied by the wallet's chain source.
+///
+/// This stateless boundary lets an application follow a bounded historical
+/// reference without rewinding Core or having fetched the transaction during
+/// the original forward pass. It performs the same size, parse, txid, and
+/// Ironwood-effect equality checks as ordinary Core replay.
+pub fn authenticate_full_transaction(
+    branch_id: BranchId,
+    expected_txid: [u8; 32],
+    expected_nullifiers: &[[u8; 32]],
+    expected_commitments: &[[u8; 32]],
+    bytes: &[u8],
+) -> Result<ValidatedFullTransaction, CoreReplayError> {
+    if bytes.len() > MAX_FULL_TRANSACTION_LEN {
+        return Err(CoreReplayError::OversizedTransaction);
+    }
+    let mut cursor = Cursor::new(bytes);
+    let transaction = Transaction::read(&mut cursor, branch_id)
+        .map_err(|_| CoreReplayError::InvalidFullTransaction)?;
+    if cursor.position() != bytes.len() as u64 {
+        return Err(CoreReplayError::InvalidFullTransaction);
+    }
+    let txid: [u8; 32] = transaction.txid().into();
+    if txid != expected_txid {
+        return Err(CoreReplayError::TxidMismatch);
+    }
+    let (nullifiers, commitments) = extract_ironwood_effects(&transaction);
+    if nullifiers != expected_nullifiers || commitments != expected_commitments {
+        return Err(CoreReplayError::IronwoodEffectsMismatch);
+    }
+    Ok(ValidatedFullTransaction {
+        bytes: bytes.into(),
+        transaction,
+    })
 }
 
 fn extract_ironwood_effects(transaction: &Transaction) -> (Vec<[u8; 32]>, Vec<[u8; 32]>) {
