@@ -12,9 +12,10 @@ use crate::{
         ValidatedCoreRuntimeParameters,
     },
     replay::{
-        CoreBlockContext, CoreCanonicalBlockInput, CoreIronwoodCheckpoint, CoreReplay,
-        CoreReplayConfiguration, CoreReplayError, CoreReplaySnapshotError, CoreReplayTip,
-        CoreRewindError, FullTransactionAcquisition, FullTransactionStatus, IronwoodFrontier,
+        CoreBlockContext, CoreCanonicalBlockInput, CoreIronwoodCheckpoint, CorePositionReplay,
+        CorePositionedBlockContext, CoreReplay, CoreReplayConfiguration, CoreReplayError,
+        CoreReplayPositionCheckpoint, CoreReplaySnapshotError, CoreReplayTip, CoreRewindError,
+        FullTransactionAcquisition, FullTransactionStatus, IronwoodFrontier,
     },
     transport,
 };
@@ -109,6 +110,22 @@ pub struct RuntimeBlockContext {
     core: CoreBlockContext,
     transactions: Box<[RuntimeTransactionContext]>,
     runtime_activation_height: u32,
+}
+
+/// Routed block output for a host-owned commitment tree.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PositionedRuntimeBlockContext {
+    core: CorePositionedBlockContext,
+    transactions: Box<[RuntimeTransactionContext]>,
+}
+
+impl PositionedRuntimeBlockContext {
+    pub fn core(&self) -> &CorePositionedBlockContext {
+        &self.core
+    }
+    pub fn transactions(&self) -> &[RuntimeTransactionContext] {
+        &self.transactions
+    }
 }
 
 impl RuntimeBlockContext {
@@ -354,6 +371,148 @@ impl CoreRuntime {
             .map_err(CoreRuntimeSnapshotError::Replay)?;
         Self::new(parameters, replay).map_err(CoreRuntimeSnapshotError::Configuration)
     }
+}
+
+/// Core routing and canonical validation for a host that already owns the
+/// authenticated Ironwood commitment tree.
+///
+/// This mode never hashes or stores a duplicate frontier. The host is
+/// responsible for comparing the starting position with its tree and for
+/// publishing the advanced runtime only after the same block range commits to
+/// that tree.
+#[derive(Clone)]
+pub struct CorePositionRuntime {
+    parameters: ValidatedCoreRuntimeParameters,
+    runtime_id: CoreRuntimeId,
+    rendezvous: CoreRendezvous,
+    replay: CorePositionReplay,
+}
+
+impl CorePositionRuntime {
+    pub fn new(
+        parameters: ValidatedCoreRuntimeParameters,
+        configuration: CoreReplayConfiguration,
+        checkpoint: CoreReplayPositionCheckpoint,
+    ) -> Result<Self, CoreRuntimeConfigurationError> {
+        validate_runtime_configuration(&parameters, configuration)?;
+        let runtime_id = parameters.core_runtime_id();
+        let rendezvous = CoreRendezvous::from_validated(&parameters);
+        let replay = CorePositionReplay::from_checkpoint(configuration, checkpoint)
+            .map_err(|_| CoreRuntimeConfigurationError::ActivationMismatch)?;
+        Ok(Self {
+            parameters,
+            runtime_id,
+            rendezvous,
+            replay,
+        })
+    }
+
+    pub fn parameters(&self) -> &ValidatedCoreRuntimeParameters {
+        &self.parameters
+    }
+    pub fn rendezvous(&self) -> &CoreRendezvous {
+        &self.rendezvous
+    }
+    pub fn configuration(&self) -> CoreReplayConfiguration {
+        self.replay.configuration()
+    }
+    pub fn tip(&self) -> CoreReplayTip {
+        self.replay.tip()
+    }
+    pub fn ironwood_tree_size(&self) -> u32 {
+        self.replay.ironwood_tree_size()
+    }
+    pub fn oldest_rewind_height(&self) -> u32 {
+        self.replay.oldest_rewind_height()
+    }
+    pub fn retained_tip_at(&self, height: u32) -> Option<CoreReplayTip> {
+        self.replay.retained_tip_at(height)
+    }
+
+    pub fn apply_block(
+        &mut self,
+        block: &CoreCanonicalBlockInput,
+    ) -> Result<PositionedRuntimeBlockContext, CoreReplayError> {
+        let core = self.replay.apply_block(block)?;
+        let transactions =
+            route_transactions(core.transactions(), &self.rendezvous, self.runtime_id);
+        Ok(PositionedRuntimeBlockContext { core, transactions })
+    }
+
+    pub fn rewind_to(&mut self, height: u32) -> Result<(), CoreRewindError> {
+        self.replay.rewind_to(height)
+    }
+}
+
+impl CanonicalRuntime for CorePositionRuntime {
+    type BlockOutput = PositionedRuntimeBlockContext;
+    type ApplyError = CoreReplayError;
+    type RewindError = CoreRewindError;
+
+    fn core_parameters(&self) -> &ValidatedCoreRuntimeParameters {
+        self.parameters()
+    }
+    fn rendezvous(&self) -> &CoreRendezvous {
+        self.rendezvous()
+    }
+    fn tip(&self) -> CoreReplayTip {
+        self.tip()
+    }
+    fn oldest_rewind_height(&self) -> u32 {
+        self.oldest_rewind_height()
+    }
+    fn retained_tip_at(&self, height: u32) -> Option<CoreReplayTip> {
+        self.retained_tip_at(height)
+    }
+    fn apply_canonical_block(
+        &mut self,
+        block: &CoreCanonicalBlockInput,
+    ) -> Result<Self::BlockOutput, Self::ApplyError> {
+        self.apply_block(block)
+    }
+    fn rewind_canonical_to(&mut self, height: u32) -> Result<(), Self::RewindError> {
+        self.rewind_to(height)
+    }
+}
+
+fn validate_runtime_configuration(
+    parameters: &ValidatedCoreRuntimeParameters,
+    configuration: CoreReplayConfiguration,
+) -> Result<(), CoreRuntimeConfigurationError> {
+    if parameters.parameters().runtime_protocol_id != CORE_RUNTIME_PROTOCOL_ID_V1 {
+        return Err(CoreRuntimeConfigurationError::UnsupportedRuntimeProtocol);
+    }
+    if parameters.parameters().runtime_protocol_version != CORE_RUNTIME_PROTOCOL_VERSION_V1 {
+        return Err(CoreRuntimeConfigurationError::UnsupportedRuntimeVersion);
+    }
+    if parameters.parameters().carrier_protocol_id != CPV1_PROTOCOL_ID {
+        return Err(CoreRuntimeConfigurationError::UnsupportedCarrierProtocol);
+    }
+    if parameters.parameters().runtime_activation_height != configuration.activation_height() {
+        return Err(CoreRuntimeConfigurationError::ActivationMismatch);
+    }
+    Ok(())
+}
+
+fn route_transactions(
+    transactions: &[crate::replay::CoreTransactionContext],
+    rendezvous: &CoreRendezvous,
+    runtime_id: CoreRuntimeId,
+) -> Box<[RuntimeTransactionContext]> {
+    transactions
+        .iter()
+        .enumerate()
+        .map(|(core_index, transaction)| RuntimeTransactionContext {
+            core_index,
+            message: route_candidate(
+                transaction.full_transaction_status(),
+                transaction.is_carrier_candidate(),
+                rendezvous,
+                runtime_id,
+            ),
+        })
+        .collect::<Vec<_>>()
+        .into_boxed_slice()
 }
 
 impl CanonicalRuntime for CoreRuntime {

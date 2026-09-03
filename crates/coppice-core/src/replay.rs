@@ -71,6 +71,19 @@ pub struct CoreReplayActivationCheckpoint {
     pub ironwood_tree_size: u32,
 }
 
+/// A host-authenticated replay position for integrations that already own the
+/// canonical Ironwood commitment tree (for example, a Zcash light wallet).
+///
+/// Unlike [`CoreReplayActivationCheckpoint`], this deliberately contains no
+/// frontier. The host must publish a replay derived from this checkpoint only
+/// after its own tree update has authenticated the same block range.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CoreReplayPositionCheckpoint {
+    pub height: u32,
+    pub block_hash: [u8; 32],
+    pub ironwood_tree_size: u32,
+}
+
 /// Canonical block input supplied by the host-selected Zcash chain source.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CoreCanonicalBlockInput {
@@ -313,6 +326,47 @@ pub struct CoreBlockContext {
     ironwood_checkpoint: CoreIronwoodCheckpoint,
 }
 
+/// Immutable canonical context emitted by position-only replay.
+///
+/// All transaction bytes and compact/full Ironwood effects receive the same
+/// Core validation as [`CoreBlockContext`]. Commitment roots remain owned by
+/// the host wallet; this context carries only the authenticated position range
+/// needed by applications that mark notes in that wallet-owned tree.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CorePositionedBlockContext {
+    height: u32,
+    block_hash: [u8; 32],
+    prev_block_hash: [u8; 32],
+    branch_id: BranchId,
+    transactions: Box<[CoreTransactionContext]>,
+    pre_ironwood_tree_size: u32,
+    post_ironwood_tree_size: u32,
+}
+
+impl CorePositionedBlockContext {
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+    pub fn block_hash(&self) -> [u8; 32] {
+        self.block_hash
+    }
+    pub fn prev_block_hash(&self) -> [u8; 32] {
+        self.prev_block_hash
+    }
+    pub fn branch_id(&self) -> BranchId {
+        self.branch_id
+    }
+    pub fn transactions(&self) -> &[CoreTransactionContext] {
+        &self.transactions
+    }
+    pub fn pre_ironwood_tree_size(&self) -> u32 {
+        self.pre_ironwood_tree_size
+    }
+    pub fn post_ironwood_tree_size(&self) -> u32 {
+        self.post_ironwood_tree_size
+    }
+}
+
 impl CoreBlockContext {
     pub fn height(&self) -> u32 {
         self.height
@@ -392,6 +446,149 @@ pub enum CoreReplaySnapshotError {
     InvalidHistory,
     InvalidIronwoodTree,
     InvalidCheckpoint,
+}
+
+/// Position-only replay state for a host that already maintains and
+/// authenticates the canonical Ironwood tree.
+#[derive(Clone)]
+pub struct CorePositionReplay {
+    configuration: CoreReplayConfiguration,
+    tip: CoreReplayTip,
+    ironwood_tree_size: u32,
+    history: BTreeMap<u32, (CoreReplayTip, u32)>,
+}
+
+impl CorePositionReplay {
+    pub fn new(
+        configuration: CoreReplayConfiguration,
+        checkpoint: CoreReplayPositionCheckpoint,
+    ) -> Result<Self, CoreReplayError> {
+        if checkpoint.height
+            != configuration
+                .activation_height
+                .checked_sub(1)
+                .ok_or(CoreReplayError::ArithmeticOverflow)?
+        {
+            return Err(CoreReplayError::InvalidActivationCheckpoint);
+        }
+        Ok(Self {
+            configuration,
+            tip: CoreReplayTip {
+                height: checkpoint.height,
+                block_hash: checkpoint.block_hash,
+            },
+            ironwood_tree_size: checkpoint.ironwood_tree_size,
+            history: BTreeMap::new(),
+        })
+    }
+
+    pub fn from_checkpoint(
+        configuration: CoreReplayConfiguration,
+        checkpoint: CoreReplayPositionCheckpoint,
+    ) -> Result<Self, CoreReplayError> {
+        if checkpoint.height < configuration.activation_height.saturating_sub(1) {
+            return Err(CoreReplayError::InvalidActivationCheckpoint);
+        }
+        Ok(Self {
+            configuration,
+            tip: CoreReplayTip {
+                height: checkpoint.height,
+                block_hash: checkpoint.block_hash,
+            },
+            ironwood_tree_size: checkpoint.ironwood_tree_size,
+            history: BTreeMap::new(),
+        })
+    }
+
+    pub fn configuration(&self) -> CoreReplayConfiguration {
+        self.configuration
+    }
+    pub fn tip(&self) -> CoreReplayTip {
+        self.tip
+    }
+    pub fn ironwood_tree_size(&self) -> u32 {
+        self.ironwood_tree_size
+    }
+
+    pub fn oldest_rewind_height(&self) -> u32 {
+        self.history
+            .first_key_value()
+            .map_or(self.tip.height, |(_, prior)| prior.0.height)
+    }
+
+    pub fn retained_tip_at(&self, height: u32) -> Option<CoreReplayTip> {
+        if height == self.tip.height {
+            Some(self.tip)
+        } else {
+            height
+                .checked_add(1)
+                .and_then(|next| self.history.get(&next))
+                .map(|prior| prior.0)
+        }
+    }
+
+    pub fn apply_block(
+        &mut self,
+        block: &CoreCanonicalBlockInput,
+    ) -> Result<CorePositionedBlockContext, CoreReplayError> {
+        validate_block_header(self.tip, block)?;
+        let transactions = validate_block_transactions(block)?;
+        let action_count = transactions.iter().try_fold(0u32, |count, transaction| {
+            count
+                .checked_add(
+                    u32::try_from(transaction.ironwood_effects().commitments().len())
+                        .map_err(|_| CoreReplayError::ArithmeticOverflow)?,
+                )
+                .ok_or(CoreReplayError::ArithmeticOverflow)
+        })?;
+        let post_ironwood_tree_size = self
+            .ironwood_tree_size
+            .checked_add(action_count)
+            .ok_or(CoreReplayError::ArithmeticOverflow)?;
+        let prior = (self.tip, self.ironwood_tree_size);
+        self.tip = CoreReplayTip {
+            height: block.height,
+            block_hash: block.block_hash,
+        };
+        self.ironwood_tree_size = post_ironwood_tree_size;
+        self.history.insert(block.height, prior);
+        let oldest_undo = block
+            .height
+            .saturating_sub(self.configuration.retention_blocks)
+            .saturating_add(1);
+        self.history.retain(|height, _| *height >= oldest_undo);
+        Ok(CorePositionedBlockContext {
+            height: block.height,
+            block_hash: block.block_hash,
+            prev_block_hash: block.prev_block_hash,
+            branch_id: block.branch_id,
+            transactions,
+            pre_ironwood_tree_size: prior.1,
+            post_ironwood_tree_size,
+        })
+    }
+
+    pub fn rewind_to(&mut self, height: u32) -> Result<(), CoreRewindError> {
+        let activation_checkpoint_height = self.configuration.activation_height - 1;
+        if height < activation_checkpoint_height {
+            return Err(CoreRewindError::BeforeActivation);
+        }
+        if height > self.tip.height {
+            return Err(CoreRewindError::BeyondTip);
+        }
+        if height < self.oldest_rewind_height() {
+            return Err(CoreRewindError::SnapshotMissing);
+        }
+        while self.tip.height > height {
+            let (tip, size) = self
+                .history
+                .remove(&self.tip.height)
+                .ok_or(CoreRewindError::SnapshotMissing)?;
+            self.tip = tip;
+            self.ironwood_tree_size = size;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -659,31 +856,7 @@ impl CoreReplay {
         &mut self,
         block: &CoreCanonicalBlockInput,
     ) -> Result<CoreBlockContext, CoreReplayError> {
-        let expected_height = self
-            .tip
-            .height
-            .checked_add(1)
-            .ok_or(CoreReplayError::ArithmeticOverflow)?;
-        if block.height != expected_height {
-            return Err(CoreReplayError::NonSequentialHeight);
-        }
-        if block.prev_block_hash != self.tip.block_hash {
-            return Err(CoreReplayError::PredecessorMismatch);
-        }
-        if block
-            .transactions
-            .windows(2)
-            .any(|pair| pair[0].tx_index >= pair[1].tx_index)
-        {
-            return Err(CoreReplayError::NonCanonicalTxOrder);
-        }
-        // A committed tip must have a representable successor height. Check
-        // this before transaction or application processing so terminal-height
-        // failure precedence is generic and deterministic.
-        block
-            .height
-            .checked_add(1)
-            .ok_or(CoreReplayError::ArithmeticOverflow)?;
+        validate_block_header(self.tip, block)?;
 
         let mut frontier = self.ironwood_frontier.clone();
         let mut checkpoints = self.ironwood_checkpoints.clone();
@@ -693,15 +866,9 @@ impl CoreReplay {
             .copied()
             .collect::<Vec<_>>()
             .into_boxed_slice();
-        let mut transactions = Vec::with_capacity(block.transactions.len());
-
-        for input in &block.transactions {
-            let full_transaction_status = validate_full_transaction(block.branch_id, input)?;
-            for nullifier in &input.ironwood_nullifiers {
-                Option::<Nullifier>::from(Nullifier::from_bytes(nullifier))
-                    .ok_or(CoreReplayError::NonCanonicalNullifier)?;
-            }
-            for commitment in &input.ironwood_commitments {
+        let transactions = validate_block_transactions(block)?;
+        for transaction in transactions.iter() {
+            for commitment in transaction.ironwood_effects().commitments() {
                 let node =
                     Option::<MerkleHashOrchard>::from(MerkleHashOrchard::from_bytes(commitment))
                         .ok_or(CoreReplayError::InvalidIronwoodCommitment)?;
@@ -709,31 +876,6 @@ impl CoreReplay {
                     .append(node)
                     .map_err(|_| CoreReplayError::IronwoodAppendFailure)?;
             }
-            transactions.push(CoreTransactionContext {
-                height: block.height,
-                block_hash: block.block_hash,
-                tx_index: input.tx_index,
-                txid: input.txid,
-                ironwood_effects: CoreIronwoodEffects {
-                    nullifiers: input.ironwood_nullifiers.clone().into_boxed_slice(),
-                    commitments: input.ironwood_commitments.clone().into_boxed_slice(),
-                    extended: if input
-                        .full_transaction_acquisition
-                        .includes_extended_effects()
-                    {
-                        full_transaction_status
-                            .validated_full_transaction()
-                            .and_then(|transaction| {
-                                canonical_ironwood_bundle_effects(transaction.transaction())
-                            })
-                    } else {
-                        None
-                    },
-                },
-                full_transaction_acquisition: input.full_transaction_acquisition,
-                full_transaction_status,
-                carrier_candidate: input.full_transaction_acquisition.is_carrier_candidate(),
-            });
         }
 
         let tree_size =
@@ -772,7 +914,7 @@ impl CoreReplay {
             block_hash: block.block_hash,
             prev_block_hash: block.prev_block_hash,
             branch_id: block.branch_id,
-            transactions: transactions.into_boxed_slice(),
+            transactions,
             prior_ironwood_checkpoints,
             ironwood_checkpoint,
         })
@@ -814,6 +956,80 @@ impl CoreReplay {
         self.history = history;
         Ok(())
     }
+}
+
+fn validate_block_header(
+    tip: CoreReplayTip,
+    block: &CoreCanonicalBlockInput,
+) -> Result<(), CoreReplayError> {
+    let expected_height = tip
+        .height
+        .checked_add(1)
+        .ok_or(CoreReplayError::ArithmeticOverflow)?;
+    if block.height != expected_height {
+        return Err(CoreReplayError::NonSequentialHeight);
+    }
+    if block.prev_block_hash != tip.block_hash {
+        return Err(CoreReplayError::PredecessorMismatch);
+    }
+    if block
+        .transactions
+        .windows(2)
+        .any(|pair| pair[0].tx_index >= pair[1].tx_index)
+    {
+        return Err(CoreReplayError::NonCanonicalTxOrder);
+    }
+    block
+        .height
+        .checked_add(1)
+        .ok_or(CoreReplayError::ArithmeticOverflow)?;
+    Ok(())
+}
+
+fn validate_block_transactions(
+    block: &CoreCanonicalBlockInput,
+) -> Result<Box<[CoreTransactionContext]>, CoreReplayError> {
+    block
+        .transactions
+        .iter()
+        .map(|input| {
+            let full_transaction_status = validate_full_transaction(block.branch_id, input)?;
+            for nullifier in &input.ironwood_nullifiers {
+                Option::<Nullifier>::from(Nullifier::from_bytes(nullifier))
+                    .ok_or(CoreReplayError::NonCanonicalNullifier)?;
+            }
+            for commitment in &input.ironwood_commitments {
+                Option::<MerkleHashOrchard>::from(MerkleHashOrchard::from_bytes(commitment))
+                    .ok_or(CoreReplayError::InvalidIronwoodCommitment)?;
+            }
+            Ok(CoreTransactionContext {
+                height: block.height,
+                block_hash: block.block_hash,
+                tx_index: input.tx_index,
+                txid: input.txid,
+                ironwood_effects: CoreIronwoodEffects {
+                    nullifiers: input.ironwood_nullifiers.clone().into_boxed_slice(),
+                    commitments: input.ironwood_commitments.clone().into_boxed_slice(),
+                    extended: if input
+                        .full_transaction_acquisition
+                        .includes_extended_effects()
+                    {
+                        full_transaction_status
+                            .validated_full_transaction()
+                            .and_then(|transaction| {
+                                canonical_ironwood_bundle_effects(transaction.transaction())
+                            })
+                    } else {
+                        None
+                    },
+                },
+                full_transaction_acquisition: input.full_transaction_acquisition,
+                full_transaction_status,
+                carrier_candidate: input.full_transaction_acquisition.is_carrier_candidate(),
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(Vec::into_boxed_slice)
 }
 
 fn store_tip(tip: CoreReplayTip) -> StoredCoreTip {
