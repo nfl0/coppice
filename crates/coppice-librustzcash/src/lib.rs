@@ -10,10 +10,12 @@ mod reconcile;
 
 pub use chain::{
     CanonicalCompactTransactionSummary, CanonicalRuntime, CompactBlockAdapterError,
-    CompactBlockApplyError, FullTransactionSource, MAX_CANDIDATE_FULL_TX_BYTES,
-    MAX_FULL_TRANSACTION_BYTES, apply_compact_block,
-    apply_compact_block_with_additional_rendezvous, apply_compact_block_with_transaction_selector,
+    CompactBlockApplyError, FullTransactionSource, HistoricalTransactionAuthenticationError,
+    MAX_CANDIDATE_FULL_TX_BYTES, MAX_FULL_TRANSACTION_BYTES, apply_compact_block,
+    apply_compact_block_with_additional_rendezvous, apply_compact_block_with_rendezvous_policy,
+    apply_compact_block_with_transaction_selector, authenticate_compact_transaction,
     prepare_canonical_block, prepare_canonical_block_with_additional_rendezvous,
+    prepare_canonical_block_with_rendezvous_policy,
     prepare_canonical_block_with_transaction_selector,
 };
 pub use reconcile::{
