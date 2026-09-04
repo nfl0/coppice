@@ -9,14 +9,13 @@ smart-contract platform.
 
 An application declares:
 
-- one exact non-empty application identity, producing an `ApplicationId`;
-- an unsigned `application_version`, forming the routing key
-  `ApplicationId + application_version`;
+- one exact non-empty deployment identity, producing an `ApplicationId` that
+  selects exactly one immutable decoder and semantic ruleset;
 - an activation height no earlier than the Core runtime activation height;
 - application-owned state, state root, snapshot representation, rewind
   behavior, and required rewind retention.
 
-Core carries the application envelope as `CA01` inside CPV1. It validates the
+Core carries the application envelope as `CAPP` inside CPCF. It validates the
 transport and route, then exposes an application-scoped context. Before the
 application activates, the application receives canonical position but not
 native Core effects or routed messages. A later application can activate
@@ -47,8 +46,8 @@ unpublished.
 The generic context supplies the values needed to bind a proof to canonical
 history:
 
-- `ApplicationId` and application version are available from the application's
-  own `ApplicationDescriptor`;
+- the exact `ApplicationId` is available from the application's own
+  `ApplicationDescriptor`;
 - `CoreRuntimeId` is available from the validated Core parameters and can be
   retained as application configuration when deployment or network separation
   matters;
@@ -62,7 +61,7 @@ history:
 
 A protocol should freeze a domain-separated, canonical encoding of the subset
 it needs. A typical binding may include a protocol-specific domain,
-`CoreRuntimeId`, application ID/version, the exact `txid` and `tx_index`, an
+`CoreRuntimeId`, application ID, the exact `txid` and `tx_index`, an
 action index plus the corresponding canonical effects, an operation
 discriminator, and application public inputs. These are guidance, not a
 universal required tuple: an application must choose fields that prevent the

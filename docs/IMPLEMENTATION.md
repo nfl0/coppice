@@ -5,7 +5,7 @@ replacement for [`PROTOCOL_SPEC.md`](PROTOCOL_SPEC.md).
 
 ```text
 crates/coppice-core
-    identities, CPV1/CA01, Core replay, Ironwood effects, publishing,
+    identities, CPCF/CAPP, Core replay, Ironwood effects, publishing,
     application lifecycle, persistence metadata, and compositor
 crates/coppice-librustzcash
     hostile CompactBlock adaptation, selective full acquisition, and

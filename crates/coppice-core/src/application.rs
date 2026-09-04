@@ -1,11 +1,11 @@
-use crate::carrier::MAX_CPV1_PAYLOAD_LEN;
+use crate::carrier::MAX_CARRIER_PAYLOAD_LEN;
 use crate::hash;
 use crate::replay::{CoreBlockContext, CoreTransactionContext};
 
-pub const APPLICATION_ID_PERSONALIZATION: [u8; 16] = *b"CoppiceAppIdV1\0\0";
-pub const APPLICATION_ENVELOPE_MAGIC: [u8; 4] = *b"CA01";
-pub const APPLICATION_ENVELOPE_HEADER_LEN: usize = 4 + 32 + 2;
-pub const MAX_APPLICATION_ENVELOPE_LEN: usize = MAX_CPV1_PAYLOAD_LEN;
+pub const APPLICATION_ID_PERSONALIZATION: [u8; 16] = *b"CoppiceAppRoute\0";
+pub const APPLICATION_ENVELOPE_MAGIC: [u8; 4] = *b"CAPP";
+pub const APPLICATION_ENVELOPE_HEADER_LEN: usize = 4 + 32;
+pub const MAX_APPLICATION_ENVELOPE_LEN: usize = MAX_CARRIER_PAYLOAD_LEN;
 pub const MAX_APPLICATION_PAYLOAD_LEN: usize =
     MAX_APPLICATION_ENVELOPE_LEN - APPLICATION_ENVELOPE_HEADER_LEN;
 
@@ -31,8 +31,8 @@ pub enum ApplicationIdentityError {
     Empty,
 }
 
-/// Derives an application family identity from the exact bytes frozen by its
-/// application specification. Core performs no Unicode or textual
+/// Derives an exact application routing identity from the bytes frozen by one
+/// immutable application deployment. Core performs no Unicode or textual
 /// normalization.
 pub fn derive_application_id(
     canonical_application_identity: &[u8],
@@ -49,12 +49,13 @@ pub fn derive_application_id(
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ApplicationKey {
     pub id: ApplicationId,
-    pub version: u16,
 }
 
 impl ApplicationKey {
-    pub const fn new(id: ApplicationId, version: u16) -> Self {
-        Self { id, version }
+    /// Creates one exact routing key. The identifier must select a single
+    /// immutable decoder and semantic deployment.
+    pub const fn new(id: ApplicationId) -> Self {
+        Self { id }
     }
 }
 
@@ -137,7 +138,7 @@ impl ApplicationTransactionContext {
         &self.core
     }
 
-    /// The decoded CA01 payload addressed to this application, if any.
+    /// The decoded CAPP payload addressed to this application, if any.
     pub fn payload(&self) -> Option<&[u8]> {
         self.payload.as_deref()
     }
@@ -336,7 +337,7 @@ impl ApplicationDescriptor {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ApplicationEnvelopeV1 {
+pub struct ApplicationEnvelope {
     key: ApplicationKey,
     payload: Vec<u8>,
 }
@@ -348,7 +349,7 @@ pub enum ApplicationEnvelopeError {
     WrongMagic,
 }
 
-impl ApplicationEnvelopeV1 {
+impl ApplicationEnvelope {
     pub fn new(key: ApplicationKey, payload: Vec<u8>) -> Result<Self, ApplicationEnvelopeError> {
         if payload.len() > MAX_APPLICATION_PAYLOAD_LEN {
             return Err(ApplicationEnvelopeError::TooLong);
@@ -372,19 +373,13 @@ impl ApplicationEnvelopeV1 {
                 .try_into()
                 .expect("application ID slice has fixed length"),
         );
-        let version = u16::from_be_bytes(
-            bytes[36..38]
-                .try_into()
-                .expect("application version slice has fixed length"),
-        );
-        Self::new(ApplicationKey::new(id, version), bytes[38..].to_vec())
+        Self::new(ApplicationKey::new(id), bytes[36..].to_vec())
     }
 
     pub fn encode(&self) -> Vec<u8> {
         let mut output = Vec::with_capacity(APPLICATION_ENVELOPE_HEADER_LEN + self.payload.len());
         output.extend_from_slice(&APPLICATION_ENVELOPE_MAGIC);
         output.extend_from_slice(self.key.id.as_bytes());
-        output.extend_from_slice(&self.key.version.to_be_bytes());
         output.extend_from_slice(&self.payload);
         output
     }
@@ -416,6 +411,10 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(
+            hex::encode(APPLICATION_ID_PERSONALIZATION),
+            vector["personalization_hex"].as_str().unwrap()
+        );
+        assert_eq!(
             hex::encode(lower.to_bytes()),
             vector["expected_application_id_hex"].as_str().unwrap()
         );
@@ -427,7 +426,7 @@ mod tests {
 
     #[test]
     fn application_activation_is_independent_and_not_before_runtime() {
-        let key = ApplicationKey::new(derive_application_id(b"example.app").unwrap(), 1);
+        let key = ApplicationKey::new(derive_application_id(b"example.app").unwrap());
         let at_runtime = ApplicationDescriptor {
             key,
             activation_height: 10,
@@ -458,7 +457,7 @@ mod tests {
 
     #[test]
     fn application_snapshot_envelope_rejects_common_metadata_mismatches() {
-        let key = ApplicationKey::new(derive_application_id(b"example.snapshot").unwrap(), 1);
+        let key = ApplicationKey::new(derive_application_id(b"example.snapshot").unwrap());
         let descriptor = ApplicationDescriptor {
             key,
             activation_height: 10,
@@ -531,51 +530,69 @@ mod tests {
 
     #[test]
     fn envelope_round_trips_exact_payload_bytes() {
-        let key = ApplicationKey::new(derive_application_id(b"example.app").unwrap(), 0x0102);
+        let key = ApplicationKey::new(derive_application_id(b"example.app").unwrap());
         let payload = vec![0, 1, 2, 0, 0];
-        let envelope = ApplicationEnvelopeV1::new(key, payload.clone()).unwrap();
+        let envelope = ApplicationEnvelope::new(key, payload.clone()).unwrap();
         let encoded = envelope.encode();
-        assert_eq!(&encoded[..4], b"CA01");
-        assert_eq!(&encoded[36..38], &[0x01, 0x02]);
-        assert_eq!(ApplicationEnvelopeV1::decode(&encoded), Ok(envelope));
-        assert_eq!(&encoded[38..], payload);
+        assert_eq!(&encoded[..4], b"CAPP");
+        assert_eq!(ApplicationEnvelope::decode(&encoded), Ok(envelope));
+        assert_eq!(&encoded[36..], payload);
+    }
+
+    #[test]
+    fn frozen_envelope_vector_matches() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../test-vectors/core_transport.json"))
+                .unwrap();
+        let vector = &fixture["application_envelope"];
+        let application_id: [u8; 32] = hex::decode(vector["application_id_hex"].as_str().unwrap())
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let payload = hex::decode(vector["payload_hex"].as_str().unwrap()).unwrap();
+        let expected = hex::decode(vector["expected_envelope_hex"].as_str().unwrap()).unwrap();
+        let envelope = ApplicationEnvelope::new(
+            ApplicationKey::new(ApplicationId::from_bytes(application_id)),
+            payload,
+        )
+        .unwrap();
+        assert_eq!(envelope.encode(), expected);
+        assert_eq!(ApplicationEnvelope::decode(&expected), Ok(envelope));
     }
 
     #[test]
     fn envelope_boundaries_and_magic_are_strict() {
-        assert_eq!(MAX_CPV1_PAYLOAD_LEN, 16_093);
-        assert_eq!(MAX_APPLICATION_PAYLOAD_LEN, 16_055);
-        let key = ApplicationKey::new(derive_application_id(b"example.app").unwrap(), 1);
-        let largest = ApplicationEnvelopeV1::new(key, vec![0; MAX_APPLICATION_PAYLOAD_LEN])
+        assert_eq!(MAX_CARRIER_PAYLOAD_LEN, 16_093);
+        assert_eq!(MAX_APPLICATION_PAYLOAD_LEN, 16_057);
+        let key = ApplicationKey::new(derive_application_id(b"example.app").unwrap());
+        let largest = ApplicationEnvelope::new(key, vec![0; MAX_APPLICATION_PAYLOAD_LEN])
             .unwrap()
             .encode();
         assert_eq!(largest.len(), MAX_APPLICATION_ENVELOPE_LEN);
-        assert!(ApplicationEnvelopeV1::decode(&largest).is_ok());
+        assert!(ApplicationEnvelope::decode(&largest).is_ok());
         assert_eq!(
-            ApplicationEnvelopeV1::new(key, vec![0; MAX_APPLICATION_PAYLOAD_LEN + 1]),
+            ApplicationEnvelope::new(key, vec![0; MAX_APPLICATION_PAYLOAD_LEN + 1]),
             Err(ApplicationEnvelopeError::TooLong)
         );
         assert_eq!(
-            ApplicationEnvelopeV1::decode(&largest[..APPLICATION_ENVELOPE_HEADER_LEN - 1]),
+            ApplicationEnvelope::decode(&largest[..APPLICATION_ENVELOPE_HEADER_LEN - 1]),
             Err(ApplicationEnvelopeError::TooShort)
         );
         let mut wrong_magic = largest;
         wrong_magic[3] ^= 1;
         assert_eq!(
-            ApplicationEnvelopeV1::decode(&wrong_magic),
+            ApplicationEnvelope::decode(&wrong_magic),
             Err(ApplicationEnvelopeError::WrongMagic)
         );
     }
 
     #[test]
     fn empty_payload_is_structurally_canonical() {
-        let key = ApplicationKey::new(derive_application_id(b"example.app").unwrap(), 1);
-        let encoded = ApplicationEnvelopeV1::new(key, Vec::new())
-            .unwrap()
-            .encode();
+        let key = ApplicationKey::new(derive_application_id(b"example.app").unwrap());
+        let encoded = ApplicationEnvelope::new(key, Vec::new()).unwrap().encode();
         assert_eq!(encoded.len(), APPLICATION_ENVELOPE_HEADER_LEN);
         assert_eq!(
-            ApplicationEnvelopeV1::decode(&encoded).unwrap().payload(),
+            ApplicationEnvelope::decode(&encoded).unwrap().payload(),
             b""
         );
     }

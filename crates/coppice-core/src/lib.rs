@@ -12,5 +12,6 @@ mod hash;
 pub mod identity;
 pub mod publish;
 pub mod replay;
+pub mod ruleset;
 pub mod runtime;
 pub mod transport;

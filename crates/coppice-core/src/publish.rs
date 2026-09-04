@@ -1,10 +1,10 @@
-//! Generic CA01-in-CPV1 publication preparation.
+//! Generic CAPP-in-CPCF publication preparation.
 //!
 //! Wallet construction is host-specific, but every builder gets the exact
 //! envelope and ordered memo frames that Core will later inspect.
 
 use crate::{
-    application::{ApplicationEnvelopeError, ApplicationEnvelopeV1, ApplicationKey},
+    application::{ApplicationEnvelope, ApplicationEnvelopeError, ApplicationKey},
     identity::CoreRuntimeId,
     runtime::{ApplicationMessageStatus, RuntimeTransactionInspection, inspect_transaction},
     transport,
@@ -33,7 +33,7 @@ impl PreparedApplicationPublication {
         key: ApplicationKey,
         payload: Vec<u8>,
     ) -> Result<Self, PublicationPreparationError> {
-        let envelope = ApplicationEnvelopeV1::new(key, payload)
+        let envelope = ApplicationEnvelope::new(key, payload)
             .map_err(PublicationPreparationError::Envelope)?
             .encode();
         let frames = transport::encode_frames(runtime_id.to_bytes(), &envelope)

@@ -11,10 +11,15 @@ transition rules. Core remains proof-system agnostic and does not become a
 ZKVM, proof verifier, or second consensus layer.
 
 Core provides authenticated Ironwood replay, exact-receiver compact candidate
-detection, CPV1 transport, CA01 application routing, isolated application
+detection, CPCF transport, CAPP application routing, isolated application
 lifecycles, bounded rewind, snapshots, and a static multi-application
 compositor. It is not a blockchain, smart-contract VM, gas environment, or
 application registry.
+
+Core has no sequential protocol version. `ruleset/core.json` fingerprints the
+exact semantics and wire constants into `CoreRuntimeId`; each routed
+`ApplicationId` must likewise select one immutable application deployment.
+Local snapshot schema numbers remain independent cache-migration metadata.
 
 The Rust workspace uses the released Zakura cryptography packages
 (`zakura-orchard`, `zakura-primitives`, and `zakura-client-backend`) as one
@@ -27,7 +32,7 @@ only patched into applications that opt into that feature.
 ## Crates
 
 ```text
-coppice-core          canonical replay, CPV1/CA01, application contracts,
+coppice-core          canonical replay, CPCF/CAPP, application contracts,
                       compositor, persistence metadata, typed Ironwood effects
 coppice               public runtime facade and small deterministic testkit
 coppice-librustzcash  compact-block adapter and selective full-transaction host boundary
@@ -67,7 +72,7 @@ application atomically, uses deterministic static application ordering, and
 derives the effective common rewind horizon.
 
 An active application receives canonical transaction metadata and Core's public
-Ironwood effects, plus only the CA01 payload addressed to its exact key.
+Ironwood effects, plus only the CAPP payload addressed to its exact key.
 Pre-activation it receives position only. Unknown and malformed routes are
 never exposed as another application's payload.
 

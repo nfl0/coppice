@@ -5,20 +5,18 @@
     "P-RUNTIME-ID-001",
     "P-RUNTIME-ACTIVATION-001"
   ],
-  "hash": "unkeyed sequential BLAKE2b-256",
-  "label": "CoppiceRuntime1",
-  "personalization_hex": "436f707069636552756e74696d653100",
+  "hash": "domain-separated BLAKE2b-256",
+  "label": "CoppiceRuntimeId",
+  "personalization_hex": "436f707069636552756e74696d654964",
+  "core_ruleset_fingerprint_hex": "12f3e17be4a08f129f91139a038e538f5ac4040c3ae8801b8b13153255d01633",
   "input": {
-    "runtime_protocol_id_hex": "636f70706963652e72756e74696d65",
-    "runtime_protocol_version": 1,
-    "zcash_network_domain_hex": "636f70706963652d72756e74696d652d726567746573742d7631",
+    "zcash_network_domain_hex": "636f70706963652d72756e74696d652d72656774657374",
     "zcash_network": "Regtest",
     "zcash_network_code": 3,
     "runtime_activation_height": 10,
-    "carrier_protocol_id_hex": "43505631",
     "rendezvous_ivk_hex": "65deb2b3ee7ac69020543f40f21122cb6dc1f4201a329fcdf9d5e3bb2dfbbabe29d542352fe36c3c7b24c2989dc9d0000b9e04f444e05dc4538bde395c0e6008",
     "rendezvous_receiver_hex": "9ec59e4d447ba285086cc3456cadf62004a19b6a7989c726daaa9944a6cdbf25f7bfa51afa15b66da53881"
   },
-  "canonical_preimage_hex": "000f636f70706963652e72756e74696d650001001a636f70706963652d72756e74696d652d726567746573742d7631030000000a000443505631004065deb2b3ee7ac69020543f40f21122cb6dc1f4201a329fcdf9d5e3bb2dfbbabe29d542352fe36c3c7b24c2989dc9d0000b9e04f444e05dc4538bde395c0e6008002b9ec59e4d447ba285086cc3456cadf62004a19b6a7989c726daaa9944a6cdbf25f7bfa51afa15b66da53881",
-  "expected_core_runtime_id_hex": "6d9370bb8eb3f6cf28fc2c1a943196b630233eb89d03625877910a49320a8cb0"
+  "canonical_preimage_hex": "4352494412f3e17be4a08f129f91139a038e538f5ac4040c3ae8801b8b13153255d016330017636f70706963652d72756e74696d652d72656774657374030000000a004065deb2b3ee7ac69020543f40f21122cb6dc1f4201a329fcdf9d5e3bb2dfbbabe29d542352fe36c3c7b24c2989dc9d0000b9e04f444e05dc4538bde395c0e6008002b9ec59e4d447ba285086cc3456cadf62004a19b6a7989c726daaa9944a6cdbf25f7bfa51afa15b66da53881",
+  "expected_core_runtime_id_hex": "fa787a8cd3121b698e549c9a3e551e77c9888fb707830303cba0319ba2481cf7"
 }

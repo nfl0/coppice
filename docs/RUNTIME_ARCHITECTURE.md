@@ -15,8 +15,8 @@ host CompactBlocks
 `CoreRuntime` is application-blind. It validates height, predecessor, ordered
 transaction positions, compact/full transaction consistency, and Ironwood
 frontier updates. Carrier candidates are detected through the configured
-receiver, not IVK decryption alone. CPV1 is reconstructed only from exact
-rendezvous actions and CA01 is decoded once by Core.
+receiver, not IVK decryption alone. CPCF is reconstructed only from exact
+rendezvous actions and CAPP is decoded once by Core.
 
 `CoppiceRuntime` statically composes one or more `CoppiceApplication`s. It
 does not sort host data or callbacks: tuple order is the declared deterministic
@@ -28,7 +28,7 @@ tip-consistent boundary.
 
 Each active application gets `ApplicationTransactionContext` values carrying a
 canonical Core transaction and, independently, an optional payload addressed
-to its exact `ApplicationKey`. It never receives another application's CA01
+to its exact deployment-specific `ApplicationId`. It never receives another application's CAPP
 payload. Before its activation it receives block position only; Core effects
 and all application payloads are unavailable.
 
@@ -60,13 +60,13 @@ signed bundle value balance. Proofs, signatures, ciphertexts, private note
 data, viewing keys, memos, recipients, values, ownership, and mempool facts
 are not application state input.
 
-The generic publisher prepares `ApplicationKey + payload` as CA01 inside CPV1
+The generic publisher prepares `ApplicationId + payload` as CAPP inside CPCF
 and can verify a constructed transaction using the same exact-receiver Core
 inspection path. Wallet-specific fees, input selection, authorisation, and
 application policy live above it.
 
-For proof binding, an application can use its own descriptor's
-`ApplicationId`/version, the already-public `CoreRuntimeId` captured from the
+For proof binding, an application can use its own descriptor's exact
+`ApplicationId`, the already-public `CoreRuntimeId` captured from the
 validated Core parameters, the canonical transaction position and identity,
 the relevant ordered Ironwood effects, an operation discriminator, and its
 own public fields. The application must freeze the exact subset and encoding

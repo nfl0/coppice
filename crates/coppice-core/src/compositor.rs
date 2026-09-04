@@ -57,7 +57,7 @@ pub trait HostedApplications: Clone {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ApplicationHostError {
-    DuplicateApplicationKey,
+    DuplicateApplicationId,
     ApplicationActivationMismatch { key: ApplicationDescriptor },
     TipMismatch,
     RetainedHistoryMismatch,
@@ -320,7 +320,7 @@ impl<A: HostedApplications> CoppiceRuntime<A> {
                 .iter()
                 .any(|prior| prior.key == descriptor.key)
         }) {
-            return Err(ApplicationHostError::DuplicateApplicationKey);
+            return Err(ApplicationHostError::DuplicateApplicationId);
         }
         let runtime_activation = core.parameters().parameters().runtime_activation_height;
         if let Some(descriptor) = descriptors
@@ -492,12 +492,9 @@ mod tests {
 
     fn core(retention_blocks: u32) -> CoreRuntime {
         let parameters = CoreRuntimeParameters {
-            runtime_protocol_id: b"coppice.runtime".to_vec(),
-            runtime_protocol_version: 1,
-            zcash_network_domain: b"coppice-runtime-regtest-v1".to_vec(),
+            zcash_network_domain: b"coppice-runtime-regtest".to_vec(),
             zcash_network: ZcashNetwork::Regtest,
             runtime_activation_height: ACTIVATION_HEIGHT,
-            carrier_protocol_id: b"CPV1".to_vec(),
             rendezvous_ivk: hex::decode(
                 "65deb2b3ee7ac69020543f40f21122cb6dc1f4201a329fcdf9d5e3bb2dfbbabe29d542352fe36c3c7b24c2989dc9d0000b9e04f444e05dc4538bde395c0e6008",
             )
@@ -552,7 +549,7 @@ mod tests {
         fn new(id: u8, activation_height: u32, tip: ApplicationTip, retention_blocks: u32) -> Self {
             Self {
                 descriptor: ApplicationDescriptor {
-                    key: ApplicationKey::new(ApplicationId::from_bytes([id; 32]), 1),
+                    key: ApplicationKey::new(ApplicationId::from_bytes([id; 32])),
                     activation_height,
                 },
                 tip,
@@ -837,7 +834,7 @@ mod tests {
         let duplicate = TestApplication::new(1, ACTIVATION_HEIGHT, tip, 2);
         assert!(matches!(
             CoppiceRuntime::new(core.clone(), (duplicate.clone(), duplicate)),
-            Err(ApplicationHostError::DuplicateApplicationKey)
+            Err(ApplicationHostError::DuplicateApplicationId)
         ));
 
         let a = TestApplication::new(1, ACTIVATION_HEIGHT, tip, 2);

@@ -1,9 +1,9 @@
-//! Canonical CPV1 framing owned by the generic runtime.
+//! Canonical carrier framing owned by the generic runtime.
 
 use crate::{carrier, hash};
 
 pub const ZIP302_ARBITRARY_DATA: u8 = 0xff;
-pub const MAGIC: &[u8; 4] = b"CPV1";
+pub const MAGIC: &[u8; 4] = b"CPCF";
 pub const START_FRAME_TYPE: u8 = 0x00;
 pub const CONT_FRAME_TYPE: u8 = 0x01;
 
@@ -14,7 +14,7 @@ const START_RUNTIME_OFFSET: usize = FRAME_INDEX_OFFSET + 1;
 const START_FRAME_COUNT_OFFSET: usize = START_RUNTIME_OFFSET + 32;
 const START_PAYLOAD_LENGTH_OFFSET: usize = START_FRAME_COUNT_OFFSET + 1;
 const START_DIGEST_OFFSET: usize = START_PAYLOAD_LENGTH_OFFSET + 2;
-const PAYLOAD_DIGEST_PERSONALIZATION: [u8; 16] = *b"CoppicePayloadV1";
+const PAYLOAD_DIGEST_PERSONALIZATION: [u8; 16] = *b"CoppicePayloadId";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
@@ -42,16 +42,16 @@ pub fn required_frames(payload_len: usize) -> Result<usize, Error> {
     if payload_len == 0 {
         return Err(Error::EmptyPayload);
     }
-    if payload_len > carrier::MAX_CPV1_PAYLOAD_LEN {
+    if payload_len > carrier::MAX_CARRIER_PAYLOAD_LEN {
         return Err(Error::PayloadTooLarge);
     }
-    let count = if payload_len <= carrier::CPV1_START_CHUNK_CAPACITY {
+    let count = if payload_len <= carrier::CARRIER_START_CHUNK_CAPACITY {
         1
     } else {
-        1 + (payload_len - carrier::CPV1_START_CHUNK_CAPACITY)
-            .div_ceil(carrier::CPV1_CONTINUATION_CHUNK_CAPACITY)
+        1 + (payload_len - carrier::CARRIER_START_CHUNK_CAPACITY)
+            .div_ceil(carrier::CARRIER_CONTINUATION_CHUNK_CAPACITY)
     };
-    if count == 0 || count > usize::from(carrier::CPV1_MAX_FRAMES) {
+    if count == 0 || count > usize::from(carrier::MAX_CARRIER_FRAMES) {
         return Err(Error::FrameCount);
     }
     Ok(count)
@@ -65,7 +65,7 @@ pub fn encode_frames(runtime_id: [u8; 32], payload: &[u8]) -> Result<Vec<[u8; 51
     let frame_count = required_frames(payload.len())?;
     let digest = payload_digest(payload);
     let mut frames = Vec::with_capacity(frame_count);
-    let start_chunk_len = payload.len().min(carrier::CPV1_START_CHUNK_CAPACITY);
+    let start_chunk_len = payload.len().min(carrier::CARRIER_START_CHUNK_CAPACITY);
     let mut start = [0u8; 512];
     write_prefix(&mut start, START_FRAME_TYPE, 0);
     start[START_RUNTIME_OFFSET..START_RUNTIME_OFFSET + runtime_id.len()]
@@ -74,19 +74,19 @@ pub fn encode_frames(runtime_id: [u8; 32], payload: &[u8]) -> Result<Vec<[u8; 51
     start[START_PAYLOAD_LENGTH_OFFSET..START_PAYLOAD_LENGTH_OFFSET + 2]
         .copy_from_slice(&(payload.len() as u16).to_be_bytes());
     start[START_DIGEST_OFFSET..START_DIGEST_OFFSET + digest.len()].copy_from_slice(&digest);
-    start[carrier::CPV1_START_FRAME_HEADER_LEN
-        ..carrier::CPV1_START_FRAME_HEADER_LEN + start_chunk_len]
+    start[carrier::CARRIER_START_FRAME_HEADER_LEN
+        ..carrier::CARRIER_START_FRAME_HEADER_LEN + start_chunk_len]
         .copy_from_slice(&payload[..start_chunk_len]);
     frames.push(start);
 
     let mut offset = start_chunk_len;
     while offset < payload.len() {
         let frame_index = u8::try_from(frames.len()).map_err(|_| Error::FrameCount)?;
-        let chunk_len = (payload.len() - offset).min(carrier::CPV1_CONTINUATION_CHUNK_CAPACITY);
+        let chunk_len = (payload.len() - offset).min(carrier::CARRIER_CONTINUATION_CHUNK_CAPACITY);
         let mut continuation = [0u8; 512];
         write_prefix(&mut continuation, CONT_FRAME_TYPE, frame_index);
-        continuation[carrier::CPV1_CONTINUATION_FRAME_HEADER_LEN
-            ..carrier::CPV1_CONTINUATION_FRAME_HEADER_LEN + chunk_len]
+        continuation[carrier::CARRIER_CONTINUATION_FRAME_HEADER_LEN
+            ..carrier::CARRIER_CONTINUATION_FRAME_HEADER_LEN + chunk_len]
             .copy_from_slice(&payload[offset..offset + chunk_len]);
         frames.push(continuation);
         offset += chunk_len;
@@ -101,7 +101,7 @@ pub fn reconstruct_frames(
     if frames.is_empty() {
         return Err(Error::NoFrames);
     }
-    if frames.len() > usize::from(carrier::CPV1_MAX_FRAMES) {
+    if frames.len() > usize::from(carrier::MAX_CARRIER_FRAMES) {
         return Err(Error::FrameCount);
     }
     let mut indexed: [Option<&[u8; 512]>; 32] = [None; 32];
@@ -110,7 +110,7 @@ pub fn reconstruct_frames(
         ensure_prefix(frame)?;
         let kind = frame[FRAME_TYPE_OFFSET];
         let index = frame[FRAME_INDEX_OFFSET];
-        if index >= carrier::CPV1_MAX_FRAMES {
+        if index >= carrier::MAX_CARRIER_FRAMES {
             return Err(Error::IndexOutOfRange);
         }
         match kind {
@@ -147,29 +147,29 @@ pub fn reconstruct_frames(
     let digest: [u8; 32] = start[START_DIGEST_OFFSET..START_DIGEST_OFFSET + 32]
         .try_into()
         .map_err(|_| Error::WrongMagic)?;
-    let start_chunk_len = payload_length.min(carrier::CPV1_START_CHUNK_CAPACITY);
+    let start_chunk_len = payload_length.min(carrier::CARRIER_START_CHUNK_CAPACITY);
     let mut payload = Vec::with_capacity(payload_length);
     payload.extend_from_slice(
-        &start[carrier::CPV1_START_FRAME_HEADER_LEN
-            ..carrier::CPV1_START_FRAME_HEADER_LEN + start_chunk_len],
+        &start[carrier::CARRIER_START_FRAME_HEADER_LEN
+            ..carrier::CARRIER_START_FRAME_HEADER_LEN + start_chunk_len],
     );
     let mut offset = start_chunk_len;
     for frame in indexed.iter().take(frame_count).skip(1) {
-        let frame = frame.expect("complete CPV1 frame set checked above");
+        let frame = frame.expect("complete CPCF frame set checked above");
         let remaining = payload_length
             .checked_sub(offset)
             .ok_or(Error::FrameCountMismatch)?;
-        let chunk_len = remaining.min(carrier::CPV1_CONTINUATION_CHUNK_CAPACITY);
+        let chunk_len = remaining.min(carrier::CARRIER_CONTINUATION_CHUNK_CAPACITY);
         if chunk_len == 0 {
             return Err(Error::FrameCountMismatch);
         }
         ensure_zero_padding(
             frame,
-            carrier::CPV1_CONTINUATION_FRAME_HEADER_LEN + chunk_len,
+            carrier::CARRIER_CONTINUATION_FRAME_HEADER_LEN + chunk_len,
         )?;
         payload.extend_from_slice(
-            &frame[carrier::CPV1_CONTINUATION_FRAME_HEADER_LEN
-                ..carrier::CPV1_CONTINUATION_FRAME_HEADER_LEN + chunk_len],
+            &frame[carrier::CARRIER_CONTINUATION_FRAME_HEADER_LEN
+                ..carrier::CARRIER_CONTINUATION_FRAME_HEADER_LEN + chunk_len],
         );
         offset += chunk_len;
     }
@@ -198,7 +198,7 @@ pub fn start_metadata(
         return Err(Error::WrongRuntime);
     }
     let frame_count = usize::from(memo[START_FRAME_COUNT_OFFSET]);
-    if frame_count == 0 || frame_count > usize::from(carrier::CPV1_MAX_FRAMES) {
+    if frame_count == 0 || frame_count > usize::from(carrier::MAX_CARRIER_FRAMES) {
         return Err(Error::FrameCount);
     }
     let payload_length = usize::from(u16::from_be_bytes([
@@ -208,8 +208,8 @@ pub fn start_metadata(
     if required_frames(payload_length)? != frame_count {
         return Err(Error::FrameCountMismatch);
     }
-    let chunk_len = payload_length.min(carrier::CPV1_START_CHUNK_CAPACITY);
-    ensure_zero_padding(memo, carrier::CPV1_START_FRAME_HEADER_LEN + chunk_len)?;
+    let chunk_len = payload_length.min(carrier::CARRIER_START_CHUNK_CAPACITY);
+    ensure_zero_padding(memo, carrier::CARRIER_START_FRAME_HEADER_LEN + chunk_len)?;
     Ok((frame_count, payload_length))
 }
 
@@ -249,7 +249,7 @@ mod tests {
 
     #[test]
     fn framing_round_trips_boundaries_and_is_runtime_bound() {
-        for length in [1, 438, 439, 944, carrier::MAX_CPV1_PAYLOAD_LEN] {
+        for length in [1, 438, 439, 944, carrier::MAX_CARRIER_PAYLOAD_LEN] {
             let payload = (0..length)
                 .map(|index| (index % 251) as u8)
                 .collect::<Vec<_>>();

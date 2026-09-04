@@ -1,10 +1,8 @@
-use crate::hash;
+use crate::{hash, ruleset::ruleset_fingerprint};
 use orchard::keys::IncomingViewingKey;
 
 /// BLAKE2b-256 personalization for generic runtime identities.
-pub const CORE_RUNTIME_ID_PERSONALIZATION: [u8; 16] = *b"CoppiceRuntime1\0";
-pub const CORE_RUNTIME_PROTOCOL_ID_V1: &[u8] = b"coppice.runtime";
-pub const CORE_RUNTIME_PROTOCOL_VERSION_V1: u16 = 1;
+pub const CORE_RUNTIME_ID_PERSONALIZATION: [u8; 16] = *b"CoppiceRuntimeId";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CoreRuntimeId([u8; 32]);
@@ -47,23 +45,17 @@ impl ZcashNetwork {
 /// without changing the runtime identity.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CoreRuntimeParameters {
-    pub runtime_protocol_id: Vec<u8>,
-    pub runtime_protocol_version: u16,
     pub zcash_network_domain: Vec<u8>,
     pub zcash_network: ZcashNetwork,
     pub runtime_activation_height: u32,
-    pub carrier_protocol_id: Vec<u8>,
     pub rendezvous_ivk: [u8; 64],
     pub rendezvous_receiver: [u8; 43],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CoreRuntimeIdentityError {
-    EmptyRuntimeProtocolId,
-    RuntimeProtocolVersion,
     EmptyZcashNetworkDomain,
     RuntimeActivationHeight,
-    EmptyCarrierProtocolId,
     LengthTooLarge,
     InvalidRendezvousIvk,
     InvalidRendezvousReceiver,
@@ -91,26 +83,14 @@ impl CoreRuntimeParameters {
     }
 
     fn validate_structure(&self) -> Result<(), CoreRuntimeIdentityError> {
-        if self.runtime_protocol_id.is_empty() {
-            return Err(CoreRuntimeIdentityError::EmptyRuntimeProtocolId);
-        }
-        if self.runtime_protocol_version == 0 {
-            return Err(CoreRuntimeIdentityError::RuntimeProtocolVersion);
-        }
         if self.zcash_network_domain.is_empty() {
             return Err(CoreRuntimeIdentityError::EmptyZcashNetworkDomain);
         }
         if self.runtime_activation_height == 0 {
             return Err(CoreRuntimeIdentityError::RuntimeActivationHeight);
         }
-        if self.carrier_protocol_id.is_empty() {
-            return Err(CoreRuntimeIdentityError::EmptyCarrierProtocolId);
-        }
-
         for len in [
-            self.runtime_protocol_id.len(),
             self.zcash_network_domain.len(),
-            self.carrier_protocol_id.len(),
             self.rendezvous_ivk.len(),
             self.rendezvous_receiver.len(),
         ] {
@@ -146,12 +126,11 @@ impl ValidatedCoreRuntimeParameters {
         }
 
         let mut output = Vec::new();
-        put_bytes(&mut output, &self.parameters.runtime_protocol_id);
-        output.extend_from_slice(&self.parameters.runtime_protocol_version.to_be_bytes());
+        output.extend_from_slice(b"CRID");
+        output.extend_from_slice(&ruleset_fingerprint());
         put_bytes(&mut output, &self.parameters.zcash_network_domain);
         output.push(self.parameters.zcash_network.code());
         output.extend_from_slice(&self.parameters.runtime_activation_height.to_be_bytes());
-        put_bytes(&mut output, &self.parameters.carrier_protocol_id);
         put_bytes(&mut output, &self.parameters.rendezvous_ivk);
         put_bytes(&mut output, &self.parameters.rendezvous_receiver);
         output
@@ -173,13 +152,6 @@ mod tests {
                 .unwrap();
         let input = &fixture["input"];
         let parameters = CoreRuntimeParameters {
-            runtime_protocol_id: hex::decode(input["runtime_protocol_id_hex"].as_str().unwrap())
-                .unwrap(),
-            runtime_protocol_version: input["runtime_protocol_version"]
-                .as_u64()
-                .unwrap()
-                .try_into()
-                .unwrap(),
             zcash_network_domain: hex::decode(input["zcash_network_domain_hex"].as_str().unwrap())
                 .unwrap(),
             zcash_network: match input["zcash_network"].as_str().unwrap() {
@@ -192,8 +164,6 @@ mod tests {
                 .as_u64()
                 .unwrap()
                 .try_into()
-                .unwrap(),
-            carrier_protocol_id: hex::decode(input["carrier_protocol_id_hex"].as_str().unwrap())
                 .unwrap(),
             rendezvous_ivk: hex::decode(input["rendezvous_ivk_hex"].as_str().unwrap())
                 .unwrap()
@@ -216,6 +186,10 @@ mod tests {
             fixture["personalization_hex"].as_str().unwrap()
         );
         assert_eq!(
+            hex::encode(ruleset_fingerprint()),
+            fixture["core_ruleset_fingerprint_hex"].as_str().unwrap()
+        );
+        assert_eq!(
             hex::encode(validated.canonical_preimage()),
             fixture["canonical_preimage_hex"].as_str().unwrap()
         );
@@ -232,12 +206,6 @@ mod tests {
         let mut mutations = Vec::new();
 
         let mut changed = parameters.clone();
-        changed.runtime_protocol_id.push(b'2');
-        mutations.push(changed);
-        let mut changed = parameters.clone();
-        changed.runtime_protocol_version += 1;
-        mutations.push(changed);
-        let mut changed = parameters.clone();
         changed.zcash_network_domain.push(b'2');
         mutations.push(changed);
         let mut changed = parameters.clone();
@@ -246,10 +214,6 @@ mod tests {
         let mut changed = parameters.clone();
         changed.runtime_activation_height += 1;
         mutations.push(changed);
-        let mut changed = parameters.clone();
-        changed.carrier_protocol_id.push(b'2');
-        mutations.push(changed);
-
         for changed in mutations {
             assert_ne!(changed.validate().unwrap().core_runtime_id(), expected);
         }
@@ -275,18 +239,6 @@ mod tests {
         let (_, parameters) = vector_parameters();
 
         let mut changed = parameters.clone();
-        changed.runtime_protocol_id.clear();
-        assert_eq!(
-            changed.validate(),
-            Err(CoreRuntimeIdentityError::EmptyRuntimeProtocolId)
-        );
-        let mut changed = parameters.clone();
-        changed.runtime_protocol_version = 0;
-        assert_eq!(
-            changed.validate(),
-            Err(CoreRuntimeIdentityError::RuntimeProtocolVersion)
-        );
-        let mut changed = parameters.clone();
         changed.zcash_network_domain.clear();
         assert_eq!(
             changed.validate(),
@@ -298,15 +250,8 @@ mod tests {
             changed.validate(),
             Err(CoreRuntimeIdentityError::RuntimeActivationHeight)
         );
-        let mut changed = parameters;
-        changed.carrier_protocol_id.clear();
-        assert_eq!(
-            changed.validate(),
-            Err(CoreRuntimeIdentityError::EmptyCarrierProtocolId)
-        );
-
         let (_, mut changed) = vector_parameters();
-        changed.runtime_protocol_id = vec![0; usize::from(u16::MAX) + 1];
+        changed.zcash_network_domain = vec![0; usize::from(u16::MAX) + 1];
         assert_eq!(
             changed.validate(),
             Err(CoreRuntimeIdentityError::LengthTooLarge)

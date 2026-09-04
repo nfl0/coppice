@@ -1,4 +1,4 @@
-//! Generic CPV1 transport limits and rendezvous candidate detection.
+//! Generic Coppice carrier limits and rendezvous candidate detection.
 
 use crate::identity::ValidatedCoreRuntimeParameters;
 use orchard::{
@@ -8,16 +8,14 @@ use orchard::{
 };
 use zcash_note_encryption::{try_compact_note_decryption, try_note_decryption};
 
-pub const CPV1_PROTOCOL_ID: &[u8] = b"CPV1";
+pub const MAX_CARRIER_FRAMES: u8 = 32;
+pub const CARRIER_START_FRAME_HEADER_LEN: usize = 74;
+pub const CARRIER_START_CHUNK_CAPACITY: usize = 438;
+pub const CARRIER_CONTINUATION_FRAME_HEADER_LEN: usize = 7;
+pub const CARRIER_CONTINUATION_CHUNK_CAPACITY: usize = 505;
 
-pub const CPV1_MAX_FRAMES: u8 = 32;
-pub const CPV1_START_FRAME_HEADER_LEN: usize = 74;
-pub const CPV1_START_CHUNK_CAPACITY: usize = 438;
-pub const CPV1_CONTINUATION_FRAME_HEADER_LEN: usize = 7;
-pub const CPV1_CONTINUATION_CHUNK_CAPACITY: usize = 505;
-
-/// Maximum payload authenticated by one canonical CPV1 bulletin.
-pub const MAX_CPV1_PAYLOAD_LEN: usize = 16_093;
+/// Maximum payload authenticated by one canonical Coppice bulletin.
+pub const MAX_CARRIER_PAYLOAD_LEN: usize = 16_093;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RendezvousError {
@@ -90,7 +88,7 @@ impl CoreRendezvous {
 
     /// Returns the memo only when a full Ironwood action decrypts to the exact
     /// configured receiver. This is the authoritative full-transaction
-    /// boundary used before CPV1 routing.
+    /// boundary used before CPCF routing.
     pub fn action_note<A>(&self, action: &orchard::Action<A>) -> Option<RendezvousNote> {
         try_note_decryption(
             &IronwoodDomain::for_action(action),

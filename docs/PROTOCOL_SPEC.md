@@ -1,6 +1,6 @@
 # Coppice Core Runtime Protocol Specification
 
-**Status:** normative Core v1 specification; pre-release runtime API
+**Status:** normative undeployed Core specification; pre-release runtime API
 **Scope:** generic Zcash/Ironwood deterministic application hosting
 
 This document is the normative authority for Coppice Core. Coppice Names is an
@@ -26,41 +26,45 @@ not canonical application inputs.
 
 ## 2. Core identity and rendezvous
 
-The Core protocol identity is `coppice.runtime`, version `1`. A validated
-`CoreRuntimeParameters` contains, in canonical order:
+Core has no sequential protocol version. Its exact semantic and wire identity
+is the BLAKE2b-256 fingerprint of `ruleset/core.json`. A validated
+`CoreRuntimeParameters` contributes the deployment-specific fields below, in
+canonical order:
 
 ```text
-runtime_protocol_id     : length_u16 || bytes
-runtime_protocol_version: u16
+magic                   : CRID
+core_ruleset_fingerprint: 32 bytes
 zcash_network_domain    : length_u16 || bytes
 zcash_network_code      : u8 (Main=1, Test=2, Regtest=3)
 runtime_activation      : u32
-carrier_protocol_id     : length_u16 || bytes
 rendezvous_ivk          : length_u16 || 64 bytes
 rendezvous_receiver     : length_u16 || 43 bytes
 ```
 
 `CoreRuntimeId` is unkeyed BLAKE2b-256 over that preimage with the exact
-16-byte personalization `CoppiceRuntime1\0`. Raw parameters must first be
+16-byte personalization `CoppiceRuntimeId`. Raw parameters must first be
 structurally validated, parsed as an Ironwood IVK/address pair, and checked
 for the exact receiver/IVK relationship. Application IDs and application
 activation heights are not in this preimage.
 
 The qualification identity vector is retained at
 `test-vectors/core_runtime_id.json`. Its regtest context uses activation 10,
-carrier `CPV1`, and the exact rendezvous bytes recorded by that vector.
+the exact Core ruleset fingerprint, and the rendezvous bytes recorded by that
+vector.
 
 The configured receiver is part of the rendezvous invariant. Successful
 compact decryption under the IVK is insufficient when it yields another
 diversified receiver; candidate detection requires byte-for-byte equality with
 the configured receiver.
 
-## 3. CPV1 transport and CA01 envelopes
+## 3. CPCF transport and CAPP envelopes
 
-Core owns the generic CPV1 framing and CA01 application envelope. CPV1 uses:
+Core owns the generic carrier framing and application envelope. Their stable
+domain markers are `CPCF` and `CAPP`; they are not upgrade counters. The
+carrier uses:
 
 ```text
-protocol magic                         CPV1
+protocol magic                         CPCF
 frame size                             512 bytes
 maximum frames                         32
 start header / payload capacity        74 / 438 bytes
@@ -73,28 +77,29 @@ missing, out-of-range, malformed, and nonzero-padding bytes, and authenticate
 the runtime ID and payload digest before routing. The configured exact
 rendezvous is checked before any frame is considered.
 
-The CA01 envelope is:
+The application envelope is:
 
 ```text
-CA01 || application_id[32] || application_version_u16_be || payload
+CAPP || application_id[32] || payload
 ```
 
-`ApplicationId` is BLAKE2b-256 with personalization `CoppiceAppIdV1\0\0`
+`ApplicationId` is BLAKE2b-256 with personalization `CoppiceAppRoute\0`
 over the application's exact nonempty identity bytes. Core performs no text
-normalization. The envelope and payload are bounded by CPV1's maximum payload.
-Unknown application IDs, versions, and malformed envelopes are isolated
-routed/application outcomes; they do not alter another application's state.
+normalization. The envelope and payload are bounded by CPCF's maximum payload.
+Unknown application IDs and malformed envelopes are isolated routed/application
+outcomes; they do not alter another application's state. Each application ID
+MUST select exactly one immutable decoder and semantic deployment.
 
 ## 4. Application lifecycle and routing isolation
 
-An application declares an `ApplicationDescriptor` containing an
-`ApplicationKey` (ID plus version) and an activation height no earlier than
+An application declares an `ApplicationDescriptor` containing an exact
+`ApplicationKey` (one `ApplicationId`) and an activation height no earlier than
 Core activation. `RuntimeBlockContext::for_application` (and the compositor's
 equivalent context) delivers:
 
 * the canonical position for every processed block;
 * validated Core effects and messages only after that application's activation;
-* at most the CA01 payload whose exact key matches that descriptor.
+* at most the CAPP payload whose exact key matches that descriptor.
 
 Before activation, effects and routed messages are unavailable. A message
 routed to another application, an unknown route, a malformed envelope, or a
@@ -104,7 +109,7 @@ not inspect a global envelope list to enforce their own key isolation.
 `CoppiceRuntime<A>` applies Core once, derives one isolated context per hosted
 application, stages Core and every application on clones, and publishes the
 staged pair only after all applications succeed and their tips match Core.
-Duplicate application keys are rejected at construction. Applications remain
+Duplicate application IDs are rejected at construction. Applications remain
 independently activated; the composed host derives the maximum rewind
 retention required by its members.
 
@@ -218,8 +223,8 @@ a fork or silently resets state.
 
 ## 8. Generic publication
 
-The Core publisher accepts an `ApplicationKey` and payload bytes, constructs
-the exact CA01 envelope, frames it as CPV1 using the configured Core runtime
+The Core publisher accepts an exact `ApplicationKey` and payload bytes, constructs
+the exact CAPP envelope, frames it as CPCF using the configured Core runtime
 ID, and targets the exact Core rendezvous. It exposes the same transport
 inspection used by replay routing so an external builder can verify the
 constructed transaction before broadcast. Bond selection, owner authorization,
@@ -229,8 +234,7 @@ pending registrations, and other policy belong to the consuming application.
 
 This file and the generic Rust APIs are the Core authority. Generic vectors
 under `coppice/test-vectors/` cover Core identity and replay/rewind properties.
-Names-specific frozen envelopes, carrier frames, operation bytes, bond proofs,
-and state-root vectors live under `coppice-names/test-vectors/`; their bytes
-were copied without regeneration during extraction. The Names specification
-references this Core specification rather than redefining Core wire or replay
-semantics.
+Names-specific envelopes, carrier frames, operation bytes, bond proofs, and
+state-root vectors live under `coppice-names/test-vectors/`. The Names
+specification references this Core specification rather than redefining Core
+wire or replay semantics.

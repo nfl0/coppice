@@ -1,16 +1,13 @@
-//! Generic CPV1 application-envelope routing over canonical Core replay.
+//! Generic application-envelope routing over canonical Core replay.
 
 use crate::{
     application::{
         ApplicationActivationError, ApplicationBlockContext, ApplicationDescriptor,
-        ApplicationEnvelopeError, ApplicationEnvelopeV1, ApplicationTip,
+        ApplicationEnvelope, ApplicationEnvelopeError, ApplicationTip,
         ApplicationTransactionContext, CanonicalCompactTransactionSummary,
     },
-    carrier::{CPV1_PROTOCOL_ID, CoreRendezvous},
-    identity::{
-        CORE_RUNTIME_PROTOCOL_ID_V1, CORE_RUNTIME_PROTOCOL_VERSION_V1, CoreRuntimeId,
-        ValidatedCoreRuntimeParameters,
-    },
+    carrier::CoreRendezvous,
+    identity::{CoreRuntimeId, ValidatedCoreRuntimeParameters},
     replay::{
         CoreBlockContext, CoreCanonicalBlockInput, CoreIronwoodCheckpoint, CorePositionReplay,
         CorePositionedBlockContext, CoreReplay, CoreReplayConfiguration, CoreReplayError,
@@ -25,9 +22,6 @@ use std::fmt::Debug;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CoreRuntimeConfigurationError {
     ActivationMismatch,
-    UnsupportedRuntimeProtocol,
-    UnsupportedRuntimeVersion,
-    UnsupportedCarrierProtocol,
 }
 
 pub const CORE_RUNTIME_SNAPSHOT_FORMAT_VERSION: u32 = 1;
@@ -54,7 +48,7 @@ pub enum ApplicationMessageStatus {
     NoMessage,
     MalformedTransport(transport::Error),
     MalformedEnvelope(ApplicationEnvelopeError),
-    Message(ApplicationEnvelopeV1),
+    Message(ApplicationEnvelope),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -73,7 +67,7 @@ pub struct RuntimeTransactionInspection {
     message: ApplicationMessageStatus,
 }
 
-/// One CPV1 frame decrypted at an exact caller-supplied rendezvous.
+/// One carrier frame decrypted at an exact caller-supplied rendezvous.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RoutedFrame {
     pub action_index: u32,
@@ -229,15 +223,6 @@ impl CoreRuntime {
         parameters: ValidatedCoreRuntimeParameters,
         replay: CoreReplay,
     ) -> Result<Self, CoreRuntimeConfigurationError> {
-        if parameters.parameters().runtime_protocol_id != CORE_RUNTIME_PROTOCOL_ID_V1 {
-            return Err(CoreRuntimeConfigurationError::UnsupportedRuntimeProtocol);
-        }
-        if parameters.parameters().runtime_protocol_version != CORE_RUNTIME_PROTOCOL_VERSION_V1 {
-            return Err(CoreRuntimeConfigurationError::UnsupportedRuntimeVersion);
-        }
-        if parameters.parameters().carrier_protocol_id != CPV1_PROTOCOL_ID {
-            return Err(CoreRuntimeConfigurationError::UnsupportedCarrierProtocol);
-        }
         if parameters.parameters().runtime_activation_height
             != replay.configuration().activation_height()
         {
@@ -479,15 +464,6 @@ fn validate_runtime_configuration(
     parameters: &ValidatedCoreRuntimeParameters,
     configuration: CoreReplayConfiguration,
 ) -> Result<(), CoreRuntimeConfigurationError> {
-    if parameters.parameters().runtime_protocol_id != CORE_RUNTIME_PROTOCOL_ID_V1 {
-        return Err(CoreRuntimeConfigurationError::UnsupportedRuntimeProtocol);
-    }
-    if parameters.parameters().runtime_protocol_version != CORE_RUNTIME_PROTOCOL_VERSION_V1 {
-        return Err(CoreRuntimeConfigurationError::UnsupportedRuntimeVersion);
-    }
-    if parameters.parameters().carrier_protocol_id != CPV1_PROTOCOL_ID {
-        return Err(CoreRuntimeConfigurationError::UnsupportedCarrierProtocol);
-    }
     if parameters.parameters().runtime_activation_height != configuration.activation_height() {
         return Err(CoreRuntimeConfigurationError::ActivationMismatch);
     }
@@ -639,7 +615,7 @@ fn inspect_transaction_for(
             };
         }
     };
-    let message = match ApplicationEnvelopeV1::decode(&payload) {
+    let message = match ApplicationEnvelope::decode(&payload) {
         Ok(message) => ApplicationMessageStatus::Message(message),
         Err(error) => ApplicationMessageStatus::MalformedEnvelope(error),
     };
