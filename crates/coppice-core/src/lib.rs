@@ -14,4 +14,5 @@ pub mod publish;
 pub mod replay;
 pub mod ruleset;
 pub mod runtime;
+pub mod transaction;
 pub mod transport;

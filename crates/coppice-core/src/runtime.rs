@@ -218,6 +218,37 @@ pub struct CoreRuntime {
     replay: CoreReplay,
 }
 
+/// A Core change prepared against one exact base tip but not yet published.
+///
+/// Hosts persist [`Self::runtime`] inside their outer storage transaction. Once
+/// that transaction commits, [`CoreRuntime::publish_staged`] performs the
+/// infallible in-memory handoff under exclusive host ownership.
+#[derive(Clone)]
+pub struct StagedCoreChange<O> {
+    base_tip: CoreReplayTip,
+    runtime: CoreRuntime,
+    output: O,
+}
+
+impl<O> StagedCoreChange<O> {
+    pub fn base_tip(&self) -> CoreReplayTip {
+        self.base_tip
+    }
+
+    pub fn runtime(&self) -> &CoreRuntime {
+        &self.runtime
+    }
+
+    pub fn output(&self) -> &O {
+        &self.output
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StagedCorePublishError {
+    BaseTipChanged,
+}
+
 impl CoreRuntime {
     pub fn new(
         parameters: ValidatedCoreRuntimeParameters,
@@ -313,6 +344,25 @@ impl CoreRuntime {
         })
     }
 
+    /// Prepares one canonical block without publishing it to this runtime.
+    ///
+    /// This clones only bounded Core replay state, not application state. A
+    /// large-state host can apply all durable writes using the returned staged
+    /// runtime, commit its outer transaction, then call [`Self::publish_staged`].
+    pub fn stage_block(
+        &self,
+        block: &CoreCanonicalBlockInput,
+    ) -> Result<StagedCoreChange<RuntimeBlockContext>, CoreReplayError> {
+        let base_tip = self.tip();
+        let mut runtime = self.clone();
+        let output = runtime.apply_block(block)?;
+        Ok(StagedCoreChange {
+            base_tip,
+            runtime,
+            output,
+        })
+    }
+
     /// Inspects application transport without advancing canonical replay.
     /// Canonical transaction/effect validation remains the responsibility of
     /// [`CoreReplay::apply_block`].
@@ -325,6 +375,32 @@ impl CoreRuntime {
 
     pub fn rewind_to(&mut self, height: u32) -> Result<(), CoreRewindError> {
         self.replay.rewind_to(height)
+    }
+
+    /// Prepares a rewind without publishing it to this runtime.
+    pub fn stage_rewind(&self, height: u32) -> Result<StagedCoreChange<()>, CoreRewindError> {
+        let base_tip = self.tip();
+        let mut runtime = self.clone();
+        runtime.rewind_to(height)?;
+        Ok(StagedCoreChange {
+            base_tip,
+            runtime,
+            output: (),
+        })
+    }
+
+    /// Publishes a staged Core change after the host's durable transaction has
+    /// committed. The base-tip check detects accidental concurrent mutation;
+    /// well-formed hosts serialize access, making this handoff infallible.
+    pub fn publish_staged<O>(
+        &mut self,
+        staged: StagedCoreChange<O>,
+    ) -> Result<O, StagedCorePublishError> {
+        if self.tip() != staged.base_tip {
+            return Err(StagedCorePublishError::BaseTipChanged);
+        }
+        *self = staged.runtime;
+        Ok(staged.output)
     }
 
     pub fn save_snapshot(&self) -> Result<Vec<u8>, CoreRuntimeSnapshotError> {

@@ -879,4 +879,43 @@ mod tests {
             runtime.applications().1.tip.block_hash
         );
     }
+
+    #[test]
+    fn core_staging_publishes_only_after_explicit_handoff() {
+        let mut runtime = core(4);
+        let base_tip = runtime.tip();
+        let input = block(&runtime, ACTIVATION_HEIGHT, 10);
+        let staged = runtime.stage_block(&input).unwrap();
+
+        assert_eq!(runtime.tip(), base_tip);
+        assert_eq!(staged.base_tip(), base_tip);
+        assert_eq!(staged.runtime().tip().height, ACTIVATION_HEIGHT);
+        assert_eq!(staged.output().core().height(), ACTIVATION_HEIGHT);
+
+        let output = runtime.publish_staged(staged).unwrap();
+        assert_eq!(output.core().height(), ACTIVATION_HEIGHT);
+        assert_eq!(runtime.tip().height, ACTIVATION_HEIGHT);
+
+        let rewind = runtime.stage_rewind(ACTIVATION_HEIGHT - 1).unwrap();
+        assert_eq!(runtime.tip().height, ACTIVATION_HEIGHT);
+        runtime.publish_staged(rewind).unwrap();
+        assert_eq!(runtime.tip(), base_tip);
+    }
+
+    #[test]
+    fn stale_core_stage_cannot_overwrite_a_new_tip() {
+        let mut runtime = core(4);
+        let first = runtime
+            .stage_block(&block(&runtime, ACTIVATION_HEIGHT, 10))
+            .unwrap();
+        let stale = runtime
+            .stage_block(&block(&runtime, ACTIVATION_HEIGHT, 11))
+            .unwrap();
+        runtime.publish_staged(first).unwrap();
+        assert_eq!(
+            runtime.publish_staged(stale),
+            Err(crate::runtime::StagedCorePublishError::BaseTipChanged)
+        );
+        assert_eq!(runtime.tip().block_hash, [10; 32]);
+    }
 }

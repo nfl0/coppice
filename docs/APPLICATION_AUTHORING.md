@@ -105,6 +105,23 @@ from the configured activation checkpoint is required. Applications must make
 fresh replay, rewind followed by replay, and persisted restoration converge on
 the same root.
 
+Small applications implement `CoppiceApplication`; the compositor clones and
+publishes their staged state as one block. Large applications may instead
+implement `TransactionalCoppiceApplication<Tx>`. Their mutable state lives in a
+host-owned borrowed transaction, so it is never cloned and the transaction
+cannot escape its closure. `CoreRuntime::stage_block` and `stage_rewind` prepare
+Core state without publishing it. The host writes that staged Core snapshot,
+wallet scan state, application records, indexes, and rollback journal in the
+same durable transaction, commits, and then calls `publish_staged` while it
+still has exclusive runtime ownership.
+
+An ordinary deterministic block failure may roll back to a per-block
+savepoint, commit the preceding consistent prefix, and stop. Storage,
+integrity, transaction, or interruption failures roll back the complete outer
+batch. An unwind also rolls back and poisons the live runtime until controlled
+restart. Rollback retention is host-configured, must meet every application's
+minimum, and is pruned only after explicit finalization.
+
 ## Unsupported model
 
 Applications must not:
@@ -116,7 +133,7 @@ Applications must not:
   application-defined consensus;
 - use a remote registry or operator key as state authority.
 
-Unknown `(ApplicationId, version)` routes and malformed transport/envelopes do
+Unknown `ApplicationId` routes and malformed transport/envelopes do
 not become an unrelated application's payload. Missing or inconsistent
 canonical Zcash input is a fatal host-input boundary and must not be converted
 into an application no-op.
